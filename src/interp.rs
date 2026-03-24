@@ -460,7 +460,93 @@ class _SkyResponse:
         self.content_type = content_type
         self.headers = headers or {{}}
 
-# User code (AST-filtered)
+# Mock skytrade module so user's `from skytrade import Pyre` works in sub-interpreters
+import sys, types, os
+os.environ["PYRE_WORKER"] = "1"
+
+_mock_engine = types.ModuleType("skytrade.engine")
+_mock_engine.SkyApp = type("SkyApp", (), {{
+    "__init__": lambda self: None,
+    "get": lambda self, *a, **kw: (lambda f: f) if len(a) < 2 else None,
+    "post": lambda self, *a, **kw: (lambda f: f) if len(a) < 2 else None,
+    "put": lambda self, *a, **kw: (lambda f: f) if len(a) < 2 else None,
+    "delete": lambda self, *a, **kw: (lambda f: f) if len(a) < 2 else None,
+    "route": lambda self, *a, **kw: None,
+    "before_request": lambda self, f: f,
+    "after_request": lambda self, f: f,
+    "fallback": lambda self, f: f,
+    "websocket": lambda self, *a: (lambda f: f),
+    "static_dir": lambda self, *a: None,
+    "run": lambda self, **kw: None,
+}})
+_mock_engine.SkyRequest = _SkyRequest
+_mock_engine.SkyResponse = _SkyResponse
+_mock_engine.SkyWebSocket = type("SkyWebSocket", (), {{}})
+_mock_engine.SharedState = type("SharedState", (), {{}})
+_mock_engine.SkyStream = type("SkyStream", (), {{}})
+_mock_engine.get_gil_metrics = lambda: (0,0,0,0,0,0,0,0,0)
+
+_mock_skytrade = types.ModuleType("skytrade")
+_mock_skytrade.engine = _mock_engine
+_mock_skytrade.SkyApp = _mock_engine.SkyApp
+_mock_skytrade.SkyRequest = _SkyRequest
+_mock_skytrade.SkyResponse = _SkyResponse
+_mock_skytrade.SkyWebSocket = _mock_engine.SkyWebSocket
+_mock_skytrade.SharedState = _mock_engine.SharedState
+_mock_skytrade.SkyStream = _mock_engine.SkyStream
+_mock_skytrade.get_gil_metrics = _mock_engine.get_gil_metrics
+
+# Pyre wrapper (no-op in worker mode)
+class _MockPyre:
+    def __init__(self): pass
+    def get(self, path, handler=None, *, gil=False):
+        if handler: return handler
+        return lambda f: f
+    def post(self, path, handler=None, *, gil=False):
+        if handler: return handler
+        return lambda f: f
+    def put(self, path, handler=None, *, gil=False):
+        if handler: return handler
+        return lambda f: f
+    def delete(self, path, handler=None, *, gil=False):
+        if handler: return handler
+        return lambda f: f
+    def patch(self, path, handler=None, *, gil=False):
+        if handler: return handler
+        return lambda f: f
+    def route(self, *a, **kw):
+        return lambda f: f
+    def before_request(self, f=None):
+        return f if f else lambda fn: fn
+    def after_request(self, f=None):
+        return f if f else lambda fn: fn
+    def fallback(self, f=None):
+        return f if f else lambda fn: fn
+    def websocket(self, path, handler=None):
+        if handler: return handler
+        return lambda f: f
+    def static(self, *a): pass
+    def enable_logging(self): pass
+    def run(self, **kw): pass
+    @property
+    def state(self):
+        return {{}}
+    @property
+    def mcp(self):
+        return type("MCP", (), {{"tool": lambda s, *a, **kw: (lambda f: f), "resource": lambda s, *a, **kw: (lambda f: f), "prompt": lambda s, *a, **kw: (lambda f: f)}})()
+
+_mock_skytrade.Pyre = _MockPyre
+
+# App module mock
+_mock_app = types.ModuleType("skytrade.app")
+_mock_app.Pyre = _MockPyre
+
+sys.modules["skytrade"] = _mock_skytrade
+sys.modules["skytrade.engine"] = _mock_engine
+sys.modules["skytrade.app"] = _mock_app
+sys.modules["skytrade.mcp"] = types.ModuleType("skytrade.mcp")
+
+# Execute full user script (no AST filtering needed)
 {}
 "#,
             script
@@ -1032,12 +1118,12 @@ impl InterpreterPool {
         requires_gil: Vec<bool>,
         async_mode: bool,
     ) -> Result<Self, String> {
-        // Read and filter the script using AST (on the main interpreter)
+        // Set PYRE_WORKER=1 so user's app.run() becomes a no-op in sub-interpreters.
+        // This replaces the fragile AST-based script filtering.
+        std::env::set_var("PYRE_WORKER", "1");
+
         let raw_script = std::fs::read_to_string(script_path)
             .map_err(|e| format!("Failed to read script: {e}"))?;
-
-        let filtered_script = filter_script_ast(py, &raw_script)
-            .map_err(|e| format!("AST filter error: {e}"))?;
 
         // Collect all function names we need
         let mut all_func_names: Vec<String> = handler_names.to_vec();
@@ -1057,7 +1143,7 @@ impl InterpreterPool {
 
         for i in 0..n {
             let worker = SubInterpreterWorker::new(
-                &filtered_script,
+                &raw_script,
                 script_path,
                 &all_func_names,
             )

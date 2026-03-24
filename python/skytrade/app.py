@@ -6,8 +6,14 @@ import time
 import sys
 from typing import Callable
 
+import os
+
 from skytrade.engine import SkyApp as _SkyApp, SkyResponse
 from skytrade.mcp import MCPServer
+
+def _is_worker() -> bool:
+    """Check if we're running inside a sub-interpreter worker."""
+    return os.environ.get("PYRE_WORKER") == "1"
 
 
 class Pyre:
@@ -231,5 +237,10 @@ class Pyre:
 
             self._engine.route("POST", "/mcp", _mcp_handler, True)  # gil=True
             print(f"  MCP: {len(mcp._tools)} tools, {len(mcp._resources)} resources, {len(mcp._prompts)} prompts → POST /mcp")
+
+        # In worker mode (sub-interpreter), don't start the server —
+        # just loading the script to register routes is enough.
+        if _is_worker():
+            return
 
         self._engine.run(host=host, port=port, workers=workers, mode=mode)
