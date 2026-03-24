@@ -154,6 +154,18 @@ pub(crate) fn error_response(msg: &str) -> Response<Full<Bytes>> {
 }
 
 #[inline]
+pub(crate) fn payload_too_large_response() -> Response<Full<Bytes>> {
+    Response::builder()
+        .status(StatusCode::PAYLOAD_TOO_LARGE)
+        .header("content-type", "application/json")
+        .header("server", "Pyre/0.3.1")
+        .body(Full::new(Bytes::from_static(
+            b"{\"error\":\"payload too large\"}",
+        )))
+        .unwrap()
+}
+
+#[inline]
 pub(crate) fn not_found_response() -> Response<Full<Bytes>> {
     Response::builder()
         .status(StatusCode::NOT_FOUND)

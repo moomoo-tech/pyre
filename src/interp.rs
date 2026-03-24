@@ -244,6 +244,12 @@ struct SubInterpreterWorker {
     handlers: HashMap<String, *mut ffi::PyObject>,
     /// Globals dict of this sub-interpreter
     globals: *mut ffi::PyObject,
+    /// Cached: json.dumps function pointer (avoids per-request import)
+    json_dumps_func: *mut ffi::PyObject,
+    /// Cached: _SkyRequest class pointer
+    sky_request_cls: *mut ffi::PyObject,
+    /// Cached: _SkyResponse class pointer
+    sky_response_cls: *mut ffi::PyObject,
 }
 
 unsafe impl Send for SubInterpreterWorker {}
@@ -353,6 +359,29 @@ class _SkyResponse:
             }
         }
 
+        // Cache frequently-used Python objects to avoid per-request lookups
+        let req_cls_name = std::ffi::CString::new("_SkyRequest").unwrap();
+        let sky_request_cls = ffi::PyDict_GetItemString(globals.as_ptr(), req_cls_name.as_ptr());
+        if !sky_request_cls.is_null() {
+            ffi::Py_INCREF(sky_request_cls);
+        }
+
+        let resp_cls_name = std::ffi::CString::new("_SkyResponse").unwrap();
+        let sky_response_cls = ffi::PyDict_GetItemString(globals.as_ptr(), resp_cls_name.as_ptr());
+        if !sky_response_cls.is_null() {
+            ffi::Py_INCREF(sky_response_cls);
+        }
+
+        let json_mod = ffi::PyImport_ImportModule(c"json".as_ptr());
+        let json_dumps_func = if !json_mod.is_null() {
+            let f = ffi::PyObject_GetAttrString(json_mod, c"dumps".as_ptr());
+            ffi::Py_DECREF(json_mod);
+            f // owned ref from GetAttrString
+        } else {
+            ffi::PyErr_Clear();
+            std::ptr::null_mut()
+        };
+
         // Keep globals alive — transfer ownership to the struct
         let globals_ptr = globals.into_raw();
 
@@ -366,6 +395,9 @@ class _SkyResponse:
             tstate: saved,
             handlers,
             globals: globals_ptr,
+            json_dumps_func,
+            sky_request_cls,
+            sky_response_cls,
         })
     }
 
@@ -399,9 +431,8 @@ class _SkyResponse:
         ffi::PyTuple_SetItem(args.as_ptr(), 4, py_body.into_raw());
         ffi::PyTuple_SetItem(args.as_ptr(), 5, py_headers.into_raw());
 
-        // Get _SkyRequest class
-        let req_class_name = std::ffi::CString::new("_SkyRequest").unwrap();
-        let req_cls = ffi::PyDict_GetItemString(self.globals, req_class_name.as_ptr());
+        // Use cached _SkyRequest class
+        let req_cls = self.sky_request_cls;
         if req_cls.is_null() {
             return Err("_SkyRequest class not found".to_string());
         }
@@ -427,9 +458,8 @@ class _SkyResponse:
     ) -> Result<SubInterpResponse, String> {
         let ptr = result_obj.as_ptr();
 
-        // Check if it's a _SkyResponse
-        let resp_class_name = std::ffi::CString::new("_SkyResponse").unwrap();
-        let resp_cls = ffi::PyDict_GetItemString(self.globals, resp_class_name.as_ptr());
+        // Check if it's a _SkyResponse (using cached class pointer)
+        let resp_cls = self.sky_response_cls;
         if !resp_cls.is_null() && ffi::PyObject_IsInstance(ptr, resp_cls) == 1 {
             return self.parse_sky_response(result_obj);
         }
@@ -472,20 +502,18 @@ class _SkyResponse:
     }
 
     /// Serialize a Python dict/list to JSON string via json.dumps.
+    /// Serialize a Python dict/list to JSON string via cached json.dumps.
     unsafe fn json_dumps(&self, obj: PyObjRef) -> Result<String, String> {
-        let json_mod = PyObjRef::from_owned(ffi::PyImport_ImportModule(c"json".as_ptr()))
-            .ok_or("failed to import json")?;
-        let dumps = PyObjRef::from_owned(
-            ffi::PyObject_GetAttrString(json_mod.as_ptr(), c"dumps".as_ptr()),
-        )
-        .ok_or("json.dumps not found")?;
+        if self.json_dumps_func.is_null() {
+            return Err("json.dumps not cached".to_string());
+        }
 
         let args = PyObjRef::from_owned(ffi::PyTuple_New(1))
             .ok_or("failed to create tuple")?;
         ffi::PyTuple_SetItem(args.as_ptr(), 0, obj.into_raw());
 
         let json_str = PyObjRef::from_owned(
-            ffi::PyObject_Call(dumps.as_ptr(), args.as_ptr(), std::ptr::null_mut()),
+            ffi::PyObject_Call(self.json_dumps_func, args.as_ptr(), std::ptr::null_mut()),
         )
         .ok_or_else(|| {
             ffi::PyErr_Print();
@@ -542,8 +570,13 @@ class _SkyResponse:
                     let mut key: *mut ffi::PyObject = std::ptr::null_mut();
                     let mut val: *mut ffi::PyObject = std::ptr::null_mut();
                     while ffi::PyDict_Next(a.as_ptr(), &mut pos, &mut key, &mut val) != 0 {
-                        if let (Ok(k), Ok(v)) = (pyobj_to_string(key), pyobj_to_string(val)) {
-                            resp_headers.insert(k, v);
+                        // Coerce both key and value to str via PyObject_Str
+                        let str_key = PyObjRef::from_owned(ffi::PyObject_Str(key));
+                        let str_val = PyObjRef::from_owned(ffi::PyObject_Str(val));
+                        if let (Some(sk), Some(sv)) = (str_key, str_val) {
+                            if let (Ok(k), Ok(v)) = (pyobj_to_string(sk.as_ptr()), pyobj_to_string(sv.as_ptr())) {
+                                resp_headers.insert(k, v);
+                            }
                         }
                     }
                 }
@@ -786,7 +819,8 @@ fn worker_thread_loop(
     before_hook_names: &[String],
 ) {
     while let Ok(req) = rx.recv() {
-        let result = unsafe {
+        // Catch panics to prevent worker thread death
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
             // Acquire this sub-interpreter's GIL
             ffi::PyEval_RestoreThread(worker.tstate);
 
@@ -806,10 +840,15 @@ fn worker_thread_loop(
             worker.tstate = ffi::PyEval_SaveThread();
 
             result
+        }));
+
+        let response = match result {
+            Ok(r) => r,
+            Err(_) => Err("internal error: worker panic".to_string()),
         };
 
         // Send response back (ignore error if receiver dropped)
-        let _ = req.response_tx.send(result);
+        let _ = req.response_tx.send(response);
     }
 
     // Channel closed — clean up the sub-interpreter

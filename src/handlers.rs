@@ -9,12 +9,18 @@ use pyo3::prelude::*;
 use pyo3::types::PyString;
 
 use crate::interp;
-use crate::response::{build_response, error_response, extract_response_data, not_found_response};
+use crate::response::{
+    build_response, error_response, extract_response_data, not_found_response,
+    payload_too_large_response,
+};
 use crate::router::SharedRoutes;
 use crate::static_fs::try_static_file;
 use crate::types::{extract_headers, ResponseData, SkyRequest, SkyResponse};
 
 type SharedPool = Arc<interp::InterpreterPool>;
+
+/// Max request body size (10 MB)
+const MAX_BODY_SIZE: usize = 10 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
 // GIL mode handler
@@ -30,13 +36,12 @@ pub(crate) async fn handle_request(
     let query = uri.query().unwrap_or("").to_string();
     let headers = extract_headers(req.headers());
 
-    use http_body_util::BodyExt;
-    let body_bytes = req
-        .into_body()
-        .collect()
-        .await
-        .map(|c| c.to_bytes().to_vec())
-        .unwrap_or_default();
+    use http_body_util::{BodyExt, Limited};
+    let limited = Limited::new(req.into_body(), MAX_BODY_SIZE);
+    let body_bytes = match limited.collect().await {
+        Ok(c) => c.to_bytes().to_vec(),
+        Err(_) => return Ok(payload_too_large_response()),
+    };
 
     let (lookup, static_dirs, has_fallback) = {
         let table = routes.read();
@@ -154,13 +159,12 @@ pub(crate) async fn handle_request_subinterp(
     let query = uri.query().unwrap_or("").to_string();
     let headers = extract_headers(req.headers());
 
-    use http_body_util::BodyExt;
-    let body_bytes = req
-        .into_body()
-        .collect()
-        .await
-        .map(|c| c.to_bytes().to_vec())
-        .unwrap_or_default();
+    use http_body_util::{BodyExt, Limited};
+    let limited = Limited::new(req.into_body(), MAX_BODY_SIZE);
+    let body_bytes = match limited.collect().await {
+        Ok(c) => c.to_bytes().to_vec(),
+        Err(_) => return Ok(payload_too_large_response()),
+    };
 
     let lookup = pool.lookup(&method, &path);
 
@@ -179,7 +183,7 @@ pub(crate) async fn handle_request_subinterp(
     let is_gil_route = pool.requires_gil.get(handler_idx).copied().unwrap_or(false);
 
     if is_gil_route {
-        // Route to main interpreter (full C extension support)
+        // Route to main interpreter with full middleware chain
         let sky_req = SkyRequest {
             method,
             path,
@@ -192,10 +196,60 @@ pub(crate) async fn handle_request_subinterp(
         let result: Result<ResponseData, String> = Python::attach(|py| {
             let table = routes.read();
             let handler = table.handlers[handler_idx].clone_ref(py);
+            let before_hooks: Vec<Py<PyAny>> =
+                table.before_hooks.iter().map(|h| h.clone_ref(py)).collect();
+            let after_hooks: Vec<Py<PyAny>> =
+                table.after_hooks.iter().map(|h| h.clone_ref(py)).collect();
             drop(table);
 
-            match handler.call1(py, (sky_req,)) {
-                Ok(obj) => extract_response_data(py, obj.bind(py).clone()),
+            // before_request hooks
+            for hook in &before_hooks {
+                match hook.call1(py, (sky_req.clone(),)) {
+                    Ok(result) => {
+                        let bound = result.bind(py);
+                        if !bound.is_none() {
+                            return extract_response_data(py, bound.clone());
+                        }
+                    }
+                    Err(e) => return Err(format!("before_request hook error: {e}")),
+                }
+            }
+
+            match handler.call1(py, (sky_req.clone(),)) {
+                Ok(obj) => {
+                    let mut resp_data = extract_response_data(py, obj.bind(py).clone())?;
+
+                    // after_request hooks
+                    for hook in &after_hooks {
+                        let body_py: Py<PyAny> = match std::str::from_utf8(&resp_data.body) {
+                            Ok(s) => PyString::new(py, s).into_any().unbind(),
+                            Err(_) => pyo3::types::PyBytes::new(py, &resp_data.body)
+                                .into_any()
+                                .unbind(),
+                        };
+                        let current_resp = Py::new(
+                            py,
+                            SkyResponse {
+                                body: body_py,
+                                status_code: resp_data.status,
+                                content_type: Some(resp_data.content_type.clone()),
+                                headers: resp_data.headers.clone(),
+                            },
+                        )
+                        .map_err(|e| format!("failed to create SkyResponse: {e}"))?;
+                        match hook.call1(py, (sky_req.clone(), current_resp)) {
+                            Ok(result) => {
+                                let bound = result.bind(py);
+                                if !bound.is_none() {
+                                    resp_data = extract_response_data(py, bound.clone())?;
+                                }
+                            }
+                            Err(e) => return Err(format!("after_request hook error: {e}")),
+                        }
+                    }
+
+                    Ok(resp_data)
+                }
                 Err(e) => Err(format!("handler error: {e}")),
             }
         });
