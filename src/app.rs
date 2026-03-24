@@ -275,12 +275,13 @@ impl SkyApp {
             main_mod.getattr("__file__")?.extract::<String>()?
         };
 
-        let (handler_names, routers, before_hook_names, static_dirs, requires_gil) = {
+        let (handler_names, routers, before_hook_names, after_hook_names, static_dirs, requires_gil) = {
             let table = routes.read();
             (
                 table.handler_names.clone(),
                 table.routers.clone(),
                 table.before_hook_names.clone(),
+                table.after_hook_names.clone(),
                 table.static_dirs.clone(),
                 table.requires_gil.clone(),
             )
@@ -303,6 +304,7 @@ impl SkyApp {
                 &handler_names,
                 routers,
                 &before_hook_names,
+                &after_hook_names,
                 static_dirs,
                 requires_gil,
             )

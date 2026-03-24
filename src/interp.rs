@@ -548,6 +548,43 @@ class _SkyResponse:
         })
     }
 
+    /// Build a _SkyResponse Python object from a SubInterpResponse.
+    unsafe fn build_sky_response(&self, resp: &SubInterpResponse) -> Result<PyObjRef, String> {
+        if self.sky_response_cls.is_null() {
+            return Err("_SkyResponse class not available".to_string());
+        }
+
+        let py_body = py_str(&resp.body).ok_or("failed to create body str")?;
+        let py_status = PyObjRef::from_owned(ffi::PyLong_FromLong(resp.status as i64))
+            .ok_or("failed to create status")?;
+        let py_ct = match &resp.content_type {
+            Some(ct) => py_str(ct).ok_or("failed to create content_type")?,
+            None => PyObjRef::from_borrowed(ffi::Py_None()).unwrap(),
+        };
+        let py_headers = py_str_dict(&resp.headers).ok_or("failed to create headers dict")?;
+
+        // _SkyResponse(body, status_code, content_type, headers)
+        let args = PyObjRef::from_owned(ffi::PyTuple_New(0))
+            .ok_or("failed to create args")?;
+        let kwargs = PyObjRef::from_owned(ffi::PyDict_New())
+            .ok_or("failed to create kwargs")?;
+
+        ffi::PyDict_SetItemString(kwargs.as_ptr(), c"body".as_ptr(), py_body.as_ptr());
+        ffi::PyDict_SetItemString(kwargs.as_ptr(), c"status_code".as_ptr(), py_status.as_ptr());
+        ffi::PyDict_SetItemString(kwargs.as_ptr(), c"content_type".as_ptr(), py_ct.as_ptr());
+        ffi::PyDict_SetItemString(kwargs.as_ptr(), c"headers".as_ptr(), py_headers.as_ptr());
+
+        PyObjRef::from_owned(ffi::PyObject_Call(
+            self.sky_response_cls,
+            args.as_ptr(),
+            kwargs.as_ptr(),
+        ))
+        .ok_or_else(|| {
+            ffi::PyErr_Print();
+            "failed to create _SkyResponse".to_string()
+        })
+    }
+
     /// If obj is a coroutine (async def), execute it via persistent event loop.
     /// Otherwise return it unchanged.
     unsafe fn resolve_coroutine(&self, obj: PyObjRef) -> Result<PyObjRef, String> {
@@ -718,6 +755,7 @@ class _SkyResponse:
         &self,
         handler_name: &str,
         before_hook_names: &[String],
+        after_hook_names: &[String],
         method: &str,
         path: &str,
         params: &HashMap<String, String>,
@@ -771,17 +809,54 @@ class _SkyResponse:
         ));
         // call_args dropped → DECREF
 
-        match result_obj {
+        let mut response = match result_obj {
             Some(r) => {
-                // If handler returned a coroutine (async def), run via asyncio.run()
                 let resolved = self.resolve_coroutine(r)?;
-                self.parse_result(resolved)
+                self.parse_result(resolved)?
             }
             None => {
                 ffi::PyErr_Print();
-                Err("handler raised an exception".to_string())
+                return Err("handler raised an exception".to_string());
+            }
+        };
+
+        // Run after_request hooks: hook(request, response) → response
+        if !after_hook_names.is_empty() {
+            // Rebuild request object for hooks (reuse the original params)
+            let req_for_hooks =
+                self.build_request(method, path, params, query, body, headers)?;
+
+            for hook_name in after_hook_names {
+                if let Some(&hook_func) = self.handlers.get(hook_name) {
+                    // Build _SkyResponse from current response
+                    let resp_obj = self.build_sky_response(&response)?;
+
+                    let hook_args = PyObjRef::from_owned(ffi::PyTuple_New(2))
+                        .ok_or("failed to create hook args")?;
+                    ffi::Py_INCREF(req_for_hooks.as_ptr());
+                    ffi::PyTuple_SetItem(hook_args.as_ptr(), 0, req_for_hooks.as_ptr());
+                    ffi::PyTuple_SetItem(hook_args.as_ptr(), 1, resp_obj.into_raw());
+
+                    let hook_result = PyObjRef::from_owned(ffi::PyObject_Call(
+                        hook_func,
+                        hook_args.as_ptr(),
+                        std::ptr::null_mut(),
+                    ));
+
+                    match hook_result {
+                        Some(r) if r.as_ptr() != ffi::Py_None() => {
+                            response = self.parse_result(r)?;
+                        }
+                        None => {
+                            ffi::PyErr_Print();
+                        }
+                        _ => {}
+                    }
+                }
             }
         }
+
+        Ok(response)
     }
 }
 
@@ -812,6 +887,7 @@ impl InterpreterPool {
         handler_names: &[String],
         routers: HashMap<String, Router<usize>>,
         before_hook_names: &[String],
+        after_hook_names: &[String],
         static_dirs: Vec<(String, String)>,
         requires_gil: Vec<bool>,
     ) -> Result<Self, String> {
@@ -825,6 +901,7 @@ impl InterpreterPool {
         // Collect all function names we need
         let mut all_func_names: Vec<String> = handler_names.to_vec();
         all_func_names.extend(before_hook_names.iter().cloned());
+        all_func_names.extend(after_hook_names.iter().cloned());
         // Deduplicate
         all_func_names.sort();
         all_func_names.dedup();
@@ -852,11 +929,15 @@ impl InterpreterPool {
             let rx = work_rx.clone();
             let handler_names_clone = handler_names.to_vec();
             let before_hooks_clone = before_hook_names.to_vec();
+            let after_hooks_clone = after_hook_names.to_vec();
 
             let handle = std::thread::Builder::new()
                 .name(format!("pyre-worker-{i}"))
                 .spawn(move || {
-                    worker_thread_loop(worker, rx, &handler_names_clone, &before_hooks_clone);
+                    worker_thread_loop(
+                        worker, rx, &handler_names_clone,
+                        &before_hooks_clone, &after_hooks_clone,
+                    );
                 })
                 .map_err(|e| format!("failed to spawn worker thread {i}: {e}"))?;
 
@@ -915,6 +996,7 @@ fn worker_thread_loop(
     rx: crossbeam_channel::Receiver<WorkRequest>,
     handler_names: &[String],
     before_hook_names: &[String],
+    after_hook_names: &[String],
 ) {
     while let Ok(req) = rx.recv() {
         // Catch panics to prevent worker thread death
@@ -926,6 +1008,7 @@ fn worker_thread_loop(
             let result = worker.call_handler(
                 handler_name,
                 before_hook_names,
+                after_hook_names,
                 &req.method,
                 &req.path,
                 &req.params,
