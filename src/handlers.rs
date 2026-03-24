@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use http_body_util::Full;
-use hyper::body::Incoming;
+use http_body_util::{BodyExt, Full, StreamBody};
+use hyper::body::{Frame, Incoming};
 use hyper::{Request, Response, StatusCode};
 use pyo3::prelude::*;
 use pyo3::types::PyString;
@@ -15,12 +15,28 @@ use crate::response::{
 };
 use crate::router::SharedRoutes;
 use crate::static_fs::try_static_file;
+use crate::stream::SkyStream;
 use crate::types::{extract_headers, ResponseData, SkyRequest, SkyResponse};
 
 type SharedPool = Arc<interp::InterpreterPool>;
 
 /// Max request body size (10 MB)
 const MAX_BODY_SIZE: usize = 10 * 1024 * 1024;
+
+/// Result from handler: either a normal response or a stream.
+enum HandlerResult {
+    Response(Result<ResponseData, String>),
+    Stream(StreamInfo),
+}
+
+struct StreamInfo {
+    rx: tokio::sync::mpsc::UnboundedReceiver<Result<Bytes, std::convert::Infallible>>,
+    content_type: String,
+    status: u16,
+    headers: HashMap<String, String>,
+    /// Handle to the Python thread running the handler
+    _thread: std::thread::JoinHandle<()>,
+}
 
 /// If `obj` is a coroutine (from `async def`), execute it via a thread-local
 /// asyncio event loop. Otherwise return it unchanged.
@@ -48,21 +64,27 @@ fn resolve_coroutine(py: Python<'_>, obj: Py<PyAny>) -> Result<Py<PyAny>, String
 // GIL mode handler
 // ---------------------------------------------------------------------------
 
+pub(crate) type BoxBody = http_body_util::combinators::BoxBody<Bytes, hyper::Error>;
+
+pub(crate) fn full_body(resp: Response<Full<Bytes>>) -> Response<BoxBody> {
+    resp.map(|b| b.map_err(|_| unreachable!()).boxed())
+}
+
 pub(crate) async fn handle_request(
     req: Request<Incoming>,
     routes: SharedRoutes,
-) -> Result<Response<Full<Bytes>>, hyper::Error> {
+) -> Result<Response<BoxBody>, hyper::Error> {
     let method = req.method().to_string();
     let uri = req.uri().clone();
     let path = uri.path().to_string();
     let query = uri.query().unwrap_or("").to_string();
     let headers = extract_headers(req.headers());
 
-    use http_body_util::{BodyExt, Limited};
+    use http_body_util::Limited;
     let limited = Limited::new(req.into_body(), MAX_BODY_SIZE);
     let body_bytes = match limited.collect().await {
         Ok(c) => c.to_bytes().to_vec(),
-        Err(_) => return Ok(payload_too_large_response()),
+        Err(_) => return Ok(full_body(payload_too_large_response())),
     };
 
     let (lookup, static_dirs, has_fallback) = {
@@ -76,14 +98,14 @@ pub(crate) async fn handle_request(
 
     if lookup.is_none() {
         if let Some(resp) = try_static_file(&path, &static_dirs).await {
-            return Ok(resp);
+            return Ok(full_body(resp));
         }
     }
 
     let (handler_idx, params) = match lookup {
         Some(v) => v,
         None if has_fallback => (usize::MAX, HashMap::new()),
-        None => return Ok(not_found_response()),
+        None => return Ok(full_body(not_found_response())),
     };
 
     let sky_req = SkyRequest {
@@ -96,13 +118,16 @@ pub(crate) async fn handle_request(
     };
 
     // spawn_blocking: prevent GIL acquisition from starving Tokio workers
-    let result = tokio::task::spawn_blocking(move || {
+    let handler_result = tokio::task::spawn_blocking(move || {
         call_handler_with_hooks(routes, handler_idx, sky_req)
     })
     .await
-    .unwrap_or_else(|_| Err("handler thread panicked".to_string()));
+    .unwrap_or_else(|_| HandlerResult::Response(Err("handler thread panicked".to_string())));
 
-    build_response(result)
+    match handler_result {
+        HandlerResult::Response(result) => Ok(full_body(build_response(result)?)),
+        HandlerResult::Stream(info) => Ok(build_stream_response(info)),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -113,7 +138,7 @@ fn call_handler_with_hooks(
     routes: SharedRoutes,
     handler_idx: usize,
     sky_req: SkyRequest,
-) -> Result<ResponseData, String> {
+) -> HandlerResult {
     Python::attach(|py| {
         let table = routes.read();
         let before_hooks: Vec<Py<PyAny>> =
@@ -134,10 +159,16 @@ fn call_handler_with_hooks(
                 Ok(result) => {
                     let bound = result.bind(py);
                     if !bound.is_none() {
-                        return extract_response_data(py, bound.clone());
+                        return HandlerResult::Response(
+                            extract_response_data(py, bound.clone()),
+                        );
                     }
                 }
-                Err(e) => return Err(format!("before_request hook error: {e}")),
+                Err(e) => {
+                    return HandlerResult::Response(Err(format!(
+                        "before_request hook error: {e}"
+                    )))
+                }
             }
         }
 
@@ -145,43 +176,108 @@ fn call_handler_with_hooks(
         match handler.call1(py, (sky_req.clone(),)) {
             Ok(obj) => {
                 // If handler returned a coroutine (async def), run it via asyncio
-                let obj = resolve_coroutine(py, obj)?;
-                let mut resp_data = extract_response_data(py, obj.bind(py).clone())?;
+                let obj = match resolve_coroutine(py, obj) {
+                    Ok(o) => o,
+                    Err(e) => return HandlerResult::Response(Err(e)),
+                };
 
-                // after_request hooks
-                for hook in &after_hooks {
-                    let body_py: Py<PyAny> = match std::str::from_utf8(&resp_data.body) {
-                        Ok(s) => PyString::new(py, s).into_any().unbind(),
-                        Err(_) => pyo3::types::PyBytes::new(py, &resp_data.body)
-                            .into_any()
-                            .unbind(),
+                // Check if handler returned a SkyStream (SSE)
+                let type_name = obj
+                    .bind(py)
+                    .get_type()
+                    .name()
+                    .map(|n| n.to_string())
+                    .unwrap_or_default();
+                if type_name == "SkyStream" {
+                    // Downcast to SkyStream and wire up the channel
+                    let bound = obj.bind(py);
+                    let stream_ref = match bound.downcast::<SkyStream>() {
+                        Ok(s) => s.get(),
+                        Err(e) => return HandlerResult::Response(Err(e.to_string())),
                     };
-                    let current_resp = Py::new(
-                        py,
-                        SkyResponse {
-                            body: body_py,
-                            status_code: resp_data.status,
-                            content_type: Some(resp_data.content_type.clone()),
-                            headers: resp_data.headers.clone(),
-                        },
-                    )
-                    .map_err(|e| format!("failed to create SkyResponse: {e}"))?;
-                    match hook.call1(py, (sky_req.clone(), current_resp)) {
-                        Ok(result) => {
-                            let bound = result.bind(py);
-                            if !bound.is_none() {
-                                resp_data = extract_response_data(py, bound.clone())?;
-                            }
+                    let rx = match stream_ref.take_rx() {
+                        Some(r) => r,
+                        None => {
+                            return HandlerResult::Response(Err(
+                                "SkyStream already consumed".to_string(),
+                            ))
                         }
-                        Err(e) => return Err(format!("after_request hook error: {e}")),
-                    }
+                    };
+                    let content_type = stream_ref.content_type.clone();
+                    let status = stream_ref.status_code;
+                    let hdrs = stream_ref.headers.clone();
+
+                    return HandlerResult::Stream(StreamInfo {
+                        rx,
+                        content_type,
+                        status,
+                        headers: hdrs,
+                        _thread: std::thread::spawn(|| {}),
+                    });
                 }
 
-                Ok(resp_data)
+                let resp = (|| -> Result<ResponseData, String> {
+                    let mut resp_data = extract_response_data(py, obj.bind(py).clone())?;
+
+                    // after_request hooks
+                    for hook in &after_hooks {
+                        let body_py: Py<PyAny> = match std::str::from_utf8(&resp_data.body) {
+                            Ok(s) => PyString::new(py, s).into_any().unbind(),
+                            Err(_) => pyo3::types::PyBytes::new(py, &resp_data.body)
+                                .into_any()
+                                .unbind(),
+                        };
+                        let current_resp = Py::new(
+                            py,
+                            SkyResponse {
+                                body: body_py,
+                                status_code: resp_data.status,
+                                content_type: Some(resp_data.content_type.clone()),
+                                headers: resp_data.headers.clone(),
+                            },
+                        )
+                        .map_err(|e| format!("failed to create SkyResponse: {e}"))?;
+                        match hook.call1(py, (sky_req.clone(), current_resp)) {
+                            Ok(result) => {
+                                let bound = result.bind(py);
+                                if !bound.is_none() {
+                                    resp_data = extract_response_data(py, bound.clone())?;
+                                }
+                            }
+                            Err(e) => return Err(format!("after_request hook error: {e}")),
+                        }
+                    }
+
+                    Ok(resp_data)
+                })();
+                HandlerResult::Response(resp)
             }
-            Err(e) => Err(format!("handler error: {e}")),
+            Err(e) => HandlerResult::Response(Err(format!("handler error: {e}"))),
         }
     })
+}
+
+/// Build a streaming SSE response from a channel receiver.
+fn build_stream_response(info: StreamInfo) -> Response<BoxBody> {
+    use tokio_stream::StreamExt;
+
+    let stream = tokio_stream::wrappers::UnboundedReceiverStream::new(info.rx)
+        .map(|result| result.map(Frame::data));
+
+    let body = StreamBody::new(stream);
+    let boxed: BoxBody = BoxBody::new(body.map_err(|_| unreachable!()));
+
+    let status = StatusCode::from_u16(info.status).unwrap_or(StatusCode::OK);
+    let mut builder = Response::builder()
+        .status(status)
+        .header("content-type", &info.content_type)
+        .header("cache-control", "no-cache")
+        .header("connection", "keep-alive")
+        .header("server", "Pyre/0.5.0");
+    for (k, v) in &info.headers {
+        builder = builder.header(k.as_str(), v.as_str());
+    }
+    builder.body(boxed).unwrap()
 }
 
 // ---------------------------------------------------------------------------
@@ -192,38 +288,37 @@ pub(crate) async fn handle_request_subinterp(
     req: Request<Incoming>,
     pool: SharedPool,
     routes: SharedRoutes,
-) -> Result<Response<Full<Bytes>>, hyper::Error> {
+) -> Result<Response<BoxBody>, hyper::Error> {
     let method = req.method().to_string();
     let uri = req.uri().clone();
     let path = uri.path().to_string();
     let query = uri.query().unwrap_or("").to_string();
     let headers = extract_headers(req.headers());
 
-    use http_body_util::{BodyExt, Limited};
+    use http_body_util::Limited;
     let limited = Limited::new(req.into_body(), MAX_BODY_SIZE);
     let body_bytes = match limited.collect().await {
         Ok(c) => c.to_bytes().to_vec(),
-        Err(_) => return Ok(payload_too_large_response()),
+        Err(_) => return Ok(full_body(payload_too_large_response())),
     };
 
     let lookup = pool.lookup(&method, &path);
 
     if lookup.is_none() {
         if let Some(resp) = try_static_file(&path, &pool.static_dirs).await {
-            return Ok(resp);
+            return Ok(full_body(resp));
         }
     }
 
     let (handler_idx, params) = match lookup {
         Some(v) => v,
-        None => return Ok(not_found_response()),
+        None => return Ok(full_body(not_found_response())),
     };
 
     // ── Hybrid dispatch: GIL routes use main interpreter ──
     let is_gil_route = pool.requires_gil.get(handler_idx).copied().unwrap_or(false);
 
     if is_gil_route {
-        // GIL route: spawn_blocking to avoid starving Tokio workers
         let sky_req = SkyRequest {
             method,
             path,
@@ -233,13 +328,16 @@ pub(crate) async fn handle_request_subinterp(
             body_bytes,
         };
 
-        let result = tokio::task::spawn_blocking(move || {
+        let handler_result = tokio::task::spawn_blocking(move || {
             call_handler_with_hooks(routes, handler_idx, sky_req)
         })
         .await
-        .unwrap_or_else(|_| Err("handler thread panicked".to_string()));
+        .unwrap_or_else(|_| HandlerResult::Response(Err("handler thread panicked".to_string())));
 
-        return build_response(result);
+        return match handler_result {
+            HandlerResult::Response(result) => Ok(full_body(build_response(result)?)),
+            HandlerResult::Stream(info) => Ok(build_stream_response(info)),
+        };
     }
 
     // ── Default: sub-interpreter (fast path) ──
@@ -255,7 +353,7 @@ pub(crate) async fn handle_request_subinterp(
         headers,
         response_tx,
     }) {
-        return Ok(overloaded_response(&e));
+        return Ok(full_body(overloaded_response(&e)));
     }
 
     let result = match response_rx.await {
@@ -276,12 +374,14 @@ pub(crate) async fn handle_request_subinterp(
             let mut builder = Response::builder()
                 .status(status)
                 .header("content-type", &ct)
-                .header("server", "Pyre/0.3.1-subinterp");
+                .header("server", "Pyre/0.5.0-subinterp");
             for (k, v) in &resp.headers {
                 builder = builder.header(k.as_str(), v.as_str());
             }
-            Ok(builder.body(Full::new(Bytes::from(resp.body))).unwrap())
+            Ok(full_body(
+                builder.body(Full::new(Bytes::from(resp.body))).unwrap(),
+            ))
         }
-        Err(e) => Ok(error_response(&e)),
+        Err(e) => Ok(full_body(error_response(&e))),
     }
 }

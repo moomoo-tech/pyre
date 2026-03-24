@@ -25,3 +25,4 @@ tungstenite = "0.26"
 # base64 and sha1 provided transitively by tungstenite
 futures-util = "0.3"
 dashmap = "6"
+tokio-stream = "0.1"

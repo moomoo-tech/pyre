@@ -84,7 +84,7 @@ fn ws_upgrade_response(key: &[u8]) -> Response<Full<Bytes>> {
 pub(crate) async fn handle_websocket(
     mut req: Request<Incoming>,
     routes: SharedRoutes,
-) -> Result<Response<Full<Bytes>>, hyper::Error> {
+) -> Result<Response<crate::handlers::BoxBody>, hyper::Error> {
     let path = req.uri().path().to_string();
 
     // Look up WebSocket handler (need GIL to clone Py<PyAny>)
@@ -96,10 +96,12 @@ pub(crate) async fn handle_websocket(
     let handler = match handler {
         Some(h) => h,
         None => {
-            return Ok(Response::builder()
-                .status(StatusCode::NOT_FOUND)
-                .body(Full::new(Bytes::from_static(b"no websocket handler")))
-                .unwrap());
+            return Ok(crate::handlers::full_body(
+                Response::builder()
+                    .status(StatusCode::NOT_FOUND)
+                    .body(Full::new(Bytes::from_static(b"no websocket handler")))
+                    .unwrap(),
+            ));
         }
     };
 
@@ -107,10 +109,12 @@ pub(crate) async fn handle_websocket(
     let key = match req.headers().get("sec-websocket-key") {
         Some(k) => k.as_bytes().to_vec(),
         None => {
-            return Ok(Response::builder()
-                .status(StatusCode::BAD_REQUEST)
-                .body(Full::new(Bytes::from_static(b"missing sec-websocket-key")))
-                .unwrap());
+            return Ok(crate::handlers::full_body(
+                Response::builder()
+                    .status(StatusCode::BAD_REQUEST)
+                    .body(Full::new(Bytes::from_static(b"missing sec-websocket-key")))
+                    .unwrap(),
+            ));
         }
     };
 
@@ -137,7 +141,7 @@ pub(crate) async fn handle_websocket(
     });
 
     // Return the 101 response
-    Ok(ws_upgrade_response(&key))
+    Ok(crate::handlers::full_body(ws_upgrade_response(&key)))
 }
 
 /// Run a WebSocket connection — bridges async Tokio with sync Python handler.
