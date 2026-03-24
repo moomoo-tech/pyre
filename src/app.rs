@@ -137,10 +137,15 @@ impl SkyApp {
         workers: Option<usize>,
         mode: Option<&str>,
     ) -> PyResult<()> {
-        // Start GIL watchdog (once)
+        // Start GIL watchdog (once, opt-in via PYRE_METRICS=1)
         use std::sync::Once;
         static WATCHDOG_INIT: Once = Once::new();
-        WATCHDOG_INIT.call_once(crate::monitor::spawn_gil_watchdog);
+        WATCHDOG_INIT.call_once(|| {
+            if std::env::var("PYRE_METRICS").unwrap_or_default() == "1" {
+                crate::monitor::spawn_gil_watchdog();
+                println!("  GIL watchdog: enabled (PYRE_METRICS=1)");
+            }
+        });
 
         let host = host.unwrap_or("127.0.0.1");
         let port = port.unwrap_or(8000);
