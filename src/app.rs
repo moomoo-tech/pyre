@@ -182,8 +182,8 @@ impl SkyApp {
             })
         };
 
-        if mode == "subinterp" {
-            self.run_subinterp(py, addr, workers, num_cpus, frozen)
+        if mode == "subinterp" || mode == "async" {
+            self.run_subinterp(py, addr, workers, num_cpus, frozen, mode == "async")
         } else {
             self.run_gil(py, addr, workers, num_cpus, frozen)
         }
@@ -296,6 +296,7 @@ impl SkyApp {
         workers: usize,
         num_cpus: usize,
         routes: FrozenRoutes,
+        async_mode: bool,
     ) -> PyResult<()> {
         let script_path = if let Some(ref p) = self.script_path {
             p.clone()
@@ -316,7 +317,8 @@ impl SkyApp {
         let gil_count = requires_gil.iter().filter(|&&g| g).count();
         let subinterp_count = requires_gil.len() - gil_count;
 
-        println!("\n  Pyre v0.5.0 [hybrid mode]");
+        let mode_label = if async_mode { "async" } else { "hybrid" };
+        println!("\n  Pyre v0.5.0 [{mode_label} mode]");
         println!("  Listening on http://{addr}");
         println!("  Sub-interpreters: {workers} (CPUs: {num_cpus})");
         println!("  Routes: {subinterp_count} sub-interp + {gil_count} GIL");
@@ -333,6 +335,7 @@ impl SkyApp {
                 &after_hook_names,
                 static_dirs,
                 requires_gil,
+                async_mode,
             )
             .map_err(|e| {
                 pyo3::exceptions::PyRuntimeError::new_err(format!(

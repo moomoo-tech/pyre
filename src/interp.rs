@@ -5,11 +5,151 @@
 //! Also implements a channel-based worker pool for true load balancing.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use matchit::Router;
 use pyo3::ffi;
 use pyo3::prelude::*;
+
+// ---------------------------------------------------------------------------
+// Phase 7.2: Global worker state for async C-FFI bridge
+// ---------------------------------------------------------------------------
+
+/// Per-worker state accessible from C-FFI functions (no closure environment).
+struct WorkerState {
+    rx: crossbeam_channel::Receiver<WorkRequest>,
+    response_map: Mutex<HashMap<u64, tokio::sync::oneshot::Sender<Result<SubInterpResponse, String>>>>,
+    next_req_id: AtomicU64,
+}
+
+/// Global registry of worker states, indexed by worker_id.
+/// Uses Vec for O(1) access (no lock on hot path after init).
+static WORKER_STATES: OnceLock<Vec<Arc<WorkerState>>> = OnceLock::new();
+
+fn get_worker_state(worker_id: usize) -> Option<Arc<WorkerState>> {
+    WORKER_STATES.get().and_then(|v| v.get(worker_id).cloned())
+}
+
+// ---------------------------------------------------------------------------
+// C-FFI bridge functions for async engine
+// ---------------------------------------------------------------------------
+
+/// pyre_recv(worker_id) → (req_id, handler_idx, method, path, query, body) or None
+/// RELEASES GIL during blocking recv — lets asyncio loop run freely.
+unsafe extern "C" fn pyre_recv_cfunc(
+    _self: *mut ffi::PyObject,
+    args: *mut ffi::PyObject,
+) -> *mut ffi::PyObject {
+    let mut worker_id: isize = 0;
+    if ffi::PyArg_ParseTuple(args, c"n".as_ptr(), &mut worker_id) == 0 {
+        return std::ptr::null_mut();
+    }
+
+    let state = match get_worker_state(worker_id as usize) {
+        Some(s) => s,
+        None => {
+            ffi::Py_INCREF(ffi::Py_None());
+            return ffi::Py_None();
+        }
+    };
+
+    // Release GIL while blocking on channel recv
+    let saved = ffi::PyEval_SaveThread();
+    let req_opt = state.rx.recv().ok();
+    ffi::PyEval_RestoreThread(saved);
+
+    match req_opt {
+        Some(req) => {
+            let req_id = state.next_req_id.fetch_add(1, Ordering::Relaxed);
+            state.response_map.lock().unwrap().insert(req_id, req.response_tx);
+
+            let tuple = ffi::PyTuple_New(6);
+            ffi::PyTuple_SetItem(tuple, 0, ffi::PyLong_FromUnsignedLongLong(req_id));
+            ffi::PyTuple_SetItem(tuple, 1, ffi::PyLong_FromUnsignedLongLong(req.handler_idx as u64));
+            ffi::PyTuple_SetItem(
+                tuple, 2,
+                ffi::PyUnicode_FromStringAndSize(req.method.as_ptr() as *const _, req.method.len() as isize),
+            );
+            ffi::PyTuple_SetItem(
+                tuple, 3,
+                ffi::PyUnicode_FromStringAndSize(req.path.as_ptr() as *const _, req.path.len() as isize),
+            );
+            ffi::PyTuple_SetItem(
+                tuple, 4,
+                ffi::PyUnicode_FromStringAndSize(req.query.as_ptr() as *const _, req.query.len() as isize),
+            );
+            ffi::PyTuple_SetItem(
+                tuple, 5,
+                ffi::PyBytes_FromStringAndSize(req.body.as_ptr() as *const _, req.body.len() as isize),
+            );
+            tuple
+        }
+        None => {
+            ffi::Py_INCREF(ffi::Py_None());
+            ffi::Py_None()
+        }
+    }
+}
+
+/// pyre_send(worker_id, req_id, status, content_type, body_bytes)
+/// Wakes up Tokio via oneshot channel.
+unsafe extern "C" fn pyre_send_cfunc(
+    _self: *mut ffi::PyObject,
+    args: *mut ffi::PyObject,
+) -> *mut ffi::PyObject {
+    let mut worker_id: isize = 0;
+    let mut req_id: u64 = 0;
+    let mut status: u16 = 0;
+    let mut ctype_str: *const std::os::raw::c_char = std::ptr::null();
+    let mut body_ptr: *const std::os::raw::c_char = std::ptr::null();
+    let mut body_len: isize = 0;
+
+    // n=isize, K=u64, H=u16, s=str, y#=bytes+len
+    if ffi::PyArg_ParseTuple(
+        args,
+        c"nKHsy#".as_ptr(),
+        &mut worker_id,
+        &mut req_id,
+        &mut status,
+        &mut ctype_str,
+        &mut body_ptr,
+        &mut body_len,
+    ) == 0
+    {
+        ffi::PyErr_Print();
+        return std::ptr::null_mut();
+    }
+
+    let ctype = if !ctype_str.is_null() {
+        Some(std::ffi::CStr::from_ptr(ctype_str).to_string_lossy().into_owned())
+    } else {
+        None
+    };
+
+    let body = if !body_ptr.is_null() && body_len > 0 {
+        let slice = std::slice::from_raw_parts(body_ptr as *const u8, body_len as usize);
+        String::from_utf8_lossy(slice).into_owned()
+    } else {
+        String::new()
+    };
+
+    if let Some(state) = get_worker_state(worker_id as usize) {
+        if let Some(tx) = state.response_map.lock().unwrap().remove(&req_id) {
+            let resp = SubInterpResponse {
+                body,
+                status,
+                content_type: ctype,
+                headers: HashMap::new(),
+                is_json: false,
+            };
+            let _ = tx.send(Ok(resp));
+        }
+    }
+
+    ffi::Py_INCREF(ffi::Py_None());
+    ffi::Py_None()
+}
 
 // ---------------------------------------------------------------------------
 // PyObjRef — RAII wrapper for *mut ffi::PyObject
@@ -890,6 +1030,7 @@ impl InterpreterPool {
         after_hook_names: &[String],
         static_dirs: Vec<(String, String)>,
         requires_gil: Vec<bool>,
+        async_mode: bool,
     ) -> Result<Self, String> {
         // Read and filter the script using AST (on the main interpreter)
         let raw_script = std::fs::read_to_string(script_path)
@@ -924,6 +1065,22 @@ impl InterpreterPool {
             workers.push(worker);
         }
 
+        if async_mode {
+            // Async mode: initialize global worker states for C-FFI bridge
+            let mut states = Vec::with_capacity(n);
+            for _ in 0..n {
+                states.push(Arc::new(WorkerState {
+                    rx: work_rx.clone(),
+                    response_map: Mutex::new(HashMap::new()),
+                    next_req_id: AtomicU64::new(0),
+                }));
+            }
+            // Each worker gets its own dedicated receiver
+            // Actually they share the same work_rx (multi-consumer)
+            // but each has its own response_map
+            let _ = WORKER_STATES.set(states);
+        }
+
         // Spawn OS threads — each owns a SubInterpreterWorker
         for (i, worker) in workers.into_iter().enumerate() {
             let rx = work_rx.clone();
@@ -931,15 +1088,26 @@ impl InterpreterPool {
             let before_hooks_clone = before_hook_names.to_vec();
             let after_hooks_clone = after_hook_names.to_vec();
 
-            let handle = std::thread::Builder::new()
-                .name(format!("pyre-worker-{i}"))
-                .spawn(move || {
-                    worker_thread_loop(
-                        worker, rx, &handler_names_clone,
-                        &before_hooks_clone, &after_hooks_clone,
-                    );
-                })
-                .map_err(|e| format!("failed to spawn worker thread {i}: {e}"))?;
+            let handle = if async_mode {
+                std::thread::Builder::new()
+                    .name(format!("pyre-async-worker-{i}"))
+                    .spawn(move || {
+                        worker_thread_loop_async(
+                            worker, &handler_names_clone, i,
+                        );
+                    })
+                    .map_err(|e| format!("failed to spawn async worker {i}: {e}"))?
+            } else {
+                std::thread::Builder::new()
+                    .name(format!("pyre-worker-{i}"))
+                    .spawn(move || {
+                        worker_thread_loop(
+                            worker, rx, &handler_names_clone,
+                            &before_hooks_clone, &after_hooks_clone,
+                        );
+                    })
+                    .map_err(|e| format!("failed to spawn worker thread {i}: {e}"))?
+            };
 
             threads.push(handle);
         }
@@ -1039,5 +1207,129 @@ fn worker_thread_loop(
             ffi::Py_EndInterpreter(ffi::PyThreadState_Get());
             worker.tstate = std::ptr::null_mut();
         }
+    }
+}
+
+/// Async worker: Python asyncio event loop drives execution.
+/// Fetcher thread pulls requests from channel (releasing GIL during wait),
+/// asyncio loop runs handlers as concurrent tasks.
+fn worker_thread_loop_async(
+    mut worker: SubInterpreterWorker,
+    handler_names: &[String],
+    worker_idx: usize,
+) {
+    let handlers_array = handler_names
+        .iter()
+        .map(|n| format!("'{}'", n))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let engine_script = format!(
+        r#"
+import asyncio
+import threading
+
+WORKER_ID = {worker_idx}
+HANDLER_NAMES = [{handlers_array}]
+
+async def _process_request(req_id, handler_idx, method, path, query, body_bytes):
+    try:
+        handler_name = HANDLER_NAMES[int(handler_idx)]
+        handler = globals().get(handler_name)
+        if handler is None:
+            _pyre_send(WORKER_ID, req_id, 500, "text/plain", b"handler not found")
+            return
+
+        req = _SkyRequest(method, path, {{}}, query, body_bytes, {{}})
+        res = handler(req)
+
+        if asyncio.iscoroutine(res):
+            res = await res
+
+        if isinstance(res, _SkyResponse):
+            body = str(res.body).encode('utf-8') if not isinstance(res.body, bytes) else res.body
+            _pyre_send(WORKER_ID, req_id, res.status_code, res.content_type or "text/plain", body)
+        elif isinstance(res, dict):
+            import json
+            _pyre_send(WORKER_ID, req_id, 200, "application/json", json.dumps(res).encode('utf-8'))
+        elif isinstance(res, bytes):
+            _pyre_send(WORKER_ID, req_id, 200, "application/octet-stream", res)
+        else:
+            body = str(res).encode('utf-8')
+            ct = "application/json" if body.startswith(b'{{') or body.startswith(b'[') else "text/plain"
+            _pyre_send(WORKER_ID, req_id, 200, ct, body)
+    except Exception as e:
+        _pyre_send(WORKER_ID, req_id, 500, "text/plain", str(e).encode('utf-8'))
+
+def _fetcher_thread(loop):
+    while True:
+        req_data = _pyre_recv(WORKER_ID)
+        if req_data is None:
+            break
+        req_id, handler_idx, method, path, query, body_bytes = req_data
+        # Capture values to avoid late binding in lambda
+        asyncio.run_coroutine_threadsafe(
+            _process_request(req_id, handler_idx, method, path, query, body_bytes),
+            loop,
+        )
+
+async def _pyre_engine():
+    loop = asyncio.get_running_loop()
+    t = threading.Thread(target=_fetcher_thread, args=(loop,), daemon=False)
+    t.start()
+    # Keep event loop alive until fetcher exits
+    await asyncio.to_thread(t.join)
+
+asyncio.run(_pyre_engine())
+"#
+    );
+
+    unsafe {
+        ffi::PyEval_RestoreThread(worker.tstate);
+
+        // Register C-FFI functions in sub-interpreter globals
+        // Using thread-local statics to avoid cross-interpreter issues
+        let recv_def = Box::into_raw(Box::new(ffi::PyMethodDef {
+            ml_name: c"_pyre_recv".as_ptr(),
+            ml_meth: ffi::PyMethodDefPointer {
+                PyCFunctionWithKeywords: std::mem::transmute(pyre_recv_cfunc as *const ()),
+            },
+            ml_flags: ffi::METH_VARARGS,
+            ml_doc: std::ptr::null(),
+        }));
+        let send_def = Box::into_raw(Box::new(ffi::PyMethodDef {
+            ml_name: c"_pyre_send".as_ptr(),
+            ml_meth: ffi::PyMethodDefPointer {
+                PyCFunctionWithKeywords: std::mem::transmute(pyre_send_cfunc as *const ()),
+            },
+            ml_flags: ffi::METH_VARARGS,
+            ml_doc: std::ptr::null(),
+        }));
+
+        let recv_func = ffi::PyCFunction_NewEx(recv_def, std::ptr::null_mut(), std::ptr::null_mut());
+        let send_func = ffi::PyCFunction_NewEx(send_def, std::ptr::null_mut(), std::ptr::null_mut());
+
+        ffi::PyDict_SetItemString(worker.globals, c"_pyre_recv".as_ptr(), recv_func);
+        ffi::PyDict_SetItemString(worker.globals, c"_pyre_send".as_ptr(), send_func);
+        ffi::Py_DECREF(recv_func);
+        ffi::Py_DECREF(send_func);
+
+        // Run the async engine — this blocks until the channel is closed
+        let code = std::ffi::CString::new(engine_script).unwrap();
+        let result = ffi::PyRun_String(
+            code.as_ptr(),
+            ffi::Py_file_input.try_into().unwrap(),
+            worker.globals,
+            worker.globals,
+        );
+        if result.is_null() {
+            ffi::PyErr_Print();
+        } else {
+            ffi::Py_DECREF(result);
+        }
+
+        // Cleanup
+        ffi::Py_EndInterpreter(ffi::PyThreadState_Get());
+        worker.tstate = std::ptr::null_mut();
     }
 }
