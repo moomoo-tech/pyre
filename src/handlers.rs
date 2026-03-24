@@ -147,7 +147,15 @@ fn call_handler_with_hooks(
     handler_idx: usize,
     sky_req: SkyRequest,
 ) -> HandlerResult {
+    use std::sync::atomic::Ordering::Relaxed;
+
+    // Track GIL queue: +1 before acquiring, -1 after acquiring
+    crate::monitor::GIL_QUEUE_LENGTH.fetch_add(1, Relaxed);
+
     Python::attach(|py| {
+        crate::monitor::GIL_QUEUE_LENGTH.fetch_sub(1, Relaxed);
+        let hold_start = std::time::Instant::now();
+
         // FrozenRoutes: no lock needed — direct Arc<RouteTable> access
         let before_hooks: Vec<Py<PyAny>> =
             routes.before_hooks.iter().map(|h| h.clone_ref(py)).collect();
@@ -180,7 +188,7 @@ fn call_handler_with_hooks(
         }
 
         // Main handler
-        match handler.call1(py, (sky_req.clone(),)) {
+        let handler_result = match handler.call1(py, (sky_req.clone(),)) {
             Ok(obj) => {
                 // If handler returned a coroutine (async def), run it via asyncio
                 let obj = match resolve_coroutine(py, obj) {
@@ -259,7 +267,15 @@ fn call_handler_with_hooks(
                 HandlerResult::Response(resp)
             }
             Err(e) => HandlerResult::Response(Err(format!("handler error: {e}"))),
-        }
+        };
+
+        // Record GIL hold time before releasing GIL
+        crate::monitor::GIL_HOLD_MAX_US.fetch_max(
+            hold_start.elapsed().as_micros() as u64,
+            Relaxed,
+        );
+
+        handler_result
     })
 }
 

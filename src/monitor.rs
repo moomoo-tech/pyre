@@ -21,6 +21,11 @@ pub static GIL_TOTAL_WAIT_US: AtomicU64 = AtomicU64::new(0);
 /// Memory RSS in bytes (updated by watchdog)
 pub static MEMORY_RSS_BYTES: AtomicU64 = AtomicU64::new(0);
 
+/// Number of threads currently waiting to acquire the main GIL
+pub static GIL_QUEUE_LENGTH: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+/// Peak business handler GIL hold time (microseconds, reset on read)
+pub static GIL_HOLD_MAX_US: AtomicU64 = AtomicU64::new(0);
+
 /// Spawn the GIL watchdog background thread.
 pub fn spawn_gil_watchdog() {
     std::thread::Builder::new()
@@ -115,14 +120,17 @@ unsafe fn mach_task_self_info(info: &mut libc_mach_task_basic_info, count: &mut 
 // Python-facing metrics API
 // ---------------------------------------------------------------------------
 
-/// Get GIL metrics: (last_us, max_us, probe_count, total_wait_us, rss_bytes)
-/// Resets max after read.
+/// Get GIL metrics. Returns dict-like tuple:
+/// (last_us, peak_us, probe_count, total_wait_us, rss_bytes, queue_len, hold_peak_us)
+/// Resets peaks after read.
 #[pyfunction]
-pub fn get_gil_metrics() -> (u64, u64, u64, u64, u64) {
+pub fn get_gil_metrics() -> (u64, u64, u64, u64, u64, isize, u64) {
     let last = GIL_LATENCY_LAST_US.load(Ordering::Relaxed);
-    let max = GIL_LATENCY_MAX_US.swap(0, Ordering::Relaxed); // Reset peak
+    let peak = GIL_LATENCY_MAX_US.swap(0, Ordering::Relaxed);
     let count = GIL_PROBE_COUNT.load(Ordering::Relaxed);
     let total = GIL_TOTAL_WAIT_US.load(Ordering::Relaxed);
     let rss = MEMORY_RSS_BYTES.load(Ordering::Relaxed);
-    (last, max, count, total, rss)
+    let queue = GIL_QUEUE_LENGTH.load(std::sync::atomic::Ordering::Relaxed);
+    let hold_peak = GIL_HOLD_MAX_US.swap(0, Ordering::Relaxed);
+    (last, peak, count, total, rss, queue, hold_peak)
 }
