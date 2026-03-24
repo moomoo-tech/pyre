@@ -1,26 +1,77 @@
-"""Minimal Pyre example – start and hit http://127.0.0.1:8000/"""
+"""Pyre example — decorator syntax, middleware, custom responses, static files."""
 
-from skytrade import SkyApp
+from skytrade import Pyre, SkyResponse
 
-app = SkyApp()
+app = Pyre()
+
+# Enable built-in request logging
+app.enable_logging()
+
+# Serve static files from ./public under /static
+# app.static("/static", "./public")
 
 
+# ---------------------------------------------------------------------------
+# Middleware
+# ---------------------------------------------------------------------------
+
+@app.after_request
+def add_cors(req, resp):
+    """Add CORS headers to every response."""
+    return SkyResponse(
+        body=resp.body,
+        status_code=resp.status_code,
+        content_type=resp.content_type,
+        headers={**resp.headers, "access-control-allow-origin": "*"},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
+
+@app.get("/")
 def index(req):
     return "Hello from Pyre!"
 
 
+@app.get("/hello/{name}")
 def greet(req):
     name = req.params.get("name", "world")
-    return {"message": f"Hello, {name}!"}  # dict → Rust serde_json serialization
+    return {"message": f"Hello, {name}!"}
 
 
+@app.post("/echo")
 def echo(req):
     return req.text()
 
 
-app.get("/", index)
-app.get("/hello/{name}", greet)
-app.post("/echo", echo)
+@app.get("/search")
+def search(req):
+    """Query params + request headers."""
+    q = req.query_params.get("q", "")
+    user_agent = req.headers.get("user-agent", "unknown")
+    return {"query": q, "user_agent": user_agent}
+
+
+@app.get("/html")
+def html_page(req):
+    """Custom content-type."""
+    return SkyResponse(
+        body="<h1>Hello from Pyre</h1>",
+        content_type="text/html; charset=utf-8",
+    )
+
+
+@app.fallback
+def not_found(req):
+    """Custom 404 handler."""
+    return SkyResponse(
+        body={"error": "not found", "path": req.path},
+        status_code=404,
+        content_type="application/json",
+    )
+
 
 if __name__ == "__main__":
     app.run(host="127.0.0.1", port=8000)

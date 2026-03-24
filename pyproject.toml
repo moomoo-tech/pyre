@@ -4,10 +4,21 @@ build-backend = "maturin"
 
 [project]
 name = "skytrade"
-version = "0.1.0"
-description = "A Robyn-killer high-performance Python web framework powered by Rust"
+version = "0.3.0"
+description = "High-performance Python web framework powered by Rust — 2x faster than Robyn"
 requires-python = ">=3.10"
 license = { text = "MIT" }
+readme = "README.md"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Rust",
+    "Topic :: Internet :: WWW/HTTP :: HTTP Servers",
+    "Framework :: AsyncIO",
+]
 
 [tool.maturin]
 features = ["pyo3/extension-module"]

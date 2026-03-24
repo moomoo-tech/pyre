@@ -20,7 +20,7 @@ use tokio::runtime::Builder as RuntimeBuilder;
 use tokio::signal;
 
 // ---------------------------------------------------------------------------
-// Request object exposed to Python handlers (main interpreter only)
+// Request object exposed to Python handlers
 // ---------------------------------------------------------------------------
 
 #[pyclass(frozen)]
@@ -34,6 +34,8 @@ struct SkyRequest {
     params: HashMap<String, String>,
     #[pyo3(get)]
     query: String,
+    #[pyo3(get)]
+    headers: HashMap<String, String>,
     body_bytes: Vec<u8>,
 }
 
@@ -53,6 +55,48 @@ impl SkyRequest {
         let text = self.text()?;
         let json_mod = py.import("json")?;
         json_mod.call_method1("loads", (text,))
+    }
+
+    #[getter]
+    fn query_params(&self) -> HashMap<String, String> {
+        form_urlencoded::parse(self.query.as_bytes())
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Response object for custom status, headers, content-type
+// ---------------------------------------------------------------------------
+
+#[pyclass(frozen)]
+struct SkyResponse {
+    #[pyo3(get)]
+    body: Py<PyAny>,
+    #[pyo3(get)]
+    status_code: u16,
+    #[pyo3(get)]
+    content_type: Option<String>,
+    #[pyo3(get)]
+    headers: HashMap<String, String>,
+}
+
+#[pymethods]
+impl SkyResponse {
+    #[new]
+    #[pyo3(signature = (body, status_code=200, content_type=None, headers=None))]
+    fn new(
+        body: Py<PyAny>,
+        status_code: u16,
+        content_type: Option<String>,
+        headers: Option<HashMap<String, String>>,
+    ) -> Self {
+        SkyResponse {
+            body,
+            status_code,
+            content_type,
+            headers: headers.unwrap_or_default(),
+        }
     }
 }
 
@@ -106,14 +150,17 @@ fn py_to_json_value(obj: &Bound<'_, pyo3::PyAny>) -> Result<serde_json::Value, S
 // Route table (main interpreter mode)
 // ---------------------------------------------------------------------------
 
-struct RouteEntry {
-    handler_name: String, // function name for sub-interpreter mode
-}
-
 struct RouteTable {
     handlers: Vec<Py<PyAny>>,
     handler_names: Vec<String>,
     routers: HashMap<String, Router<usize>>,
+    before_hooks: Vec<Py<PyAny>>,
+    after_hooks: Vec<Py<PyAny>>,
+    before_hook_names: Vec<String>,
+    after_hook_names: Vec<String>,
+    fallback_handler: Option<Py<PyAny>>,
+    fallback_handler_name: Option<String>,
+    static_dirs: Vec<(String, String)>, // (url_prefix, fs_directory)
 }
 
 impl RouteTable {
@@ -122,6 +169,13 @@ impl RouteTable {
             handlers: Vec::new(),
             handler_names: Vec::new(),
             routers: HashMap::new(),
+            before_hooks: Vec::new(),
+            after_hooks: Vec::new(),
+            before_hook_names: Vec::new(),
+            after_hook_names: Vec::new(),
+            fallback_handler: None,
+            fallback_handler_name: None,
+            static_dirs: Vec::new(),
         }
     }
 
@@ -153,27 +207,23 @@ impl RouteTable {
             .collect();
         Some((*matched.value, params))
     }
-
-    /// Get route info for sub-interpreter mode: Vec<(method, path, handler_name)>
-    fn route_specs(&self) -> Vec<(String, String, String)> {
-        let mut specs = Vec::new();
-        for (method, router) in &self.routers {
-            // We need to reconstruct path→handler_name mapping
-            // matchit doesn't expose iteration, so we store separately
-            for (i, name) in self.handler_names.iter().enumerate() {
-                // Check if this handler index belongs to this method's router
-                // by checking all routers
-                specs.push((method.clone(), String::new(), name.clone()));
-            }
-        }
-        specs
-    }
 }
 
 unsafe impl Send for RouteTable {}
 unsafe impl Sync for RouteTable {}
 
 type SharedRoutes = Arc<RwLock<RouteTable>>;
+
+// ---------------------------------------------------------------------------
+// Response data (shared between GIL and sub-interpreter paths)
+// ---------------------------------------------------------------------------
+
+struct ResponseData {
+    body: Bytes,
+    content_type: String,
+    status: u16,
+    headers: HashMap<String, String>,
+}
 
 // ---------------------------------------------------------------------------
 // Sub-interpreter worker pool
@@ -188,38 +238,52 @@ unsafe impl Sync for SubInterpreter {}
 
 struct InterpreterPool {
     workers: Vec<SubInterpreter>,
-    /// Per-worker mutex to ensure only one thread uses a sub-interpreter at a time
     locks: Vec<parking_lot::Mutex<()>>,
     counter: AtomicUsize,
-    /// For each worker: a mapping of handler_name → PyObject pointer
     handler_maps: Vec<HashMap<String, *mut ffi::PyObject>>,
-    /// For each worker: the globals dict (owns _SkyRequest class etc.)
     globals: Vec<*mut ffi::PyObject>,
-    /// The route table for lookups (method, path) → (handler_idx, params)
     routers: HashMap<String, Router<usize>>,
     handler_names: Vec<String>,
+    before_hook_names: Vec<String>,
+    #[allow(dead_code)]
+    after_hook_names: Vec<String>,
+    static_dirs: Vec<(String, String)>,
 }
 
 unsafe impl Send for InterpreterPool {}
 unsafe impl Sync for InterpreterPool {}
 
+/// Result from sub-interpreter handler call
+struct SubInterpResponse {
+    body: String,
+    status: u16,
+    content_type: Option<String>,
+    headers: HashMap<String, String>,
+    is_json: bool,
+}
+
 impl InterpreterPool {
-    /// Create N sub-interpreters, each loading the given Python script
     unsafe fn new(
         n: usize,
         script_path: &str,
         handler_names: &[String],
         routers: HashMap<String, Router<usize>>,
+        before_hook_names: &[String],
+        after_hook_names: &[String],
+        static_dirs: Vec<(String, String)>,
     ) -> Result<Self, String> {
         let mut workers = Vec::with_capacity(n);
         let mut handler_maps = Vec::with_capacity(n);
         let mut all_globals = Vec::with_capacity(n);
 
-        // Save the current thread state (main interpreter)
         let main_tstate = ffi::PyThreadState_Get();
 
+        // Collect all function names we need to extract
+        let mut all_names: Vec<String> = handler_names.to_vec();
+        all_names.extend(before_hook_names.iter().cloned());
+        all_names.extend(after_hook_names.iter().cloned());
+
         for i in 0..n {
-            // Create a new sub-interpreter with its own GIL
             let mut new_tstate: *mut ffi::PyThreadState = std::ptr::null_mut();
             let config = ffi::PyInterpreterConfig {
                 use_main_obmalloc: 0,
@@ -231,37 +295,29 @@ impl InterpreterPool {
                 gil: ffi::PyInterpreterConfig_OWN_GIL,
             };
 
-            let status =
-                ffi::Py_NewInterpreterFromConfig(&mut new_tstate, &config);
+            let status = ffi::Py_NewInterpreterFromConfig(&mut new_tstate, &config);
             if ffi::PyStatus_IsError(status) != 0 || new_tstate.is_null() {
-                // Switch back to main
                 ffi::PyThreadState_Swap(main_tstate);
                 return Err(format!("Failed to create sub-interpreter {i}"));
             }
 
-            // We are now in the sub-interpreter's thread state
-            // Load the user script to get handler functions
             let mut hmap = HashMap::new();
 
-            // Read the script file and filter out framework-specific lines
             let raw_script = std::fs::read_to_string(script_path)
                 .map_err(|e| format!("Failed to read script: {e}"))?;
 
-            // Filter out lines that import/use the framework or call app methods
-            // Keep only pure Python function definitions and their dependencies
             let script: String = raw_script
                 .lines()
                 .filter(|line| {
                     let trimmed = line.trim();
-                    // Skip framework imports
-                    if trimmed.starts_with("from skytrade") || trimmed.starts_with("import skytrade") {
+                    if trimmed.starts_with("from skytrade")
+                        || trimmed.starts_with("import skytrade")
+                    {
                         return false;
                     }
-                    // Skip app = SkyApp() and app.get/post/put/delete/route/run calls
                     if trimmed.starts_with("app = ") || trimmed.starts_with("app.") {
                         return false;
                     }
-                    // Skip if __name__ == "__main__" block
                     if trimmed.starts_with("if __name__") {
                         return false;
                     }
@@ -273,20 +329,32 @@ impl InterpreterPool {
             let bootstrap = format!(
                 r#"
 class _SkyRequest:
-    def __init__(self, method, path, params, query, body_bytes):
+    def __init__(self, method, path, params, query, body_bytes, headers):
         self.method = method
         self.path = path
         self.params = params
         self.query = query
         self.body_bytes = body_bytes
+        self.headers = headers
     @property
     def body(self):
         return self.body_bytes
+    @property
+    def query_params(self):
+        from urllib.parse import parse_qs
+        return {{k: v[0] for k, v in parse_qs(self.query).items()}}
     def text(self):
         return self.body_bytes.decode('utf-8') if isinstance(self.body_bytes, bytes) else str(self.body_bytes)
     def json(self):
         import json
         return json.loads(self.text())
+
+class _SkyResponse:
+    def __init__(self, body="", status_code=200, content_type=None, headers=None):
+        self.body = body
+        self.status_code = status_code
+        self.content_type = content_type
+        self.headers = headers or {{}}
 
 # Execute user script
 {}
@@ -294,14 +362,13 @@ class _SkyRequest:
                 script
             );
 
-            // Run the bootstrap code
             let globals = ffi::PyDict_New();
             let builtins = ffi::PyEval_GetBuiltins();
             ffi::PyDict_SetItemString(globals, c"__builtins__".as_ptr(), builtins);
 
             let code_cstr = std::ffi::CString::new(bootstrap.as_bytes())
                 .map_err(|e| format!("CString error: {e}"))?;
-            let filename_cstr = std::ffi::CString::new(script_path)
+            let _filename_cstr = std::ffi::CString::new(script_path)
                 .map_err(|e| format!("CString error: {e}"))?;
 
             let result = ffi::PyRun_String(
@@ -321,8 +388,7 @@ class _SkyRequest:
             }
             ffi::Py_DECREF(result);
 
-            // Extract handler functions by name
-            for name in handler_names {
+            for name in &all_names {
                 let name_cstr = std::ffi::CString::new(name.as_bytes())
                     .map_err(|e| format!("CString error: {e}"))?;
                 let func = ffi::PyDict_GetItemString(globals, name_cstr.as_ptr());
@@ -332,10 +398,7 @@ class _SkyRequest:
                 }
             }
 
-            // Keep globals alive (the handler functions reference it)
             ffi::Py_INCREF(globals);
-
-            // Release this sub-interpreter's GIL
             let saved = ffi::PyEval_SaveThread();
 
             workers.push(SubInterpreter { tstate: saved });
@@ -343,7 +406,6 @@ class _SkyRequest:
             all_globals.push(globals);
         }
 
-        // Switch back to main interpreter
         ffi::PyThreadState_Swap(main_tstate);
 
         let locks = (0..n).map(|_| parking_lot::Mutex::new(())).collect();
@@ -355,6 +417,9 @@ class _SkyRequest:
             globals: all_globals,
             routers,
             handler_names: handler_names.to_vec(),
+            before_hook_names: before_hook_names.to_vec(),
+            after_hook_names: after_hook_names.to_vec(),
+            static_dirs,
         })
     }
 
@@ -373,36 +438,17 @@ class _SkyRequest:
         Some((*matched.value, params))
     }
 
-    /// Call a handler in a sub-interpreter. Returns response body string.
-    unsafe fn call_handler(
+    /// Build a _SkyRequest object in the current sub-interpreter context
+    unsafe fn build_request_obj(
         &self,
         worker_idx: usize,
-        handler_idx: usize,
         method: &str,
         path: &str,
         params: &HashMap<String, String>,
         query: &str,
         body: &[u8],
-    ) -> Result<String, String> {
-        // Lock this sub-interpreter so only one thread uses it at a time
-        let _guard = self.locks[worker_idx].lock();
-
-        let worker = &self.workers[worker_idx];
-        let hmap = &self.handler_maps[worker_idx];
-        let handler_name = &self.handler_names[handler_idx];
-
-        let func = match hmap.get(handler_name) {
-            Some(f) => *f,
-            None => return Err(format!("handler '{}' not found in sub-interpreter", handler_name)),
-        };
-
-        // Acquire this sub-interpreter's GIL
-        ffi::PyEval_RestoreThread(worker.tstate);
-
-        // Build a _SkyRequest object
-        let req_class_name = std::ffi::CString::new("_SkyRequest").unwrap();
-
-        // Build args as Python objects
+        headers: &HashMap<String, String>,
+    ) -> *mut ffi::PyObject {
         let py_method = ffi::PyUnicode_FromStringAndSize(
             method.as_ptr() as *const _,
             method.len() as isize,
@@ -412,17 +458,10 @@ class _SkyRequest:
             path.len() as isize,
         );
 
-        // Build params dict
         let py_params = ffi::PyDict_New();
         for (k, v) in params {
-            let pk = ffi::PyUnicode_FromStringAndSize(
-                k.as_ptr() as *const _,
-                k.len() as isize,
-            );
-            let pv = ffi::PyUnicode_FromStringAndSize(
-                v.as_ptr() as *const _,
-                v.len() as isize,
-            );
+            let pk = ffi::PyUnicode_FromStringAndSize(k.as_ptr() as *const _, k.len() as isize);
+            let pv = ffi::PyUnicode_FromStringAndSize(v.as_ptr() as *const _, v.len() as isize);
             ffi::PyDict_SetItem(py_params, pk, pv);
             ffi::Py_DECREF(pk);
             ffi::Py_DECREF(pv);
@@ -437,51 +476,290 @@ class _SkyRequest:
             body.len() as isize,
         );
 
-        // Call _SkyRequest(method, path, params, query, body_bytes)
-        // Get the class from builtins/globals — it's in the sub-interpreter's globals
-        // Actually we need to call the handler directly with a request-like object
-        // Let's build a SimpleNamespace-like dict instead for simplicity
-        let req_dict = ffi::PyDict_New();
-        let key_method = std::ffi::CString::new("method").unwrap();
-        let key_path = std::ffi::CString::new("path").unwrap();
-        let key_params = std::ffi::CString::new("params").unwrap();
-        let key_query = std::ffi::CString::new("query").unwrap();
-        let key_body = std::ffi::CString::new("body_bytes").unwrap();
-        ffi::PyDict_SetItemString(req_dict, key_method.as_ptr(), py_method);
-        ffi::PyDict_SetItemString(req_dict, key_path.as_ptr(), py_path);
-        ffi::PyDict_SetItemString(req_dict, key_params.as_ptr(), py_params);
-        ffi::PyDict_SetItemString(req_dict, key_query.as_ptr(), py_query);
-        ffi::PyDict_SetItemString(req_dict, key_body.as_ptr(), py_body);
+        let py_headers = ffi::PyDict_New();
+        for (k, v) in headers {
+            let pk = ffi::PyUnicode_FromStringAndSize(k.as_ptr() as *const _, k.len() as isize);
+            let pv = ffi::PyUnicode_FromStringAndSize(v.as_ptr() as *const _, v.len() as isize);
+            ffi::PyDict_SetItem(py_headers, pk, pv);
+            ffi::Py_DECREF(pk);
+            ffi::Py_DECREF(pv);
+        }
 
-        // Create _SkyRequest via the globals
-        // We bootstrapped _SkyRequest class in the sub-interpreter
-        let args = ffi::PyTuple_New(5);
-        ffi::PyTuple_SetItem(args, 0, py_method); // steals ref
+        let args = ffi::PyTuple_New(6);
+        ffi::PyTuple_SetItem(args, 0, py_method);
         ffi::PyTuple_SetItem(args, 1, py_path);
         ffi::PyTuple_SetItem(args, 2, py_params);
         ffi::PyTuple_SetItem(args, 3, py_query);
         ffi::PyTuple_SetItem(args, 4, py_body);
+        ffi::PyTuple_SetItem(args, 5, py_headers);
 
-        // Get _SkyRequest class from the sub-interpreter's globals
         let worker_globals = self.globals[worker_idx];
+        let req_class_name = std::ffi::CString::new("_SkyRequest").unwrap();
         let req_cls = ffi::PyDict_GetItemString(worker_globals, req_class_name.as_ptr());
 
         let request_obj = if !req_cls.is_null() {
             ffi::PyObject_Call(req_cls, args, std::ptr::null_mut())
         } else {
-            // Fallback: just pass the dict
-            ffi::Py_INCREF(req_dict);
-            req_dict
+            std::ptr::null_mut()
         };
         ffi::Py_DECREF(args);
+        request_obj
+    }
 
+    /// Parse a Python result object into SubInterpResponse
+    unsafe fn parse_result(
+        &self,
+        worker_idx: usize,
+        result_obj: *mut ffi::PyObject,
+    ) -> Result<SubInterpResponse, String> {
+        if result_obj.is_null() {
+            ffi::PyErr_Print();
+            return Err("handler raised an exception".to_string());
+        }
+
+        // Check if it's a _SkyResponse
+        let worker_globals = self.globals[worker_idx];
+        let resp_class_name = std::ffi::CString::new("_SkyResponse").unwrap();
+        let resp_cls = ffi::PyDict_GetItemString(worker_globals, resp_class_name.as_ptr());
+        if !resp_cls.is_null() {
+            let is_resp = ffi::PyObject_IsInstance(result_obj, resp_cls);
+            if is_resp == 1 {
+                return self.parse_sky_response(result_obj);
+            }
+        }
+
+        // dict → JSON
+        if ffi::PyDict_Check(result_obj) != 0 {
+            let json_mod = ffi::PyImport_ImportModule(c"json".as_ptr());
+            if json_mod.is_null() {
+                ffi::Py_DECREF(result_obj);
+                return Err("failed to import json".to_string());
+            }
+            let dumps = ffi::PyObject_GetAttrString(json_mod, c"dumps".as_ptr());
+            let dump_args = ffi::PyTuple_New(1);
+            ffi::Py_INCREF(result_obj);
+            ffi::PyTuple_SetItem(dump_args, 0, result_obj);
+            let json_str = ffi::PyObject_Call(dumps, dump_args, std::ptr::null_mut());
+            ffi::Py_DECREF(dump_args);
+            ffi::Py_DECREF(dumps);
+            ffi::Py_DECREF(json_mod);
+            ffi::Py_DECREF(result_obj);
+            if json_str.is_null() {
+                ffi::PyErr_Print();
+                return Err("json.dumps failed".to_string());
+            }
+            let s = pyobj_to_string(json_str);
+            ffi::Py_DECREF(json_str);
+            return s.map(|body| SubInterpResponse {
+                body,
+                status: 200,
+                content_type: None,
+                headers: HashMap::new(),
+                is_json: true,
+            });
+        }
+
+        // string
+        if ffi::PyUnicode_Check(result_obj) != 0 {
+            let s = pyobj_to_string(result_obj);
+            ffi::Py_DECREF(result_obj);
+            return s.map(|body| SubInterpResponse {
+                body,
+                status: 200,
+                content_type: None,
+                headers: HashMap::new(),
+                is_json: false,
+            });
+        }
+
+        // fallback: str(result)
+        let str_obj = ffi::PyObject_Str(result_obj);
+        ffi::Py_DECREF(result_obj);
+        if str_obj.is_null() {
+            return Err("str() failed".to_string());
+        }
+        let s = pyobj_to_string(str_obj);
+        ffi::Py_DECREF(str_obj);
+        s.map(|body| SubInterpResponse {
+            body,
+            status: 200,
+            content_type: None,
+            headers: HashMap::new(),
+            is_json: false,
+        })
+    }
+
+    /// Parse a _SkyResponse Python object
+    unsafe fn parse_sky_response(
+        &self,
+        obj: *mut ffi::PyObject,
+    ) -> Result<SubInterpResponse, String> {
+        // Extract status_code
+        let status_attr = ffi::PyObject_GetAttrString(obj, c"status_code".as_ptr());
+        let status = if !status_attr.is_null() {
+            let s = ffi::PyLong_AsLong(status_attr) as u16;
+            ffi::Py_DECREF(status_attr);
+            s
+        } else {
+            ffi::PyErr_Clear();
+            200
+        };
+
+        // Extract content_type
+        let ct_attr = ffi::PyObject_GetAttrString(obj, c"content_type".as_ptr());
+        let content_type = if !ct_attr.is_null() && ct_attr != ffi::Py_None() {
+            let s = pyobj_to_string(ct_attr).ok();
+            ffi::Py_DECREF(ct_attr);
+            s
+        } else {
+            if !ct_attr.is_null() {
+                ffi::Py_DECREF(ct_attr);
+            }
+            ffi::PyErr_Clear();
+            None
+        };
+
+        // Extract headers dict
+        let mut resp_headers = HashMap::new();
+        let headers_attr = ffi::PyObject_GetAttrString(obj, c"headers".as_ptr());
+        if !headers_attr.is_null() && ffi::PyDict_Check(headers_attr) != 0 {
+            let mut pos: isize = 0;
+            let mut key: *mut ffi::PyObject = std::ptr::null_mut();
+            let mut val: *mut ffi::PyObject = std::ptr::null_mut();
+            while ffi::PyDict_Next(headers_attr, &mut pos, &mut key, &mut val) != 0 {
+                if let (Ok(k), Ok(v)) = (pyobj_to_string(key), pyobj_to_string(val)) {
+                    resp_headers.insert(k, v);
+                }
+            }
+            ffi::Py_DECREF(headers_attr);
+        } else if !headers_attr.is_null() {
+            ffi::Py_DECREF(headers_attr);
+        }
+
+        // Extract body
+        let body_attr = ffi::PyObject_GetAttrString(obj, c"body".as_ptr());
+        let (body, is_json) = if !body_attr.is_null() {
+            if ffi::PyDict_Check(body_attr) != 0 {
+                // Serialize dict to JSON
+                let json_mod = ffi::PyImport_ImportModule(c"json".as_ptr());
+                if !json_mod.is_null() {
+                    let dumps = ffi::PyObject_GetAttrString(json_mod, c"dumps".as_ptr());
+                    let args = ffi::PyTuple_New(1);
+                    ffi::Py_INCREF(body_attr);
+                    ffi::PyTuple_SetItem(args, 0, body_attr);
+                    let json_str = ffi::PyObject_Call(dumps, args, std::ptr::null_mut());
+                    ffi::Py_DECREF(args);
+                    ffi::Py_DECREF(dumps);
+                    ffi::Py_DECREF(json_mod);
+                    if !json_str.is_null() {
+                        let s = pyobj_to_string(json_str).unwrap_or_default();
+                        ffi::Py_DECREF(json_str);
+                        (s, true)
+                    } else {
+                        ffi::PyErr_Clear();
+                        (String::new(), false)
+                    }
+                } else {
+                    ffi::PyErr_Clear();
+                    (String::new(), false)
+                }
+            } else if ffi::PyUnicode_Check(body_attr) != 0 {
+                let s = pyobj_to_string(body_attr).unwrap_or_default();
+                (s, false)
+            } else {
+                let str_obj = ffi::PyObject_Str(body_attr);
+                let s = if !str_obj.is_null() {
+                    let r = pyobj_to_string(str_obj).unwrap_or_default();
+                    ffi::Py_DECREF(str_obj);
+                    r
+                } else {
+                    ffi::PyErr_Clear();
+                    String::new()
+                };
+                (s, false)
+            }
+        } else {
+            ffi::PyErr_Clear();
+            (String::new(), false)
+        };
+        if !body_attr.is_null() {
+            ffi::Py_DECREF(body_attr);
+        }
+
+        ffi::Py_DECREF(obj);
+
+        Ok(SubInterpResponse {
+            body,
+            status,
+            content_type,
+            headers: resp_headers,
+            is_json,
+        })
+    }
+
+    /// Call a handler in a sub-interpreter. Returns SubInterpResponse.
+    unsafe fn call_handler(
+        &self,
+        worker_idx: usize,
+        handler_idx: usize,
+        method: &str,
+        path: &str,
+        params: &HashMap<String, String>,
+        query: &str,
+        body: &[u8],
+        headers: &HashMap<String, String>,
+    ) -> Result<SubInterpResponse, String> {
+        let _guard = self.locks[worker_idx].lock();
+
+        let hmap = &self.handler_maps[worker_idx];
+        let handler_name = &self.handler_names[handler_idx];
+
+        let func = match hmap.get(handler_name) {
+            Some(f) => *f,
+            None => {
+                return Err(format!(
+                    "handler '{}' not found in sub-interpreter",
+                    handler_name
+                ))
+            }
+        };
+
+        // Acquire this sub-interpreter's GIL
+        let worker = &self.workers[worker_idx];
+        ffi::PyEval_RestoreThread(worker.tstate);
+
+        // Build request object
+        let request_obj =
+            self.build_request_obj(worker_idx, method, path, params, query, body, headers);
         if request_obj.is_null() {
             ffi::PyErr_Print();
-            ffi::Py_DECREF(req_dict);
-            let saved = ffi::PyEval_SaveThread();
-            // Update tstate
-            let worker = &self.workers[worker_idx];
+            let _saved = ffi::PyEval_SaveThread();
             return Err("failed to create request object".to_string());
+        }
+
+        // Run before_request hooks
+        for hook_name in &self.before_hook_names {
+            if let Some(&hook_func) = hmap.get(hook_name) {
+                let hook_args = ffi::PyTuple_New(1);
+                ffi::Py_INCREF(request_obj);
+                ffi::PyTuple_SetItem(hook_args, 0, request_obj);
+                let hook_result =
+                    ffi::PyObject_Call(hook_func, hook_args, std::ptr::null_mut());
+                ffi::Py_DECREF(hook_args);
+                if !hook_result.is_null() && hook_result != ffi::Py_None() {
+                    // Short-circuit: hook returned a response
+                    ffi::Py_DECREF(request_obj);
+                    let resp = self.parse_result(worker_idx, hook_result);
+                    let _saved = ffi::PyEval_SaveThread();
+                    return resp;
+                }
+                if !hook_result.is_null() {
+                    ffi::Py_DECREF(hook_result);
+                }
+                if hook_result.is_null() {
+                    ffi::PyErr_Print();
+                }
+            }
         }
 
         // Call handler(request)
@@ -490,52 +768,8 @@ class _SkyRequest:
 
         let result_obj = ffi::PyObject_Call(func, call_args, std::ptr::null_mut());
         ffi::Py_DECREF(call_args);
-        ffi::Py_DECREF(req_dict);
 
-        let result = if result_obj.is_null() {
-            ffi::PyErr_Print();
-            Err("handler raised an exception".to_string())
-        } else if ffi::PyDict_Check(result_obj) != 0 {
-            // Dict → JSON serialize via Python json.dumps (in sub-interpreter)
-            let json_mod = ffi::PyImport_ImportModule(c"json".as_ptr());
-            if json_mod.is_null() {
-                ffi::Py_DECREF(result_obj);
-                Err("failed to import json".to_string())
-            } else {
-                let dumps = ffi::PyObject_GetAttrString(json_mod, c"dumps".as_ptr());
-                let dump_args = ffi::PyTuple_New(1);
-                ffi::Py_INCREF(result_obj);
-                ffi::PyTuple_SetItem(dump_args, 0, result_obj);
-                let json_str = ffi::PyObject_Call(dumps, dump_args, std::ptr::null_mut());
-                ffi::Py_DECREF(dump_args);
-                ffi::Py_DECREF(dumps);
-                ffi::Py_DECREF(json_mod);
-                ffi::Py_DECREF(result_obj);
-                if json_str.is_null() {
-                    ffi::PyErr_Print();
-                    Err("json.dumps failed".to_string())
-                } else {
-                    let s = pyobj_to_string(json_str);
-                    ffi::Py_DECREF(json_str);
-                    s
-                }
-            }
-        } else if ffi::PyUnicode_Check(result_obj) != 0 {
-            let s = pyobj_to_string(result_obj);
-            ffi::Py_DECREF(result_obj);
-            s
-        } else {
-            // Fallback: str(result)
-            let str_obj = ffi::PyObject_Str(result_obj);
-            ffi::Py_DECREF(result_obj);
-            if str_obj.is_null() {
-                Err("str() failed".to_string())
-            } else {
-                let s = pyobj_to_string(str_obj);
-                ffi::Py_DECREF(str_obj);
-                s
-            }
-        };
+        let result = self.parse_result(worker_idx, result_obj);
 
         // Release this sub-interpreter's GIL
         let _saved = ffi::PyEval_SaveThread();
@@ -556,6 +790,27 @@ unsafe fn pyobj_to_string(obj: *mut ffi::PyObject) -> Result<String, String> {
 }
 
 type SharedPool = Arc<InterpreterPool>;
+
+// ---------------------------------------------------------------------------
+// Extract headers from hyper request
+// ---------------------------------------------------------------------------
+
+fn extract_headers(header_map: &hyper::HeaderMap) -> HashMap<String, String> {
+    let mut headers = HashMap::with_capacity(header_map.len());
+    for (name, value) in header_map.iter() {
+        let key = name.as_str().to_string();
+        let val = String::from_utf8_lossy(value.as_bytes()).to_string();
+        // If key already exists, join with ", " per RFC 9110
+        headers
+            .entry(key)
+            .and_modify(|existing: &mut String| {
+                existing.push_str(", ");
+                existing.push_str(&val);
+            })
+            .or_insert(val);
+    }
+    headers
+}
 
 // ---------------------------------------------------------------------------
 // SkyApp
@@ -597,9 +852,59 @@ impl SkyApp {
         self.add_route("DELETE", path, handler, name)
     }
 
-    fn route(&mut self, method: &str, path: &str, handler: Py<PyAny>, py: Python<'_>) -> PyResult<()> {
+    fn route(
+        &mut self,
+        method: &str,
+        path: &str,
+        handler: Py<PyAny>,
+        py: Python<'_>,
+    ) -> PyResult<()> {
         let name = handler.getattr(py, "__name__")?.extract::<String>(py)?;
         self.add_route(method, path, handler, name)
+    }
+
+    fn before_request(&mut self, handler: Py<PyAny>, py: Python<'_>) -> PyResult<()> {
+        let name = handler.getattr(py, "__name__")?.extract::<String>(py)?;
+        let mut routes = self.routes.write();
+        routes.before_hooks.push(handler);
+        routes.before_hook_names.push(name);
+        Ok(())
+    }
+
+    fn after_request(&mut self, handler: Py<PyAny>, py: Python<'_>) -> PyResult<()> {
+        let name = handler.getattr(py, "__name__")?.extract::<String>(py)?;
+        let mut routes = self.routes.write();
+        routes.after_hooks.push(handler);
+        routes.after_hook_names.push(name);
+        Ok(())
+    }
+
+    fn fallback(&mut self, handler: Py<PyAny>, py: Python<'_>) -> PyResult<()> {
+        let name = handler.getattr(py, "__name__")?.extract::<String>(py)?;
+        let mut routes = self.routes.write();
+        routes.fallback_handler = Some(handler);
+        routes.fallback_handler_name = Some(name);
+        Ok(())
+    }
+
+    fn static_dir(&mut self, prefix: &str, directory: &str) -> PyResult<()> {
+        let prefix = if prefix.ends_with('/') {
+            prefix.to_string()
+        } else {
+            format!("{prefix}/")
+        };
+        let dir = std::path::Path::new(directory)
+            .canonicalize()
+            .map_err(|e| {
+                pyo3::exceptions::PyValueError::new_err(format!(
+                    "static directory '{directory}' not found: {e}"
+                ))
+            })?
+            .to_string_lossy()
+            .to_string();
+        let mut routes = self.routes.write();
+        routes.static_dirs.push((prefix, dir));
+        Ok(())
     }
 
     #[pyo3(signature = (host=None, port=None, workers=None, mode=None))]
@@ -628,35 +933,44 @@ impl SkyApp {
         let routes = Arc::clone(&self.routes);
 
         if mode == "subinterp" {
-            // Detect script path from __main__.__file__
             let script_path = if let Some(ref p) = self.script_path {
                 p.clone()
             } else {
                 let main_mod = py.import("__main__")?;
-                main_mod
-                    .getattr("__file__")?
-                    .extract::<String>()?
+                main_mod.getattr("__file__")?.extract::<String>()?
             };
 
-            // Collect handler names and clone routers
-            let (handler_names, routers) = {
+            let (handler_names, routers, before_hook_names, after_hook_names, static_dirs) = {
                 let table = routes.read();
-                (table.handler_names.clone(), table.routers.clone())
+                (
+                    table.handler_names.clone(),
+                    table.routers.clone(),
+                    table.before_hook_names.clone(),
+                    table.after_hook_names.clone(),
+                    table.static_dirs.clone(),
+                )
             };
 
-            println!("\n  Pyre v0.2.0 [sub-interpreter mode]");
+            println!("\n  Pyre v0.3.0 [sub-interpreter mode]");
             println!("  Listening on http://{addr}");
             println!("  Sub-interpreters: {workers} (CPUs: {num_cpus})");
             println!("  Script: {script_path}\n");
 
-            // Create interpreter pool while we still hold the main GIL
             let pool = unsafe {
-                InterpreterPool::new(workers, &script_path, &handler_names, routers)
-                    .map_err(|e| {
-                        pyo3::exceptions::PyRuntimeError::new_err(format!(
-                            "sub-interpreter pool error: {e}"
-                        ))
-                    })?
+                InterpreterPool::new(
+                    workers,
+                    &script_path,
+                    &handler_names,
+                    routers,
+                    &before_hook_names,
+                    &after_hook_names,
+                    static_dirs,
+                )
+                .map_err(|e| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "sub-interpreter pool error: {e}"
+                    ))
+                })?
             };
             let pool = Arc::new(pool);
 
@@ -724,8 +1038,7 @@ impl SkyApp {
                 })
             })
         } else {
-            // Default mode: use main interpreter
-            println!("\n  Pyre v0.2.0");
+            println!("\n  Pyre v0.3.0");
             println!("  Listening on http://{addr}");
             println!("  Workers: {workers} (CPUs: {num_cpus})\n");
 
@@ -813,6 +1126,112 @@ impl SkyApp {
 }
 
 // ---------------------------------------------------------------------------
+// Convert handler return value to ResponseData (main interpreter mode)
+// ---------------------------------------------------------------------------
+
+fn extract_response_data(py: Python<'_>, obj: Bound<'_, pyo3::PyAny>) -> Result<ResponseData, String> {
+    // Check if it's a SkyResponse
+    if let Ok(resp) = obj.downcast::<SkyResponse>() {
+        let resp = resp.get();
+        let body_bound = resp.body.bind(py);
+
+        let (body_bytes, auto_ct) = if let Ok(s) = body_bound.downcast::<PyString>() {
+            let st = s.to_string();
+            let ct = if st.starts_with('{') || st.starts_with('[') {
+                "application/json"
+            } else {
+                "text/plain; charset=utf-8"
+            };
+            (Bytes::from(st), ct)
+        } else if body_bound.downcast::<PyDict>().is_ok() || body_bound.downcast::<PyList>().is_ok()
+        {
+            let val = py_to_json_value(body_bound).map_err(|e| format!("json error: {e}"))?;
+            let json_bytes =
+                serde_json::to_vec(&val).map_err(|e| format!("json serialize error: {e}"))?;
+            (Bytes::from(json_bytes), "application/json")
+        } else if let Ok(b) = body_bound.extract::<Vec<u8>>() {
+            (Bytes::from(b), "application/octet-stream")
+        } else {
+            let st = body_bound.str().map_err(|e| e.to_string())?.to_string();
+            (Bytes::from(st), "text/plain; charset=utf-8")
+        };
+
+        let content_type = resp
+            .content_type
+            .clone()
+            .unwrap_or_else(|| auto_ct.to_string());
+
+        return Ok(ResponseData {
+            body: body_bytes,
+            content_type,
+            status: resp.status_code,
+            headers: resp.headers.clone(),
+        });
+    }
+
+    // Plain string
+    if let Ok(s) = obj.downcast::<PyString>() {
+        let st = s.to_string();
+        let ct = if st.starts_with('{') || st.starts_with('[') {
+            "application/json"
+        } else {
+            "text/plain; charset=utf-8"
+        };
+        return Ok(ResponseData {
+            body: Bytes::from(st),
+            content_type: ct.to_string(),
+            status: 200,
+            headers: HashMap::new(),
+        });
+    }
+
+    // dict → JSON
+    if obj.downcast::<PyDict>().is_ok() {
+        let val = py_to_json_value(&obj).map_err(|e| format!("json error: {e}"))?;
+        let json_bytes =
+            serde_json::to_vec(&val).map_err(|e| format!("json serialize error: {e}"))?;
+        return Ok(ResponseData {
+            body: Bytes::from(json_bytes),
+            content_type: "application/json".to_string(),
+            status: 200,
+            headers: HashMap::new(),
+        });
+    }
+
+    // list → JSON
+    if obj.downcast::<PyList>().is_ok() {
+        let val = py_to_json_value(&obj).map_err(|e| format!("json error: {e}"))?;
+        let json_bytes =
+            serde_json::to_vec(&val).map_err(|e| format!("json serialize error: {e}"))?;
+        return Ok(ResponseData {
+            body: Bytes::from(json_bytes),
+            content_type: "application/json".to_string(),
+            status: 200,
+            headers: HashMap::new(),
+        });
+    }
+
+    // bytes
+    if let Ok(b) = obj.extract::<Vec<u8>>() {
+        return Ok(ResponseData {
+            body: Bytes::from(b),
+            content_type: "application/octet-stream".to_string(),
+            status: 200,
+            headers: HashMap::new(),
+        });
+    }
+
+    // fallback: str()
+    let st = obj.str().map_err(|e| e.to_string())?.to_string();
+    Ok(ResponseData {
+        body: Bytes::from(st),
+        content_type: "text/plain; charset=utf-8".to_string(),
+        status: 200,
+        headers: HashMap::new(),
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Request handler — default mode (main interpreter)
 // ---------------------------------------------------------------------------
 
@@ -821,8 +1240,10 @@ async fn handle_request(
     routes: SharedRoutes,
 ) -> Result<Response<Full<Bytes>>, hyper::Error> {
     let method = req.method().to_string();
-    let path = req.uri().path().to_string();
-    let query = req.uri().query().unwrap_or("").to_string();
+    let uri = req.uri().clone();
+    let path = uri.path().to_string();
+    let query = uri.query().unwrap_or("").to_string();
+    let headers = extract_headers(req.headers());
 
     use http_body_util::BodyExt;
     let body_bytes = req
@@ -832,13 +1253,28 @@ async fn handle_request(
         .map(|c| c.to_bytes().to_vec())
         .unwrap_or_default();
 
-    let lookup = {
+    let (lookup, static_dirs, has_fallback) = {
         let table = routes.read();
-        table.lookup(&method, &path)
+        (
+            table.lookup(&method, &path),
+            table.static_dirs.clone(),
+            table.fallback_handler.is_some(),
+        )
     };
+
+    // If no route matched, try static files
+    if lookup.is_none() {
+        if let Some(resp) = try_static_file(&path, &static_dirs).await {
+            return Ok(resp);
+        }
+    }
 
     let (handler_idx, params) = match lookup {
         Some(v) => v,
+        None if has_fallback => {
+            // Will use fallback handler below
+            (usize::MAX, HashMap::new())
+        }
         None => return Ok(not_found_response()),
     };
 
@@ -847,48 +1283,64 @@ async fn handle_request(
         path,
         params,
         query,
+        headers,
         body_bytes,
     };
 
-    let result: Result<(Bytes, &'static str), String> = Python::attach(|py| {
+    let result: Result<ResponseData, String> = Python::attach(|py| {
         let table = routes.read();
-        let handler = table.handlers[handler_idx].clone_ref(py);
+        let before_hooks: Vec<Py<PyAny>> = table.before_hooks.iter().map(|h| h.clone_ref(py)).collect();
+        let after_hooks: Vec<Py<PyAny>> = table.after_hooks.iter().map(|h| h.clone_ref(py)).collect();
+
+        let handler = if handler_idx == usize::MAX {
+            // Fallback handler
+            table.fallback_handler.as_ref().unwrap().clone_ref(py)
+        } else {
+            table.handlers[handler_idx].clone_ref(py)
+        };
         drop(table);
 
-        match handler.call1(py, (sky_req,)) {
+        // Run before_request hooks
+        for hook in &before_hooks {
+            match hook.call1(py, (sky_req.clone(),)) {
+                Ok(result) => {
+                    let bound = result.bind(py);
+                    if !bound.is_none() {
+                        return extract_response_data(py, bound.clone());
+                    }
+                }
+                Err(e) => return Err(format!("before_request hook error: {e}")),
+            }
+        }
+
+        // Call main handler
+        match handler.call1(py, (sky_req.clone(),)) {
             Ok(obj) => {
-                let bound = obj.bind(py);
+                let mut resp_data = extract_response_data(py, obj.bind(py).clone())?;
 
-                if let Ok(s) = bound.downcast::<PyString>() {
-                    let st = s.to_string();
-                    let ct = if st.starts_with('{') || st.starts_with('[') {
-                        "application/json"
-                    } else {
-                        "text/plain; charset=utf-8"
-                    };
-                    return Ok((Bytes::from(st), ct));
+                // Run after_request hooks
+                for hook in &after_hooks {
+                    let body_str = std::str::from_utf8(&resp_data.body).unwrap_or("").to_string();
+                    let current_resp = Py::new(py, SkyResponse {
+                        body: PyString::new(py, &body_str)
+                            .into_any()
+                            .unbind(),
+                        status_code: resp_data.status,
+                        content_type: Some(resp_data.content_type.clone()),
+                        headers: resp_data.headers.clone(),
+                    }).map_err(|e| format!("failed to create SkyResponse: {e}"))?;
+                    match hook.call1(py, (sky_req.clone(), current_resp)) {
+                        Ok(result) => {
+                            let bound = result.bind(py);
+                            if !bound.is_none() {
+                                resp_data = extract_response_data(py, bound.clone())?;
+                            }
+                        }
+                        Err(e) => return Err(format!("after_request hook error: {e}")),
+                    }
                 }
 
-                if bound.downcast::<PyDict>().is_ok() {
-                    let val = py_to_json_value(bound).map_err(|e| format!("json error: {e}"))?;
-                    let json_bytes = serde_json::to_vec(&val)
-                        .map_err(|e| format!("json serialize error: {e}"))?;
-                    return Ok((Bytes::from(json_bytes), "application/json"));
-                }
-
-                if bound.downcast::<PyList>().is_ok() {
-                    let val = py_to_json_value(bound).map_err(|e| format!("json error: {e}"))?;
-                    let json_bytes = serde_json::to_vec(&val)
-                        .map_err(|e| format!("json serialize error: {e}"))?;
-                    return Ok((Bytes::from(json_bytes), "application/json"));
-                }
-
-                if let Ok(b) = bound.extract::<Vec<u8>>() {
-                    return Ok((Bytes::from(b), "application/octet-stream"));
-                }
-
-                let st = bound.str().map_err(|e| e.to_string())?.to_string();
-                Ok((Bytes::from(st), "text/plain; charset=utf-8"))
+                Ok(resp_data)
             }
             Err(e) => Err(format!("handler error: {e}")),
         }
@@ -906,8 +1358,10 @@ async fn handle_request_subinterp(
     pool: SharedPool,
 ) -> Result<Response<Full<Bytes>>, hyper::Error> {
     let method = req.method().to_string();
-    let path = req.uri().path().to_string();
-    let query = req.uri().query().unwrap_or("").to_string();
+    let uri = req.uri().clone();
+    let path = uri.path().to_string();
+    let query = uri.query().unwrap_or("").to_string();
+    let headers = extract_headers(req.headers());
 
     use http_body_util::BodyExt;
     let body_bytes = req
@@ -919,6 +1373,13 @@ async fn handle_request_subinterp(
 
     let lookup = pool.lookup(&method, &path);
 
+    // Try static files if no route matched
+    if lookup.is_none() {
+        if let Some(resp) = try_static_file(&path, &pool.static_dirs).await {
+            return Ok(resp);
+        }
+    }
+
     let (handler_idx, params) = match lookup {
         Some(v) => v,
         None => return Ok(not_found_response()),
@@ -926,29 +1387,44 @@ async fn handle_request_subinterp(
 
     let worker_idx = pool.pick_worker();
 
-    // Call handler in sub-interpreter (blocking — runs on Tokio thread)
     let result = unsafe {
-        pool.call_handler(worker_idx, handler_idx, &method, &path, &params, &query, &body_bytes)
+        pool.call_handler(
+            worker_idx,
+            handler_idx,
+            &method,
+            &path,
+            &params,
+            &query,
+            &body_bytes,
+            &headers,
+        )
     };
 
     match result {
-        Ok(body) => {
-            let ct = if body.starts_with('{') || body.starts_with('[') {
-                "application/json"
-            } else {
-                "text/plain; charset=utf-8"
-            };
-            Ok(Response::builder()
-                .status(StatusCode::OK)
-                .header("content-type", ct)
-                .header("server", "Pyre/0.2.0-subinterp")
-                .body(Full::new(Bytes::from(body)))
+        Ok(resp) => {
+            let ct = resp.content_type.unwrap_or_else(|| {
+                if resp.is_json || resp.body.starts_with('{') || resp.body.starts_with('[') {
+                    "application/json".to_string()
+                } else {
+                    "text/plain; charset=utf-8".to_string()
+                }
+            });
+            let status = StatusCode::from_u16(resp.status).unwrap_or(StatusCode::OK);
+            let mut builder = Response::builder()
+                .status(status)
+                .header("content-type", &ct)
+                .header("server", "Pyre/0.3.0-subinterp");
+            for (k, v) in &resp.headers {
+                builder = builder.header(k.as_str(), v.as_str());
+            }
+            Ok(builder
+                .body(Full::new(Bytes::from(resp.body)))
                 .unwrap())
         }
         Err(e) => Ok(Response::builder()
             .status(StatusCode::INTERNAL_SERVER_ERROR)
             .header("content-type", "application/json")
-            .header("server", "Pyre/0.2.0-subinterp")
+            .header("server", "Pyre/0.3.0-subinterp")
             .body(Full::new(Bytes::from(
                 format!(r#"{{"error":"{}"}}"#, e.replace('"', "\\\"")),
             )))
@@ -961,19 +1437,24 @@ async fn handle_request_subinterp(
 // ---------------------------------------------------------------------------
 
 fn build_response(
-    result: Result<(Bytes, &'static str), String>,
+    result: Result<ResponseData, String>,
 ) -> Result<Response<Full<Bytes>>, hyper::Error> {
     match result {
-        Ok((body, content_type)) => Ok(Response::builder()
-            .status(StatusCode::OK)
-            .header("content-type", content_type)
-            .header("server", "Pyre/0.2.0")
-            .body(Full::new(body))
-            .unwrap()),
+        Ok(data) => {
+            let status = StatusCode::from_u16(data.status).unwrap_or(StatusCode::OK);
+            let mut builder = Response::builder()
+                .status(status)
+                .header("content-type", &data.content_type)
+                .header("server", "Pyre/0.3.0");
+            for (k, v) in &data.headers {
+                builder = builder.header(k.as_str(), v.as_str());
+            }
+            Ok(builder.body(Full::new(data.body)).unwrap())
+        }
         Err(e) => Ok(Response::builder()
             .status(StatusCode::INTERNAL_SERVER_ERROR)
             .header("content-type", "application/json")
-            .header("server", "Pyre/0.2.0")
+            .header("server", "Pyre/0.3.0")
             .body(Full::new(Bytes::from(
                 format!(r#"{{"error":"{}"}}"#, e.replace('"', "\\\"")),
             )))
@@ -981,12 +1462,80 @@ fn build_response(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Static file serving
+// ---------------------------------------------------------------------------
+
+fn mime_from_ext(ext: &str) -> &'static str {
+    match ext {
+        "html" | "htm" => "text/html; charset=utf-8",
+        "css" => "text/css; charset=utf-8",
+        "js" | "mjs" => "application/javascript; charset=utf-8",
+        "json" => "application/json; charset=utf-8",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "svg" => "image/svg+xml",
+        "ico" => "image/x-icon",
+        "webp" => "image/webp",
+        "woff" => "font/woff",
+        "woff2" => "font/woff2",
+        "ttf" => "font/ttf",
+        "otf" => "font/otf",
+        "pdf" => "application/pdf",
+        "xml" => "application/xml; charset=utf-8",
+        "txt" => "text/plain; charset=utf-8",
+        "wasm" => "application/wasm",
+        "map" => "application/json",
+        _ => "application/octet-stream",
+    }
+}
+
+async fn try_static_file(
+    req_path: &str,
+    static_dirs: &[(String, String)],
+) -> Option<Response<Full<Bytes>>> {
+    for (prefix, directory) in static_dirs {
+        if !req_path.starts_with(prefix.as_str()) {
+            continue;
+        }
+        let rel = &req_path[prefix.len()..];
+        // Reject path traversal
+        if rel.contains("..") {
+            return Some(
+                Response::builder()
+                    .status(StatusCode::FORBIDDEN)
+                    .header("server", "Pyre/0.3.0")
+                    .body(Full::new(Bytes::from_static(b"forbidden")))
+                    .unwrap(),
+            );
+        }
+        let file_path = std::path::PathBuf::from(directory).join(rel);
+        if let Ok(contents) = tokio::fs::read(&file_path).await {
+            let ext = file_path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("");
+            let ct = mime_from_ext(ext);
+            return Some(
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .header("content-type", ct)
+                    .header("server", "Pyre/0.3.0")
+                    .body(Full::new(Bytes::from(contents)))
+                    .unwrap(),
+            );
+        }
+    }
+    None
+}
+
 #[inline]
 fn not_found_response() -> Response<Full<Bytes>> {
     Response::builder()
         .status(StatusCode::NOT_FOUND)
         .header("content-type", "application/json")
-        .header("server", "Pyre/0.2.0")
+        .header("server", "Pyre/0.3.0")
         .body(Full::new(Bytes::from_static(b"{\"error\":\"not found\"}")))
         .unwrap()
 }
@@ -999,5 +1548,6 @@ fn not_found_response() -> Response<Full<Bytes>> {
 fn engine(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<SkyApp>()?;
     m.add_class::<SkyRequest>()?;
+    m.add_class::<SkyResponse>()?;
     Ok(())
 }
