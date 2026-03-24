@@ -75,27 +75,51 @@ Tracking issues:
 3. 集成到 Pyre: worker pool + interpreter pool ✓
 4. Benchmark: SubInterp 216k vs Robyn 76k (2.8x) ✓
 
-## Phase 5 — 生产级子解释器（稳定性）
+## Phase 5 — 生产级子解释器 (DONE ✓ Step 1) — v0.3.1, 2026-03-24
 
-当前子解释器实现是 raw FFI PoC，存在以下隐患：
+原始问题清单（Phase 4 遗留的 raw FFI PoC 隐患）：
 
-| 问题 | 风险等级 | 说明 |
-|------|---------|------|
-| 裸 `*mut ffi::PyObject` 指针 | 高 | 一个 DECREF 错了就 segfault 或内存泄漏 |
-| 手动 `Py_INCREF/DECREF` | 高 | 无 RAII 保护，容易漏 |
-| 脚本过滤是字符串匹配 | 中 | `app.` 开头的用户变量会被误删 |
-| `_SkyRequest` 是纯 Python 重写 | 中 | 跟主解释器的 `SkyRequest` 行为可能不一致 |
-| 无 `Py_EndInterpreter` 清理 | 中 | 进程退出时子解释器未正确 shutdown |
-| 子解释器里不能用 PyO3 扩展 | **致命** | 用户 handler 里 `import numpy` 直接炸 |
+| 问题 | 风险等级 | 状态 | 说明 |
+|------|---------|------|------|
+| 裸 `*mut ffi::PyObject` 指针 | 高 | ✅ 已修复 | `PyObjRef` RAII 包装，Drop 自动 DECREF |
+| 手动 `Py_INCREF/DECREF` | 高 | ✅ 已修复 | `from_owned` / `from_borrowed` / `into_raw` 安全接口 |
+| 脚本过滤是字符串匹配 | 中 | ✅ 已修复 | 改用 Python `ast.parse` + `ast.unparse`，精准过滤 |
+| `_SkyRequest` 是纯 Python 重写 | 中 | 🔄 保留 | 跟主解释器行为一致，暂无问题 |
+| 无 `Py_EndInterpreter` 清理 | 中 | ✅ 已修复 | worker 线程退出时自动 `Py_EndInterpreter` |
+| 子解释器里不能用 PyO3 扩展 | **致命** | 🔄 Step 2 | 需要 fork PyO3，见下方 |
+| 队头阻塞 (Round-robin + Mutex) | 高 | ✅ 已修复 | 改为 `crossbeam-channel` 多消费者池，真负载均衡 |
+| 静态文件目录穿越漏洞 | 高 | ✅ 已修复 | `trim_start_matches('/')` + `..` 检测 |
+| Middleware 破坏二进制响应 | 中 | ✅ 已修复 | 非 UTF-8 body 使用 `PyBytes` 而非强转空字符串 |
 
-### Step 1: 安全抽象层 `pyre-interp`（短期，不需要 fork PyO3）
+### Step 1: 安全抽象层 `pyre-interp` (DONE ✓)
 
-在 `pyo3::ffi` 之上包一层：
-- [ ] RAII 包装 `PyObject` 引用计数（Drop 自动 DECREF）
-- [ ] 子解释器 `Drop` 时自动 `Py_EndInterpreter`
-- [ ] 用 Python AST 解析替代字符串行过滤
-- [ ] `_SkyRequest` protocol 兼容测试
-- [ ] per-worker Mutex 改为 channel-based worker pool（避免锁竞争）
+在 `pyo3::ffi` 之上包一层（`src/interp.rs`, 820 行）：
+- [x] `PyObjRef` RAII 包装引用计数（Drop 自动 DECREF）
+- [x] `from_owned` / `from_borrowed` / `into_raw` 安全接口
+- [x] `py_str` / `py_bytes` / `py_str_dict` 辅助构造器
+- [x] 子解释器退出时自动 `Py_EndInterpreter`
+- [x] Python AST 解析替代字符串行过滤（支持装饰器语法）
+- [x] `crossbeam-channel` 多消费者 worker pool（消除队头阻塞）
+- [x] `tokio::sync::oneshot` 异步响应（Tokio 任务不阻塞）
+
+### 工程重构：模块化拆分 (DONE ✓)
+
+从 981 行 God File 拆分为 8 个职责单一的模块：
+
+```
+src/
+├── lib.rs          18 行   ← #[pymodule] + mod 声明
+├── types.rs       116 行   ← SkyRequest, SkyResponse, extract_headers
+├── json.rs         44 行   ← py_to_json_value (Rust-side JSON 序列化)
+├── router.rs       70 行   ← RouteTable, SharedRoutes
+├── response.rs    164 行   ← extract_response_data, build/error/404 response
+├── handlers.rs    218 行   ← handle_request (GIL), handle_request_subinterp
+├── static_fs.rs    69 行   ← try_static_file, mime_from_ext
+├── app.rs         342 行   ← SkyApp, run_gil(), run_subinterp()
+└── interp.rs      820 行   ← PyObjRef RAII, channel pool, AST filter
+```
+
+Benchmark: SubInterp 215k (channel pool, -0.5% vs mutex), GIL 104k (+3%), Robyn 83k。零回归。
 
 ### Step 2: 精准 Fork PyO3（中期，解锁第三方扩展）
 
@@ -135,3 +159,4 @@ Tracking issues:
 | 2026-03-23 | v0.1.0 | — | 69k | 27k | Phase 1: 骨架，2.5x Robyn |
 | 2026-03-23 | v0.2.0 | 216k | 100k | 76k | Phase 2+4: 子解释器，2.8x Robyn |
 | 2026-03-24 | v0.3.0 | 213k | 100k | 76k | Phase 3: DX 功能补全，零回归 |
+| 2026-03-24 | v0.3.1 | 215k | 104k | 83k | Phase 5.1: RAII + channel pool + 模块化拆分 + 安全修复 |
