@@ -1,0 +1,15 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "skytrade"
+version = "0.1.0"
+description = "A Robyn-killer high-performance Python web framework powered by Rust"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+
+[tool.maturin]
+features = ["pyo3/extension-module"]
+python-source = "python"
+module-name = "skytrade.engine"
