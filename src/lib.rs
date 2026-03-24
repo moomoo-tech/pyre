@@ -6,6 +6,7 @@ mod response;
 mod router;
 mod static_fs;
 mod types;
+mod monitor;
 mod state;
 mod stream;
 mod websocket;
@@ -20,5 +21,6 @@ fn engine(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<websocket::SkyWebSocket>()?;
     m.add_class::<state::SharedState>()?;
     m.add_class::<stream::SkyStream>()?;
+    m.add_function(pyo3::wrap_pyfunction!(monitor::get_gil_metrics, m)?)?;
     Ok(())
 }

@@ -137,6 +137,11 @@ impl SkyApp {
         workers: Option<usize>,
         mode: Option<&str>,
     ) -> PyResult<()> {
+        // Start GIL watchdog (once)
+        use std::sync::Once;
+        static WATCHDOG_INIT: Once = Once::new();
+        WATCHDOG_INIT.call_once(crate::monitor::spawn_gil_watchdog);
+
         let host = host.unwrap_or("127.0.0.1");
         let port = port.unwrap_or(8000);
         let mode = mode.unwrap_or("default");
