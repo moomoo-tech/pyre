@@ -73,7 +73,26 @@ pub(crate) async fn handle_request(
         body_bytes,
     };
 
-    let result: Result<ResponseData, String> = Python::attach(|py| {
+    // spawn_blocking: prevent GIL acquisition from starving Tokio workers
+    let result = tokio::task::spawn_blocking(move || {
+        call_handler_with_hooks(routes, handler_idx, sky_req)
+    })
+    .await
+    .unwrap_or_else(|_| Err("handler thread panicked".to_string()));
+
+    build_response(result)
+}
+
+// ---------------------------------------------------------------------------
+// Shared: call handler with full middleware chain (runs in blocking thread)
+// ---------------------------------------------------------------------------
+
+fn call_handler_with_hooks(
+    routes: SharedRoutes,
+    handler_idx: usize,
+    sky_req: SkyRequest,
+) -> Result<ResponseData, String> {
+    Python::attach(|py| {
         let table = routes.read();
         let before_hooks: Vec<Py<PyAny>> =
             table.before_hooks.iter().map(|h| h.clone_ref(py)).collect();
@@ -107,7 +126,6 @@ pub(crate) async fn handle_request(
 
                 // after_request hooks
                 for hook in &after_hooks {
-                    // Preserve binary data: use PyBytes for non-UTF8
                     let body_py: Py<PyAny> = match std::str::from_utf8(&resp_data.body) {
                         Ok(s) => PyString::new(py, s).into_any().unbind(),
                         Err(_) => pyo3::types::PyBytes::new(py, &resp_data.body)
@@ -139,9 +157,7 @@ pub(crate) async fn handle_request(
             }
             Err(e) => Err(format!("handler error: {e}")),
         }
-    });
-
-    build_response(result)
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -183,7 +199,7 @@ pub(crate) async fn handle_request_subinterp(
     let is_gil_route = pool.requires_gil.get(handler_idx).copied().unwrap_or(false);
 
     if is_gil_route {
-        // Route to main interpreter with full middleware chain
+        // GIL route: spawn_blocking to avoid starving Tokio workers
         let sky_req = SkyRequest {
             method,
             path,
@@ -193,66 +209,11 @@ pub(crate) async fn handle_request_subinterp(
             body_bytes,
         };
 
-        let result: Result<ResponseData, String> = Python::attach(|py| {
-            let table = routes.read();
-            let handler = table.handlers[handler_idx].clone_ref(py);
-            let before_hooks: Vec<Py<PyAny>> =
-                table.before_hooks.iter().map(|h| h.clone_ref(py)).collect();
-            let after_hooks: Vec<Py<PyAny>> =
-                table.after_hooks.iter().map(|h| h.clone_ref(py)).collect();
-            drop(table);
-
-            // before_request hooks
-            for hook in &before_hooks {
-                match hook.call1(py, (sky_req.clone(),)) {
-                    Ok(result) => {
-                        let bound = result.bind(py);
-                        if !bound.is_none() {
-                            return extract_response_data(py, bound.clone());
-                        }
-                    }
-                    Err(e) => return Err(format!("before_request hook error: {e}")),
-                }
-            }
-
-            match handler.call1(py, (sky_req.clone(),)) {
-                Ok(obj) => {
-                    let mut resp_data = extract_response_data(py, obj.bind(py).clone())?;
-
-                    // after_request hooks
-                    for hook in &after_hooks {
-                        let body_py: Py<PyAny> = match std::str::from_utf8(&resp_data.body) {
-                            Ok(s) => PyString::new(py, s).into_any().unbind(),
-                            Err(_) => pyo3::types::PyBytes::new(py, &resp_data.body)
-                                .into_any()
-                                .unbind(),
-                        };
-                        let current_resp = Py::new(
-                            py,
-                            SkyResponse {
-                                body: body_py,
-                                status_code: resp_data.status,
-                                content_type: Some(resp_data.content_type.clone()),
-                                headers: resp_data.headers.clone(),
-                            },
-                        )
-                        .map_err(|e| format!("failed to create SkyResponse: {e}"))?;
-                        match hook.call1(py, (sky_req.clone(), current_resp)) {
-                            Ok(result) => {
-                                let bound = result.bind(py);
-                                if !bound.is_none() {
-                                    resp_data = extract_response_data(py, bound.clone())?;
-                                }
-                            }
-                            Err(e) => return Err(format!("after_request hook error: {e}")),
-                        }
-                    }
-
-                    Ok(resp_data)
-                }
-                Err(e) => Err(format!("handler error: {e}")),
-            }
-        });
+        let result = tokio::task::spawn_blocking(move || {
+            call_handler_with_hooks(routes, handler_idx, sky_req)
+        })
+        .await
+        .unwrap_or_else(|_| Err("handler thread panicked".to_string()));
 
         return build_response(result);
     }

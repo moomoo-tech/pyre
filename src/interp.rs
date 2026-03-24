@@ -372,14 +372,25 @@ class _SkyResponse:
             ffi::Py_INCREF(sky_response_cls);
         }
 
-        let json_mod = ffi::PyImport_ImportModule(c"json".as_ptr());
-        let json_dumps_func = if !json_mod.is_null() {
-            let f = ffi::PyObject_GetAttrString(json_mod, c"dumps".as_ptr());
-            ffi::Py_DECREF(json_mod);
-            f // owned ref from GetAttrString
-        } else {
-            ffi::PyErr_Clear();
-            std::ptr::null_mut()
+        // Try orjson first (10-40x faster than stdlib json), fall back to json
+        let json_dumps_func = {
+            let orjson_mod = ffi::PyImport_ImportModule(c"orjson".as_ptr());
+            if !orjson_mod.is_null() {
+                let f = ffi::PyObject_GetAttrString(orjson_mod, c"dumps".as_ptr());
+                ffi::Py_DECREF(orjson_mod);
+                f
+            } else {
+                ffi::PyErr_Clear();
+                let json_mod = ffi::PyImport_ImportModule(c"json".as_ptr());
+                if !json_mod.is_null() {
+                    let f = ffi::PyObject_GetAttrString(json_mod, c"dumps".as_ptr());
+                    ffi::Py_DECREF(json_mod);
+                    f
+                } else {
+                    ffi::PyErr_Clear();
+                    std::ptr::null_mut()
+                }
+            }
         };
 
         // Keep globals alive — transfer ownership to the struct
@@ -501,8 +512,7 @@ class _SkyResponse:
         })
     }
 
-    /// Serialize a Python dict/list to JSON string via json.dumps.
-    /// Serialize a Python dict/list to JSON string via cached json.dumps.
+    /// Serialize a Python dict/list to JSON string via cached dumps (orjson or json).
     unsafe fn json_dumps(&self, obj: PyObjRef) -> Result<String, String> {
         if self.json_dumps_func.is_null() {
             return Err("json.dumps not cached".to_string());
@@ -512,7 +522,7 @@ class _SkyResponse:
             .ok_or("failed to create tuple")?;
         ffi::PyTuple_SetItem(args.as_ptr(), 0, obj.into_raw());
 
-        let json_str = PyObjRef::from_owned(
+        let result = PyObjRef::from_owned(
             ffi::PyObject_Call(self.json_dumps_func, args.as_ptr(), std::ptr::null_mut()),
         )
         .ok_or_else(|| {
@@ -520,7 +530,19 @@ class _SkyResponse:
             "json.dumps failed".to_string()
         })?;
 
-        pyobj_to_string(json_str.as_ptr())
+        // orjson.dumps returns bytes, json.dumps returns str
+        if ffi::PyBytes_Check(result.as_ptr()) != 0 {
+            let mut size: isize = 0;
+            let ptr = ffi::PyBytes_AsString(result.as_ptr());
+            size = ffi::PyBytes_Size(result.as_ptr());
+            if ptr.is_null() {
+                return Err("failed to extract bytes".to_string());
+            }
+            let bytes = std::slice::from_raw_parts(ptr as *const u8, size as usize);
+            String::from_utf8(bytes.to_vec()).map_err(|e| e.to_string())
+        } else {
+            pyobj_to_string(result.as_ptr())
+        }
     }
 
     /// Parse a _SkyResponse Python object.
