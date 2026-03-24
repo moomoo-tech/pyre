@@ -1,6 +1,8 @@
 # Sky-RPC 引擎设计文档
 
-> 状态：愿景阶段，Web 框架 (Pyre) PyPI 发布后启动
+> 状态：**搁置** — 当前 MsgPack RPC over HTTP 已满足需求。
+> 自定义二进制协议仅在 >500k QPS 或微秒级延迟场景才有价值。
+> 220k QPS 瓶颈在 Python handler，不在 HTTP header 解析（~2% overhead）。
 
 ## 定位
 
