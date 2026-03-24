@@ -6,6 +6,7 @@ mod response;
 mod router;
 mod static_fs;
 mod types;
+mod state;
 mod websocket;
 
 use pyo3::prelude::*;
@@ -16,5 +17,6 @@ fn engine(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<types::SkyRequest>()?;
     m.add_class::<types::SkyResponse>()?;
     m.add_class::<websocket::SkyWebSocket>()?;
+    m.add_class::<state::SharedState>()?;
     Ok(())
 }

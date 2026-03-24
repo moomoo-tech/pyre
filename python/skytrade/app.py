@@ -34,6 +34,17 @@ class Pyre:
         self._fallback_handler: Callable | None = None
         self._fallback_name: str | None = None
 
+    @property
+    def state(self):
+        """Shared state across all sub-interpreters (nanosecond latency).
+
+        Usage::
+
+            app.state["session:user_1"] = json.dumps({"role": "admin"})
+            data = json.loads(app.state["session:user_1"])
+        """
+        return self._engine.state
+
     # ------------------------------------------------------------------
     # Route registration (decorator + direct call)
     # ------------------------------------------------------------------

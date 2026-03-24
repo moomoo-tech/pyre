@@ -14,12 +14,14 @@ use tokio::signal;
 use crate::handlers::{handle_request, handle_request_subinterp};
 use crate::interp;
 use crate::router::{RouteTable, SharedRoutes};
+use crate::state::SharedState;
 use crate::websocket;
 
 #[pyclass]
 pub(crate) struct SkyApp {
     routes: SharedRoutes,
     script_path: Option<String>,
+    shared_state: Arc<dashmap::DashMap<String, Vec<u8>>>,
 }
 
 #[pymethods]
@@ -29,7 +31,14 @@ impl SkyApp {
         SkyApp {
             routes: Arc::new(parking_lot::RwLock::new(RouteTable::new())),
             script_path: None,
+            shared_state: Arc::new(dashmap::DashMap::new()),
         }
+    }
+
+    /// Access the shared state (cross-sub-interpreter, nanosecond latency).
+    #[getter]
+    fn state(&self) -> SharedState {
+        SharedState::with_inner(Arc::clone(&self.shared_state))
     }
 
     #[pyo3(signature = (path, handler, gil=false))]
