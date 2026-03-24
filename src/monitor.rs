@@ -26,6 +26,11 @@ pub static GIL_QUEUE_LENGTH: std::sync::atomic::AtomicIsize = std::sync::atomic:
 /// Peak business handler GIL hold time (microseconds, reset on read)
 pub static GIL_HOLD_MAX_US: AtomicU64 = AtomicU64::new(0);
 
+/// Requests dropped due to backpressure (503 overloaded)
+pub static DROPPED_REQUESTS: AtomicU64 = AtomicU64::new(0);
+/// Total requests processed
+pub static TOTAL_REQUESTS: AtomicU64 = AtomicU64::new(0);
+
 /// Spawn the GIL watchdog background thread.
 pub fn spawn_gil_watchdog() {
     std::thread::Builder::new()
@@ -120,11 +125,12 @@ unsafe fn mach_task_self_info(info: &mut libc_mach_task_basic_info, count: &mut 
 // Python-facing metrics API
 // ---------------------------------------------------------------------------
 
-/// Get GIL metrics. Returns dict-like tuple:
-/// (last_us, peak_us, probe_count, total_wait_us, rss_bytes, queue_len, hold_peak_us)
+/// Get all metrics. Returns tuple:
+/// (last_us, peak_us, probe_count, total_wait_us, rss_bytes,
+///  queue_len, hold_peak_us, dropped_requests, total_requests)
 /// Resets peaks after read.
 #[pyfunction]
-pub fn get_gil_metrics() -> (u64, u64, u64, u64, u64, isize, u64) {
+pub fn get_gil_metrics() -> (u64, u64, u64, u64, u64, isize, u64, u64, u64) {
     let last = GIL_LATENCY_LAST_US.load(Ordering::Relaxed);
     let peak = GIL_LATENCY_MAX_US.swap(0, Ordering::Relaxed);
     let count = GIL_PROBE_COUNT.load(Ordering::Relaxed);
@@ -132,5 +138,7 @@ pub fn get_gil_metrics() -> (u64, u64, u64, u64, u64, isize, u64) {
     let rss = MEMORY_RSS_BYTES.load(Ordering::Relaxed);
     let queue = GIL_QUEUE_LENGTH.load(std::sync::atomic::Ordering::Relaxed);
     let hold_peak = GIL_HOLD_MAX_US.swap(0, Ordering::Relaxed);
-    (last, peak, count, total, rss, queue, hold_peak)
+    let dropped = DROPPED_REQUESTS.load(Ordering::Relaxed);
+    let total_req = TOTAL_REQUESTS.load(Ordering::Relaxed);
+    (last, peak, count, total, rss, queue, hold_peak, dropped, total_req)
 }

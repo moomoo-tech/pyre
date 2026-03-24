@@ -24,8 +24,8 @@ PORT = 9000
 WRK = "wrk"
 
 WARMUP = "-t2 -c50 -d3s"
-BENCH_HIGH = "-t4 -c256 -d10s"
-BENCH_LOW = "-t1 -c10 -d10s"
+BENCH_HIGH = "-t4 -c256 -d10s --latency"
+BENCH_LOW = "-t1 -c10 -d10s --latency"
 
 
 @dataclass
@@ -90,6 +90,9 @@ def parse_wrk_output(output: str) -> dict:
         "avg_latency_ms": 0.0,
         "max_latency_ms": 0.0,
         "stdev_latency_ms": 0.0,
+        "p50_latency_ms": 0.0,
+        "p99_latency_ms": 0.0,
+        "p99_9_latency_ms": 0.0,
         "total_requests": 0,
         "errors": 0,
         "transfer_per_sec": "",
@@ -100,17 +103,33 @@ def parse_wrk_output(output: str) -> dict:
     if m:
         result["req_per_sec"] = float(m.group(1))
 
+    def to_ms(val, unit):
+        v = float(val)
+        if unit == "us": return v / 1000
+        if unit == "s": return v * 1000
+        return v
+
     # Latency   836.85us  561.33us  18.81ms   89.38%
     m = re.search(r"Latency\s+([\d.]+)(us|ms|s)\s+([\d.]+)(us|ms|s)\s+([\d.]+)(us|ms|s)", output)
     if m:
-        def to_ms(val, unit):
-            v = float(val)
-            if unit == "us": return v / 1000
-            if unit == "s": return v * 1000
-            return v
         result["avg_latency_ms"] = round(to_ms(m.group(1), m.group(2)), 3)
         result["stdev_latency_ms"] = round(to_ms(m.group(3), m.group(4)), 3)
         result["max_latency_ms"] = round(to_ms(m.group(5), m.group(6)), 3)
+
+    # Latency Distribution (from --latency flag)
+    #   50%  836.00us
+    #   75%    1.04ms
+    #   90%    1.43ms
+    #   99%    3.21ms
+    def parse_pct(pct):
+        m = re.search(rf"\s+{pct}%\s+([\d.]+)(us|ms|s)", output)
+        if m:
+            return to_ms(m.group(1), m.group(2))
+        return 0.0
+
+    result["p50_latency_ms"] = round(parse_pct(50), 3)
+    result["p99_latency_ms"] = round(parse_pct(99), 3)
+    result["p99_9_latency_ms"] = round(parse_pct("99\\.9"), 3)
 
     # 2157773 requests in 10.02s
     m = re.search(r"(\d+) requests in", output)

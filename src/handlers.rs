@@ -88,6 +88,7 @@ pub(crate) async fn handle_request(
     req: Request<Incoming>,
     routes: FrozenRoutes,
 ) -> Result<Response<BoxBody>, hyper::Error> {
+    crate::monitor::TOTAL_REQUESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let method = req.method().to_string();
     let uri = req.uri().clone();
     let path = uri.path().to_string();
@@ -311,6 +312,7 @@ pub(crate) async fn handle_request_subinterp(
     pool: SharedPool,
     routes: FrozenRoutes,
 ) -> Result<Response<BoxBody>, hyper::Error> {
+    crate::monitor::TOTAL_REQUESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let method = req.method().to_string();
     let uri = req.uri().clone();
     let path = uri.path().to_string();
@@ -375,6 +377,7 @@ pub(crate) async fn handle_request_subinterp(
         headers,
         response_tx,
     }) {
+        crate::monitor::DROPPED_REQUESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         return Ok(full_body(overloaded_response(&e)));
     }
 
