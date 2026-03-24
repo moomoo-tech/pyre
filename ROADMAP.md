@@ -1,13 +1,13 @@
 # Pyre Roadmap
 
-## Phase 1 — Skeleton (DONE)
+## Phase 1 — Skeleton (DONE ✓)
 - Tokio + Hyper HTTP server
 - PyO3 0.28 bridge
 - matchit routing
 - GIL detach/attach
 - Benchmark: 69k req/s vs Robyn 27k (2.5x), 10MB vs 35MB RSS
 
-## Phase 2 — Optimization (DONE)
+## Phase 2 — Optimization (DONE ✓)
 - Multi-worker Tokio runtime (configurable)
 - Keep-alive + pipeline flush
 - Graceful shutdown (Ctrl+C)
@@ -15,59 +15,31 @@
 - dict/list 直接返回支持
 - Connection error 静噪
 
-## Phase 3 — Surpass Robyn
-- [ ] io_uring backend (Linux, monoio)
-- [ ] HTTP/3 QUIC
-- [ ] Native WebSocket
-- [ ] Native gRPC (tonic crate, Robyn 不支持)
+## Phase 3 — Developer Experience (DONE ✓) — v0.3.0
+- [x] `Pyre` 装饰器语法 (`@app.get("/")`)
+- [x] `SkyResponse` — 自定义 status code / headers / content-type
+- [x] `req.headers` — 请求头读取
+- [x] `req.query_params` — 查询参数解析
+- [x] `before_request` / `after_request` 中间件
+- [x] `@app.fallback` — 自定义 404 handler
+- [x] 静态文件服务 (`app.static("/prefix", "./dir")`)
+- [x] 内置请求日志 (`app.enable_logging()`)
+- [x] PATCH / OPTIONS / HEAD 方法支持
+- [x] PyPI 就绪 (pyproject.toml + classifiers)
+- Benchmark: 213k req/s SubInterp, 100k GIL (零性能回归)
 
-## Phase 4 — True Parallelism (核心突破)
+## Phase 4 — True Parallelism (DONE ✓)
 
-目标：支持两种并行模式，用户可选：
+两种并行模式：
 
 ### 模式 A: Free-threaded Python (python3.14t, no-GIL)
 - PyO3 0.28 已支持
-- 改动最小，装 python3.14t 即可
 - 所有 Tokio worker 线程共享同一解释器，真并行调用 handler
-- 优先实现
 
 ### 模式 B: Per-Interpreter GIL (子解释器)
 - 每个 worker 线程绑定一个独立子解释器，各自有独立 GIL
-- 提供进程级隔离 + 线程级性能
 - 架构：Tokio Worker N → Sub-Interpreter N (GIL-N) → handler()
-
-#### 子解释器的核心难题：PyO3 不支持
-
-PyO3 0.28 明确阻止子解释器（`#[pymodule]` 会检查 interpreter ID，第二次 import 直接 ImportError）。
-根本原因：PyO3 内部大量全局 `static` 状态，跨解释器共享会 unsound。
-
-Tracking issues:
-- https://github.com/PyO3/pyo3/issues/576
-- https://github.com/PyO3/pyo3/issues/3451
-- https://github.com/PyO3/pyo3/issues/4570
-
-#### 方案：Fork PyO3，手撸多解释器版本
-
-核心改造：
-1. **消除全局 static** — 将所有模块级全局状态（PyOnceLock、static module def、type object cache）
-   迁移到 `PyModule_GetState` 或 `PyInterpreterState_GetDict`，实现 per-interpreter 隔离
-2. **多阶段初始化** — 确保 `#[pymodule]` 生成的模块使用 PEP 489 multi-phase init，
-   并声明 `Py_mod_multiple_interpreters = Py_MOD_PER_INTERPRETER_GIL_SUPPORTED`
-3. **移除 interpreter ID 检查** — 去掉 `make_module` 中的 AtomicI64 拦截逻辑
-4. **ThreadState 管理** — 在 Tokio worker 线程中正确切换 `PyThreadState_Swap`
-5. **FFI 层** — 使用 `Py_NewInterpreterFromConfig` + `PyInterpreterConfig_OWN_GIL`
-
-风险评估：
-- 工作量大，PyO3 内部状态分布广
-- 需要持续跟进上游 PyO3 变更
-- 但如果成功，这将是**全球第一个**支持 per-interpreter GIL 的 Rust-Python web 框架
-- 目前没有任何生产级框架（包括 Granian）实现了这个
-
-#### 里程碑
-1. Fork PyO3 → 审计所有全局 static 变量
-2. PoC: 在两个子解释器中成功 import 同一个 `#[pymodule]`
-3. 集成到 Pyre: worker pool + interpreter pool
-4. Benchmark: 对比 free-threaded / sub-interpreter / Robyn --fast
+- Benchmark: 达到纯 Rust 97% 性能
 
 ## Phase 5 — 生产级子解释器（稳定性）
 
@@ -107,6 +79,13 @@ Tracking issues:
 - PyO3 tracking issue: https://github.com/PyO3/pyo3/issues/3451
 - 如果 Step 2 的 fork 稳定，可以向 PyO3 上游提 PR
 - 关注 numpy/orjson/pydantic 等库的 `Py_MOD_PER_INTERPRETER_GIL_SUPPORTED` 适配进度
+
+## Phase 6 — 协议突破
+- [ ] Native WebSocket（交易系统核心需求）
+- [ ] HTTP/2（deps 里已有 hyper http2 feature）
+- [ ] io_uring backend (Linux, monoio)
+- [ ] HTTP/3 QUIC
+- [ ] Native gRPC (tonic crate, Robyn 不支持)
 
 ## 长期愿景
 - 成为第一个同时支持 free-threaded 和 per-interpreter GIL 的 Python web 框架
