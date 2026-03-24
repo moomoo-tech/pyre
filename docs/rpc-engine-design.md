@@ -77,6 +77,28 @@ class MyTradeService(TradeServiceBase):
 └─────────────────────────────────────┘
 ```
 
+## 序列化选型决策
+
+**不用 Google 官方 `protobuf` Python 包。** 原因：
+1. C++ 扩展边界跨越开销（每次字段访问一次 FFI 调用）
+2. 全局描述符池与子解释器不兼容（死锁/内存泄漏风险）
+3. DX 极差（不支持 dataclass，类型提示残缺）
+
+| 方案 | 性能 | DX | 子解释器安全 | 适用场景 |
+|------|------|-----|------------|---------|
+| **prost (Rust) + PyO3** | 极致 | 需要代码生成 | ✅ | 内部高频通信 |
+| **betterproto (Python)** | 高 | 原生 dataclass | ✅ 纯 Python | 跨团队契约 |
+| **MsgPack (msgpack-python)** | 极高 | 无 schema | ✅ | 极简内部 RPC |
+| **grpclib + betterproto** | 中 | 标准 gRPC | ✅ 纯 asyncio | 被迫兼容 gRPC |
+| ~~官方 protobuf~~ | 低 | 差 | ❌ C++ 全局状态 | 不用 |
+| ~~官方 grpcio~~ | 低 | 差 | ❌ 隐式 C 线程池 | 不用 |
+
+### MVP 路线
+
+1. **MsgPack over HTTP/1.1** — 最快落地，Pyre 底层零改动
+2. **prost + PyO3 PyDict** — 极致性能，Rust 侧解码后直传 Python
+3. **betterproto** — 如果需要 .proto 契约
+
 ## 实施计划
 
 | 阶段 | 内容 | 前置条件 |
