@@ -1,21 +1,25 @@
 # Pyre Roadmap
 
-## Phase 1 — Skeleton (DONE ✓)
+## Phase 1 — Skeleton (DONE ✓) — 2026-03-23
+
 - Tokio + Hyper HTTP server
 - PyO3 0.28 bridge
 - matchit routing
 - GIL detach/attach
 - Benchmark: 69k req/s vs Robyn 27k (2.5x), 10MB vs 35MB RSS
 
-## Phase 2 — Optimization (DONE ✓)
+## Phase 2 — Optimization (DONE ✓) — 2026-03-23
+
 - Multi-worker Tokio runtime (configurable)
 - Keep-alive + pipeline flush
 - Graceful shutdown (Ctrl+C)
 - Rust-side JSON serialization (serde_json, skip Python json.dumps)
 - dict/list 直接返回支持
 - Connection error 静噪
+- Benchmark: GIL 100k, SubInterp 216k, Robyn 76k
 
-## Phase 3 — Developer Experience (DONE ✓) — v0.3.0
+## Phase 3 — Developer Experience (DONE ✓) — v0.3.0, 2026-03-24
+
 - [x] `Pyre` 装饰器语法 (`@app.get("/")`)
 - [x] `SkyResponse` — 自定义 status code / headers / content-type
 - [x] `req.headers` — 请求头读取
@@ -28,18 +32,48 @@
 - [x] PyPI 就绪 (pyproject.toml + classifiers)
 - Benchmark: 213k req/s SubInterp, 100k GIL (零性能回归)
 
-## Phase 4 — True Parallelism (DONE ✓)
+## Phase 4 — True Parallelism (DONE ✓) — 2026-03-23
 
-两种并行模式：
+目标：支持两种并行模式，用户可选。
 
 ### 模式 A: Free-threaded Python (python3.14t, no-GIL)
 - PyO3 0.28 已支持
+- 改动最小，装 python3.14t 即可
 - 所有 Tokio worker 线程共享同一解释器，真并行调用 handler
+- 优先实现
 
 ### 模式 B: Per-Interpreter GIL (子解释器)
 - 每个 worker 线程绑定一个独立子解释器，各自有独立 GIL
+- 提供进程级隔离 + 线程级性能
 - 架构：Tokio Worker N → Sub-Interpreter N (GIL-N) → handler()
 - Benchmark: 达到纯 Rust 97% 性能
+
+#### 子解释器的核心难题：PyO3 不支持
+
+PyO3 0.28 明确阻止子解释器（`#[pymodule]` 会检查 interpreter ID，第二次 import 直接 ImportError）。
+根本原因：PyO3 内部大量全局 `static` 状态，跨解释器共享会 unsound。
+
+Tracking issues:
+- https://github.com/PyO3/pyo3/issues/576
+- https://github.com/PyO3/pyo3/issues/3451
+- https://github.com/PyO3/pyo3/issues/4570
+
+#### 解法：绕过 PyO3，直接 FFI
+
+不 fork PyO3，而是在子解释器中用 raw `pyo3::ffi` 调用 CPython C API：
+- `Py_NewInterpreterFromConfig` + `PyInterpreterConfig_OWN_GIL` 创建独立 GIL 子解释器
+- `PyRun_String` 执行用户脚本（过滤掉框架代码）
+- `PyDict_GetItemString` 提取 handler 函数指针
+- `PyObject_Call` 直接调用 handler
+- 纯 Python `_SkyRequest` / `_SkyResponse` 替代 PyO3 的 `#[pyclass]`
+
+风险：裸指针、手动引用计数、无 RAII，但性能极佳。
+
+#### 里程碑（已完成）
+1. ~~Fork PyO3~~ → 改为 raw FFI 方案
+2. PoC: 10 个子解释器并行处理请求 ✓
+3. 集成到 Pyre: worker pool + interpreter pool ✓
+4. Benchmark: SubInterp 216k vs Robyn 76k (2.8x) ✓
 
 ## Phase 5 — 生产级子解释器（稳定性）
 
@@ -91,3 +125,13 @@
 - 成为第一个同时支持 free-threaded 和 per-interpreter GIL 的 Python web 框架
 - 在交易系统场景中实现微秒级 WebSocket + Orderbook 处理
 - 提供 Robyn/Flask/FastAPI 的迁移兼容层
+
+---
+
+## 性能历史
+
+| 日期 | 版本 | SubInterp | GIL | Robyn | 里程碑 |
+|------|------|-----------|-----|-------|--------|
+| 2026-03-23 | v0.1.0 | — | 69k | 27k | Phase 1: 骨架，2.5x Robyn |
+| 2026-03-23 | v0.2.0 | 216k | 100k | 76k | Phase 2+4: 子解释器，2.8x Robyn |
+| 2026-03-24 | v0.3.0 | 213k | 100k | 76k | Phase 3: DX 功能补全，零回归 |
