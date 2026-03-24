@@ -191,10 +191,41 @@ def echo(ws):
 - [ ] AST 过滤替换为环境变量方案
 - [ ] Pydantic 自动绑定
 
+## Phase 7 — Async Handler (下一个)
+
+Pyre 唯一落后 Robyn 的场景：I/O 并发（sleep 1ms: 7.9k vs 78k, 10x 差距）。
+原因：sync handler 阻塞 worker 线程，async handler 可在等待 I/O 时释放线程。
+
+### 为什么不做多进程 numpy
+
+详见 `docs/why-not-multiprocess.md`。核心结论：
+- 多进程摧毁 Pyre 单进程内存优势（67MB vs 451MB）
+- 99% Web 请求是 I/O，不是 CPU
+- numpy 的 PEP 684 适配是 numpy 的问题，不是 Pyre 的
+- 金融计算应在后台进程，Web 层只负责 I/O
+- 推荐 Polars 替代 Pandas（释放 GIL，不阻塞 Pyre）
+
+### 实现方案
+
+检测 handler 返回 coroutine → 在 Rust 侧 await Python asyncio Future：
+- 识别：`PyCoro_CheckExact(result_ptr)`
+- 桥接：每个子解释器维护独立 asyncio event loop
+- await：`pyo3_asyncio::into_future` 或手写 FFI 桥接
+- 效果：I/O 挂起时释放 worker，不阻塞 Tokio
+
+### 目标
+
+```
+sleep(1ms) I/O:  7.9k → 70k+  (追平 Robyn)
+asyncpg/aiohttp: 可用          (Python async 生态兼容)
+内存:            保持 67MB      (不引入多进程)
+```
+
 ## 长期愿景
 - 成为第一个同时支持 free-threaded 和 per-interpreter GIL 的 Python web 框架
 - 在交易系统场景中实现微秒级 WebSocket + Orderbook 处理
 - 提供 Robyn/Flask/FastAPI 的迁移兼容层
+- I/O + CPU + 内存 三杀 Robyn
 
 ---
 
