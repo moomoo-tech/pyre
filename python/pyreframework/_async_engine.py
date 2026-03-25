@@ -12,6 +12,16 @@ Template variables (replaced by Rust before exec):
 import asyncio
 import threading
 
+# Prefer orjson for fast JSON serialization (same strategy as Rust side)
+try:
+    import orjson as _orjson
+    def _json_dumps_bytes(obj):
+        return _orjson.dumps(obj)
+except ImportError:
+    import json as _json_mod
+    def _json_dumps_bytes(obj):
+        return _json_mod.dumps(obj).encode("utf-8")
+
 # Injected by Rust: WORKER_ID = {worker_idx}
 # Injected by Rust: HANDLER_NAMES = [{handlers_array}]
 
@@ -46,14 +56,12 @@ async def _process_request(req_id, handler_idx, method, path, query, body_bytes,
                 body,
             )
         elif isinstance(res, dict):
-            import json
-
             _pyre_send(
                 WORKER_ID,
                 req_id,
                 200,
                 "application/json",
-                json.dumps(res).encode("utf-8"),
+                _json_dumps_bytes(res),
             )
         elif isinstance(res, bytes):
             _pyre_send(WORKER_ID, req_id, 200, "application/octet-stream", res)

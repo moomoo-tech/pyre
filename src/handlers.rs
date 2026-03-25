@@ -16,7 +16,7 @@ use crate::response::{
 use crate::router::FrozenRoutes;
 use crate::static_fs::try_static_file;
 use crate::stream::PyreStream;
-use crate::types::{extract_headers, ResponseData, PyreRequest, PyreResponse};
+use crate::types::{extract_headers, PyreRequest, PyreResponse, ResponseData};
 
 type SharedPool = Arc<interp::InterpreterPool>;
 
@@ -326,6 +326,7 @@ pub(crate) async fn handle_request_subinterp(
     };
 
     let lookup = pool.lookup(&method, &path);
+    let has_fallback = routes.fallback_handler.is_some();
 
     if lookup.is_none() {
         if let Some(resp) = try_static_file(&path, &pool.static_dirs).await {
@@ -335,11 +336,14 @@ pub(crate) async fn handle_request_subinterp(
 
     let (handler_idx, params) = match lookup {
         Some(v) => v,
+        None if has_fallback => (usize::MAX, HashMap::new()),
         None => return Ok(full_body(not_found_response())),
     };
 
     // ── Hybrid dispatch: GIL routes use main interpreter ──
-    let is_gil_route = pool.requires_gil.get(handler_idx).copied().unwrap_or(false);
+    // Fallback handler (usize::MAX) always runs on GIL since it's registered on the main interpreter.
+    let is_gil_route =
+        handler_idx == usize::MAX || pool.requires_gil.get(handler_idx).copied().unwrap_or(false);
 
     if is_gil_route {
         let sky_req = PyreRequest {

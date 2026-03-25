@@ -1157,6 +1157,39 @@ impl InterpreterPool {
     }
 }
 
+/// RAII guard: ensures GIL is released even if a panic occurs mid-handler.
+/// Without this, a panic after `PyEval_RestoreThread` but before `PyEval_SaveThread`
+/// would leave the GIL permanently locked, causing deadlock on the next request
+/// and eventual segfault from corrupted thread state.
+///
+/// The saved thread state is written back to `tstate_cell` on drop, so the caller
+/// can retrieve it even after a panic unwind.
+struct SubInterpGilGuard<'a> {
+    tstate_cell: &'a std::cell::Cell<*mut ffi::PyThreadState>,
+}
+
+impl<'a> SubInterpGilGuard<'a> {
+    /// Acquire the sub-interpreter's GIL. On drop, releases it and writes
+    /// the saved tstate back to `tstate_cell`.
+    unsafe fn acquire(
+        tstate: *mut ffi::PyThreadState,
+        tstate_cell: &'a std::cell::Cell<*mut ffi::PyThreadState>,
+    ) -> Self {
+        ffi::PyEval_RestoreThread(tstate);
+        Self { tstate_cell }
+    }
+}
+
+impl Drop for SubInterpGilGuard<'_> {
+    fn drop(&mut self) {
+        // SAFETY: we always hold the GIL when this guard exists.
+        // SaveThread releases it and returns the saved tstate for next acquire.
+        unsafe {
+            self.tstate_cell.set(ffi::PyEval_SaveThread());
+        }
+    }
+}
+
 /// Main loop for each worker OS thread.
 fn worker_thread_loop(
     mut worker: SubInterpreterWorker,
@@ -1167,13 +1200,17 @@ fn worker_thread_loop(
     request_logging: &AtomicBool,
 ) {
     while let Ok(req) = rx.recv() {
-        // Catch panics to prevent worker thread death
+        // Cell lives outside catch_unwind so the guard can write tstate back
+        // even during panic unwind.
+        let tstate_cell = std::cell::Cell::new(worker.tstate);
+
+        // Catch panics to prevent worker thread death.
+        // SubInterpGilGuard ensures GIL is released even if call_handler panics.
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
-            // Acquire this sub-interpreter's GIL
-            ffi::PyEval_RestoreThread(worker.tstate);
+            let _guard = SubInterpGilGuard::acquire(tstate_cell.get(), &tstate_cell);
 
             let handler_name = &handler_names[req.handler_idx];
-            let result = worker.call_handler(
+            worker.call_handler(
                 handler_name,
                 before_hook_names,
                 after_hook_names,
@@ -1183,13 +1220,12 @@ fn worker_thread_loop(
                 &req.query,
                 &req.body,
                 &req.headers,
-            );
-
-            // Release GIL
-            worker.tstate = ffi::PyEval_SaveThread();
-
-            result
+            )
+            // _guard drops here → PyEval_SaveThread() → tstate_cell updated
         }));
+
+        // Recover tstate (updated by guard's Drop, even after panic)
+        worker.tstate = tstate_cell.get();
 
         let response = match result {
             Ok(r) => r,

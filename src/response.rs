@@ -9,7 +9,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyAnyMethods, PyDict, PyList, PyString};
 
 use crate::json::py_to_json_value;
-use crate::types::{ResponseData, PyreResponse};
+use crate::types::{PyreResponse, ResponseData};
 
 // ---------------------------------------------------------------------------
 // Extract handler return value → ResponseData
