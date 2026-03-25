@@ -501,6 +501,9 @@ _mock_skytrade.SkyWebSocket = _mock_engine.SkyWebSocket
 _mock_skytrade.SharedState = _mock_engine.SharedState
 _mock_skytrade.SkyStream = _mock_engine.SkyStream
 _mock_skytrade.get_gil_metrics = _mock_engine.get_gil_metrics
+def _redirect(url, status_code=302):
+    return _SkyResponse(body="", status_code=status_code, headers={{"location": url}})
+_mock_skytrade.redirect = _redirect
 
 # Pyre wrapper (no-op in worker mode)
 class _MockPyre:
