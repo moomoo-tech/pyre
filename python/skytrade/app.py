@@ -315,11 +315,20 @@ class Pyre:
 
     def run(
         self,
-        host: str = "127.0.0.1",
-        port: int = 8000,
+        host: str | None = None,
+        port: int | None = None,
         workers: int | None = None,
         mode: str | None = None,
     ) -> None:
+        # Priority: param > env var > default
+        host = host or os.environ.get("PYRE_HOST", "127.0.0.1")
+        port = port or int(os.environ.get("PYRE_PORT", "8000"))
+        workers = workers or (int(os.environ.get("PYRE_WORKERS")) if os.environ.get("PYRE_WORKERS") else None)
+
+        # Auto-enable logging if PYRE_LOG=1
+        if os.environ.get("PYRE_LOG") == "1" and not hasattr(self, "_logging_enabled"):
+            self.enable_logging()
+            self._logging_enabled = True
         # Auto-register /mcp endpoint if any MCP handlers exist
         if self._mcp._tools or self._mcp._resources or self._mcp._prompts:
             mcp = self._mcp
