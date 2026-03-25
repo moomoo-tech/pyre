@@ -60,19 +60,47 @@ This matters for AI:
 
 Benchmarked on Apple Silicon (M-series), Python 3.14, wrk -t4 -c256 -d10s.
 
+### Throughput (requests/sec)
+
 | Scenario | Pyre | FastAPI | Robyn | Pyre vs FastAPI |
 |----------|------|---------|-------|----------------|
 | Hello World | **220,000** | 15,000 | 87,000 | **14.7x** |
 | JSON response | **220,000** | 12,000 | 86,000 | **18.3x** |
 | I/O (sleep 1ms) | **133,000** | 50,000 | 93,000 | **2.7x** |
 | CPU (fib 10) | **212,000** | 8,000 | 81,000 | **26.5x** |
+| CPU (fib 20) | **11,350** | 200 | 10,500 | **56.8x** |
+| Pure Python sum(10k) | **75,000** | 4,000 | 44,000 | **18.8x** |
 | JSON parse 7KB | **99,000** | 6,000 | 57,000 | **16.5x** |
+| JSON parse 93KB | **10,500** | 800 | 7,400 | **13.1x** |
+
+### Latency
+
+| Metric | Pyre | FastAPI | Robyn |
+|--------|------|---------|-------|
+| Avg latency (Hello) | **0.9 ms** | ~17 ms | 35 ms |
+| P50 latency | **0.8 ms** | ~15 ms | 0.9 ms |
+| P99 latency | **4.2 ms** | ~20 ms | 262 ms |
+| P99 (JSON 7KB) | **6.2 ms** | ~50 ms | 182 ms |
+
+### Resource efficiency
 
 | Resource | Pyre | FastAPI | Robyn |
 |----------|------|---------|-------|
 | Memory (10 workers) | **119 MB** | ~200 MB | 447 MB |
-| P99 latency | **4.2 ms** | ~20 ms | 262 ms |
+| Memory per worker | **~10 MB** | ~50 MB | ~20 MB |
+| Throughput per MB | **3,283 r/s/MB** | ~75 r/s/MB | 196 r/s/MB |
 | Processes | **1** | 1+ Gunicorn | 22 |
+| GIL contention | **0 μs** (independent) | N/A (single) | N/A (multi-process) |
+
+### Who is Pyre for?
+
+**AI Agent servers** — Build MCP-compatible tool servers, LLM gateways, and multi-agent orchestration backends. Handle thousands of concurrent LLM streaming responses with SSE. SharedState coordinates agents without Redis.
+
+**Quantitative trading** — Process real-time market data feeds with sub-millisecond P50 latency. Sub-interpreter parallelism runs strategy computations across all cores without GIL contention. WebSocket support for live order book streaming.
+
+**High-throughput microservices** — Internal service mesh nodes that need maximum req/s with minimum memory. MsgPack RPC for binary-efficient inter-service communication. Backpressure (503) protects downstream systems under load spikes.
+
+**Edge/IoT gateways** — Run on memory-constrained devices (512 MB containers, Raspberry Pi). 67 MB for 10 parallel workers vs 447 MB for the alternatives.
 
 ## How Pyre works
 
