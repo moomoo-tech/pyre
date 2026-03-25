@@ -72,6 +72,49 @@ app.run()                   # 自动检测，自动分流，零配置
 不共享的：Python 堆（模块字典、用户对象）、GIL 状态。
 C 扩展（numpy/orjson）的 `.so` 文件只 mmap 一次，32 workers 摊薄基线。
 
+## 配置
+
+### 优先级：参数 > 环境变量 > 默认值
+
+```python
+# 代码中直接传参（最高优先级）
+app.run(host="0.0.0.0", port=9000, workers=16)
+
+# 或用环境变量（部署时覆盖，不改代码）
+# PYRE_HOST=0.0.0.0 PYRE_PORT=9000 PYRE_WORKERS=16 python app.py
+app.run()  # 自动读环境变量
+```
+
+### 所有配置项
+
+| 参数 | 环境变量 | 默认值 | 说明 |
+|------|---------|--------|------|
+| `host` | `PYRE_HOST` | `127.0.0.1` | 监听地址 |
+| `port` | `PYRE_PORT` | `8000` | 监听端口 |
+| `workers` | `PYRE_WORKERS` | CPU 核心数 | Sub-interpreter 数量 |
+| `mode` | — | 自动检测 | `subinterp` / `auto` |
+| — | `PYRE_LOG=1` | 关闭 | 启用请求日志 |
+| — | `PYRE_METRICS=1` | 关闭 | 启用 GIL Watchdog |
+
+### 部署示例
+
+```bash
+# 开发
+python app.py
+
+# 生产 (Docker/K8s)
+PYRE_HOST=0.0.0.0 PYRE_PORT=8080 PYRE_WORKERS=32 PYRE_LOG=1 python app.py
+
+# 压测 (关闭日志，最大性能)
+PYRE_WORKERS=10 python app.py
+```
+
+### 设计原则
+
+- **不搞配置文件** — 不需要 `pyre.toml` / `settings.py`，环境变量足够
+- **不搞 CLI** — 不需要 `pyre run --port 8000`，直接 `python app.py`
+- **容器原生** — Docker ENV / K8s ConfigMap 直接映射
+
 ## 日志
 
 ### 启用框架日志
