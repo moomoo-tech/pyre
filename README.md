@@ -242,6 +242,105 @@ pip install maturin
 maturin develop --release
 ```
 
+## Demos
+
+Three production-grade example applications. Each demonstrates a different real-world use case with multiple Pyre features working together.
+
+```bash
+# Install dependencies first
+pip install pydantic numpy msgpack httpx
+
+# AI Agent Server — MCP tools, SSE streaming, session memory
+python examples/ai_agent_server.py
+
+# Trading Data API — numpy analytics, WebSocket, Pydantic, RPC
+python examples/trading_api.py
+
+# Full-stack REST API — CRUD, cookie auth, file upload
+python examples/fullstack_api.py
+```
+
+### AI Agent Server (`examples/ai_agent_server.py`)
+
+Build MCP-compatible AI tool servers with streaming token output.
+
+```bash
+python examples/ai_agent_server.py
+
+# Chat (simulated LLM)
+curl -X POST http://127.0.0.1:8000/chat \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt": "What is Python?", "session_id": "user1"}'
+
+# SSE streaming (token-by-token, like ChatGPT)
+curl -N http://127.0.0.1:8000/stream?prompt=hello
+
+# MCP tool discovery (for Claude Desktop)
+curl -X POST http://127.0.0.1:8000/mcp \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
+
+# Session memory
+curl http://127.0.0.1:8000/memory/user1
+```
+
+**Features used:** MCP Server, SSE (SkyStream), async handlers, SharedState, Pydantic, CORS
+
+### Trading Data API (`examples/trading_api.py`)
+
+Real-time market data with numpy analytics and WebSocket streaming.
+
+```bash
+python examples/trading_api.py
+
+# Market quote
+curl http://127.0.0.1:8000/market/AAPL
+
+# Submit order (Pydantic validated)
+curl -X POST http://127.0.0.1:8000/order \
+  -H 'Content-Type: application/json' \
+  -d '{"ticker": "AAPL", "side": "buy", "quantity": 100, "price": 150.5}'
+
+# Portfolio analytics (numpy)
+curl http://127.0.0.1:8000/analytics/portfolio
+
+# RPC call from another service
+python -c "
+from skytrade import PyreRPCClient
+with PyreRPCClient('http://127.0.0.1:8000') as c:
+    print(c.get_signals(tickers=['AAPL', 'TSLA']))
+"
+```
+
+**Features used:** numpy (gil=True), Pydantic, WebSocket, SharedState, MsgPack RPC, CORS
+
+### Full-stack REST API (`examples/fullstack_api.py`)
+
+Complete CRUD application with authentication and file uploads.
+
+```bash
+python examples/fullstack_api.py
+
+# Register + login
+curl -X POST http://127.0.0.1:8000/auth/register \
+  -H 'Content-Type: application/json' \
+  -d '{"username": "alice", "email": "alice@example.com", "password": "secret123"}'
+
+curl -c cookies.txt -X POST http://127.0.0.1:8000/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username": "alice", "password": "secret123"}'
+
+# Create item (authenticated)
+curl -b cookies.txt -X POST http://127.0.0.1:8000/items \
+  -H 'Content-Type: application/json' \
+  -d '{"name": "Widget", "price": 9.99, "tags": ["new"]}'
+
+# List items (with pagination)
+curl http://127.0.0.1:8000/items?page=1&per_page=10
+```
+
+**Features used:** Pydantic, Cookie auth, File upload, Redirect, SharedState as DB, CORS, structured logging
+
 ## Quick Start
 
 ### Basic API
@@ -447,6 +546,58 @@ Pyre (Rust core, 12 modules)
 ├── GIL Watchdog (contention + hold time + queue depth)
 └── Backpressure (bounded channels, 503 on overload)
 ```
+
+## Limitations
+
+Pyre's sub-interpreter architecture delivers extreme performance but comes with specific constraints. All are caused by **CPython ecosystem limitations, not Pyre design choices**, and all have clear workarounds.
+
+### C extensions in sub-interpreters
+
+**What:** Libraries built with PyO3 (Rust) or C/C++ extensions cannot be imported inside sub-interpreters. This includes pydantic, numpy, pandas, orjson, and most compiled packages.
+
+**Why:** CPython's PEP 684 requires extensions to declare multi-interpreter support via `Py_MOD_PER_INTERPRETER_GIL_SUPPORTED`. Most libraries haven't done this yet. PyO3 uses global static state that conflicts with multiple interpreters.
+
+**Workaround:** Add `gil=True` to routes that need these libraries. They run on the main interpreter with full ecosystem access while other routes run at 220k req/s on sub-interpreters.
+
+```python
+@app.get("/fast")                    # Sub-interpreter: 220k req/s
+def fast(req): return "hello"
+
+@app.post("/analyze", gil=True)      # Main interpreter: numpy works
+def analyze(req):
+    import numpy as np
+    return {"result": float(np.mean([1,2,3]))}
+```
+
+**When fixed:** When PyO3 ([#3451](https://github.com/PyO3/pyo3/issues/3451)) and numpy ([#24003](https://github.com/numpy/numpy/issues/24003)) add PEP 684 support.
+
+### Python 3.12+ required
+
+**What:** Pyre requires Python 3.12 or later.
+
+**Why:** Per-Interpreter GIL (PEP 684) was introduced in Python 3.12. This is the core technology that enables Pyre's parallelism.
+
+**Workaround:** None. Python 3.12+ is required. Consider using [pyenv](https://github.com/pyenv/pyenv) to manage multiple Python versions.
+
+### Build from source
+
+**What:** Pyre must be compiled from source using Rust and Maturin. No pre-built wheels on PyPI yet.
+
+**Why:** The project is pre-release. PyPI binary wheels for multiple platforms require CI/CD infrastructure.
+
+**Workaround:** Install Rust (`curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`) and build with `maturin develop --release`.
+
+### No OpenAPI auto-documentation
+
+**What:** Pyre doesn't generate Swagger/OpenAPI documentation from route definitions.
+
+**Why:** Pyre targets high-performance backends and AI agents, not browser-based API explorers. For AI tool discovery, Pyre provides native MCP (Model Context Protocol) support, which is purpose-built for AI applications. For human developers, Pydantic models and type stubs provide compile-time contract guarantees.
+
+### Single-process only
+
+**What:** Pyre runs as a single OS process. No multi-process mode like Gunicorn or Robyn `--fast`.
+
+**Why:** This is by design. Sub-interpreters provide multi-core parallelism within one process, with 6.7x less memory than multi-process alternatives. SharedState works without Redis. Adding multi-process would destroy these advantages.
 
 ## Requirements
 
