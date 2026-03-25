@@ -927,9 +927,11 @@ impl SubInterpreterWorker {
 // ---------------------------------------------------------------------------
 
 pub(crate) struct InterpreterPool {
+    /// Dropping senders closes the channel, signaling workers to exit.
     sync_work_tx: crossbeam_channel::Sender<WorkRequest>,
     async_work_tx: Option<crossbeam_channel::Sender<WorkRequest>>,
-    _worker_threads: Vec<std::thread::JoinHandle<()>>,
+    /// Worker threads — joined on drop to ensure clean sub-interpreter shutdown.
+    worker_threads: Option<Vec<std::thread::JoinHandle<()>>>,
     routers: HashMap<String, Router<usize>>,
     handler_names: Vec<String>,
     pub(crate) requires_gil: Vec<bool>,
@@ -940,6 +942,24 @@ pub(crate) struct InterpreterPool {
     pub(crate) cors_origin: Option<String>,
     /// Per-instance request logging flag, shared with worker threads.
     request_logging: Arc<AtomicBool>,
+}
+
+impl Drop for InterpreterPool {
+    fn drop(&mut self) {
+        // 1. Drop senders to close the channels — workers will exit their recv loop.
+        //    (We need to replace them so the Sender::drop fires now, not later.)
+        let _ = std::mem::replace(&mut self.sync_work_tx, crossbeam_channel::bounded(0).0);
+        let _ = self.async_work_tx.take();
+
+        // 2. Join all worker threads so they finish Py_EndInterpreter BEFORE
+        //    the main interpreter tears down (Py_Finalize). Without this join,
+        //    workers race against Py_Finalize and segfault.
+        if let Some(threads) = self.worker_threads.take() {
+            for t in threads {
+                let _ = t.join();
+            }
+        }
+    }
 }
 
 unsafe impl Send for InterpreterPool {}
@@ -1066,7 +1086,7 @@ impl InterpreterPool {
         Ok(InterpreterPool {
             sync_work_tx,
             async_work_tx,
-            _worker_threads: threads,
+            worker_threads: Some(threads),
             routers,
             handler_names: handler_names.to_vec(),
             requires_gil,
