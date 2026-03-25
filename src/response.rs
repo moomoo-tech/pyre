@@ -3,6 +3,8 @@ use std::collections::HashMap;
 use bytes::Bytes;
 use http_body_util::Full;
 use hyper::{Response, StatusCode};
+
+pub(crate) const SERVER_HEADER: &str = concat!("Pyre/", env!("CARGO_PKG_VERSION"));
 use pyo3::prelude::*;
 use pyo3::types::{PyAnyMethods, PyDict, PyList, PyString};
 
@@ -132,7 +134,7 @@ pub(crate) fn build_response(
             let mut builder = Response::builder()
                 .status(status)
                 .header("content-type", &data.content_type)
-                .header("server", "Pyre/1.0.0");
+                .header("server", SERVER_HEADER);
             for (k, v) in &data.headers {
                 builder = builder.header(k.as_str(), v.as_str());
             }
@@ -146,7 +148,7 @@ pub(crate) fn error_response(msg: &str) -> Response<Full<Bytes>> {
     Response::builder()
         .status(StatusCode::INTERNAL_SERVER_ERROR)
         .header("content-type", "application/json")
-        .header("server", "Pyre/1.0.0")
+        .header("server", SERVER_HEADER)
         .body(Full::new(Bytes::from(
             format!(r#"{{"error":"{}"}}"#, msg.replace('"', "\\\"")),
         )))
@@ -158,7 +160,7 @@ pub(crate) fn overloaded_response(msg: &str) -> Response<Full<Bytes>> {
     Response::builder()
         .status(StatusCode::SERVICE_UNAVAILABLE)
         .header("content-type", "application/json")
-        .header("server", "Pyre/1.0.0")
+        .header("server", SERVER_HEADER)
         .header("retry-after", "1")
         .body(Full::new(Bytes::from(
             format!(r#"{{"error":"{}"}}"#, msg.replace('"', "\\\"")),
@@ -171,7 +173,7 @@ pub(crate) fn payload_too_large_response() -> Response<Full<Bytes>> {
     Response::builder()
         .status(StatusCode::PAYLOAD_TOO_LARGE)
         .header("content-type", "application/json")
-        .header("server", "Pyre/1.0.0")
+        .header("server", SERVER_HEADER)
         .body(Full::new(Bytes::from_static(
             b"{\"error\":\"payload too large\"}",
         )))
@@ -183,7 +185,7 @@ pub(crate) fn not_found_response() -> Response<Full<Bytes>> {
     Response::builder()
         .status(StatusCode::NOT_FOUND)
         .header("content-type", "application/json")
-        .header("server", "Pyre/1.0.0")
+        .header("server", SERVER_HEADER)
         .body(Full::new(Bytes::from_static(b"{\"error\":\"not found\"}")))
         .unwrap()
 }

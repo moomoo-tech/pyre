@@ -222,7 +222,7 @@ impl SkyApp {
         num_cpus: usize,
         routes: FrozenRoutes,
     ) -> PyResult<()> {
-        println!("\n  Pyre v1.0.0");
+        println!("\n  Pyre v{}", env!("CARGO_PKG_VERSION"));
         println!("  Listening on http://{addr}");
         println!("  Workers: {workers} (CPUs: {num_cpus})\n");
 
@@ -324,7 +324,7 @@ impl SkyApp {
         let async_count_routes = routes.is_async.iter().filter(|&&a| a).count();
         let has_async = async_count_routes > 0;
         let mode_label = if has_async { "hybrid-async" } else { "hybrid" };
-        println!("\n  Pyre v1.0.0 [{mode_label} mode]");
+        println!("\n  Pyre v{} [{mode_label} mode]", env!("CARGO_PKG_VERSION"));
         println!("  Listening on http://{addr}");
         println!("  Sub-interpreters: {workers} (CPUs: {num_cpus})");
         if has_async {
