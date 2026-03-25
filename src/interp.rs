@@ -550,6 +550,39 @@ sys.modules["skytrade.engine"] = _mock_engine
 sys.modules["skytrade.app"] = _mock_app
 sys.modules["skytrade.mcp"] = types.ModuleType("skytrade.mcp")
 
+# Cookie utilities (pure Python, no deps)
+_cookies_mod = types.ModuleType("skytrade.cookies")
+def _get_cookies(req):
+    h = req.headers.get("cookie", "") if hasattr(req, "headers") else ""
+    if not h: return {{}}
+    r = {{}}
+    for p in h.split(";"):
+        p = p.strip()
+        if "=" in p:
+            n, _, v = p.partition("=")
+            r[n.strip()] = v.strip()
+    return r
+def _get_cookie(req, name, default=None):
+    return _get_cookies(req).get(name, default)
+def _set_cookie(resp, name, value, **kw):
+    parts = [f"{{name}}={{value}}"]
+    if kw.get("max_age") is not None: parts.append(f"Max-Age={{kw['max_age']}}")
+    if kw.get("path", "/"): parts.append(f"Path={{kw.get('path','/')}}")
+    if kw.get("httponly"): parts.append("HttpOnly")
+    if kw.get("secure"): parts.append("Secure")
+    if kw.get("samesite", "Lax"): parts.append(f"SameSite={{kw.get('samesite','Lax')}}")
+    hdrs = dict(getattr(resp, "headers", {{}}) or {{}})
+    hdrs["set-cookie"] = "; ".join(parts)
+    return _SkyResponse(body=resp.body, status_code=getattr(resp,"status_code",200), content_type=getattr(resp,"content_type",None), headers=hdrs)
+def _delete_cookie(resp, name, **kw):
+    return _set_cookie(resp, name, "", max_age=0, path=kw.get("path","/"))
+_cookies_mod.get_cookies = _get_cookies
+_cookies_mod.get_cookie = _get_cookie
+_cookies_mod.set_cookie = _set_cookie
+_cookies_mod.delete_cookie = _delete_cookie
+sys.modules["skytrade.cookies"] = _cookies_mod
+sys.modules["skytrade.rpc"] = types.ModuleType("skytrade.rpc")
+
 # Execute full user script (no AST filtering needed)
 {}
 "#,
