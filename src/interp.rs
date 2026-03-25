@@ -530,6 +530,7 @@ class _MockPyre:
         return lambda f: f
     def static(self, *a): pass
     def enable_logging(self): pass
+    def enable_cors(self, **kw): pass
     def run(self, **kw): pass
     @property
     def state(self):

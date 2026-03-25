@@ -145,6 +145,67 @@ class Pyre:
     # Middleware
     # ------------------------------------------------------------------
 
+    def enable_cors(
+        self,
+        allow_origins: str | list[str] = "*",
+        allow_methods: str | list[str] = "GET, POST, PUT, DELETE, PATCH, OPTIONS",
+        allow_headers: str | list[str] = "*",
+        expose_headers: str | list[str] = "",
+        allow_credentials: bool = False,
+        max_age: int = 86400,
+    ) -> None:
+        """Enable CORS (Cross-Origin Resource Sharing).
+
+        Usage::
+
+            app.enable_cors()  # Allow all origins
+
+            app.enable_cors(
+                allow_origins=["https://example.com", "https://app.example.com"],
+                allow_credentials=True,
+            )
+        """
+        if isinstance(allow_origins, list):
+            allow_origins = ", ".join(allow_origins)
+        if isinstance(allow_methods, list):
+            allow_methods = ", ".join(allow_methods)
+        if isinstance(allow_headers, list):
+            allow_headers = ", ".join(allow_headers)
+        if isinstance(expose_headers, list):
+            expose_headers = ", ".join(expose_headers)
+
+        cors_headers = {
+            "access-control-allow-origin": allow_origins,
+            "access-control-allow-methods": allow_methods,
+            "access-control-allow-headers": allow_headers,
+        }
+        if expose_headers:
+            cors_headers["access-control-expose-headers"] = expose_headers
+        if allow_credentials:
+            cors_headers["access-control-allow-credentials"] = "true"
+        if max_age:
+            cors_headers["access-control-max-age"] = str(max_age)
+
+        # Handle preflight OPTIONS + add CORS headers to all responses
+        def _cors_before(req):
+            if req.method == "OPTIONS":
+                return SkyResponse(body="", status_code=204, headers=cors_headers)
+            return None
+
+        def _cors_after(req, resp):
+            merged = {**getattr(resp, "headers", {}), **cors_headers}
+            return SkyResponse(
+                body=resp.body,
+                status_code=resp.status_code,
+                content_type=resp.content_type,
+                headers=merged,
+            )
+
+        self._engine.before_request(_cors_before)
+        self._engine.after_request(_cors_after)
+
+    # ------------------------------------------------------------------
+
     def rpc(self, path: str, *, proto_model=None):
         """Register an RPC endpoint with content negotiation.
 
