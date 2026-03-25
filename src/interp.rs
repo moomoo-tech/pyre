@@ -589,6 +589,56 @@ _cookies_mod.delete_cookie = _delete_cookie
 sys.modules["skytrade.cookies"] = _cookies_mod
 sys.modules["skytrade.rpc"] = types.ModuleType("skytrade.rpc")
 
+# Upload utilities
+_uploads_mod = types.ModuleType("skytrade.uploads")
+class _UploadFile:
+    def __init__(self, name, filename, content_type, data):
+        self.name = name
+        self.filename = filename
+        self.content_type = content_type
+        self.data = data
+    @property
+    def text(self): return self.data.decode('utf-8', errors='replace')
+    @property
+    def size(self): return len(self.data)
+def _parse_multipart(req):
+    ct = req.headers.get("content-type", "")
+    if "multipart/form-data" not in ct: raise ValueError("Not multipart")
+    boundary = None
+    for p in ct.split(";"):
+        p = p.strip()
+        if p.startswith("boundary="): boundary = p[9:].strip().strip('"')
+    if not boundary: raise ValueError("No boundary")
+    body = req.body if isinstance(req.body, bytes) else req.body.encode()
+    parts = body.split(f"--{{boundary}}".encode())
+    result = {{}}
+    for part in parts:
+        if not part or part.strip() in (b"--", b""): continue
+        if b"\r\n\r\n" in part: hdr, data = part.split(b"\r\n\r\n", 1)
+        elif b"\n\n" in part: hdr, data = part.split(b"\n\n", 1)
+        else: continue
+        if data.endswith(b"\r\n"): data = data[:-2]
+        elif data.endswith(b"\n"): data = data[:-1]
+        headers = {{}}
+        for line in hdr.decode('utf-8', errors='replace').split("\n"):
+            line = line.strip()
+            if ":" in line:
+                k, _, v = line.partition(":")
+                headers[k.strip().lower()] = v.strip()
+        disp = headers.get("content-disposition", "")
+        fname = ffilename = None
+        for pp in disp.split(";"):
+            pp = pp.strip()
+            if pp.startswith("name="): fname = pp[5:].strip('"')
+            elif pp.startswith("filename="): ffilename = pp[9:].strip('"')
+        if fname:
+            ctype = headers.get("content-type", "application/octet-stream" if ffilename else "text/plain")
+            result[fname] = _UploadFile(fname, ffilename, ctype, data)
+    return result
+_uploads_mod.parse_multipart = _parse_multipart
+_uploads_mod.UploadFile = _UploadFile
+sys.modules["skytrade.uploads"] = _uploads_mod
+
 # Execute full user script (no AST filtering needed)
 {}
 "#,
