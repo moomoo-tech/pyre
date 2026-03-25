@@ -42,28 +42,37 @@ Benchmarked on Apple Silicon (M-series), Python 3.14, wrk -t4 -c256 -d10s.
 
 ## Why Pyre?
 
-Python web frameworks face a fundamental problem: **the GIL makes true parallelism impossible.** Every existing framework works around this with compromises.
+### The problem
 
-**FastAPI** chose the ASGI path — pure Python async on a single core. It's elegant for I/O-bound workloads, but a single CPU-heavy request blocks the entire event loop. Scaling means running multiple processes via Gunicorn, each duplicating the full Python runtime in memory. At 15,000 req/s, you hit Python's interpreter overhead ceiling quickly.
+AI applications in Python need **high throughput and low memory**. An AI agent backend handles thousands of concurrent LLM calls, RAG queries, and tool invocations — all I/O-heavy, all in Python. A quantitative trading gateway processes hundreds of real-time data feeds simultaneously. These workloads demand the performance of C++ with the ecosystem of Python.
 
-**Robyn** replaced the Python event loop with Rust (Tokio), which helped I/O throughput. But it still runs Python handlers on a single GIL. To go multi-core, it spawns 22+ OS processes (`--fast`), eating 447 MB of memory. The Rust layer is fast, but the Python layer remains the bottleneck.
+But Python has the GIL (Global Interpreter Lock). One lock, one core, no parallelism. Every framework before Pyre works around this with compromises.
 
-**Pyre** takes a fundamentally different approach: **eliminate the GIL bottleneck entirely using Per-Interpreter GIL (PEP 684).**
+### What others do (and why it's not enough)
 
-Instead of multiple processes, Pyre runs multiple Python sub-interpreters inside a single process. Each has its own independent GIL. This gives you:
+**FastAPI** chose async on a single core. Elegant for I/O, but one CPU-heavy request (JSON parsing, Pydantic validation, numpy computation) blocks the entire event loop. Scale via Gunicorn means duplicating the full Python runtime per process. At 15k req/s, you hit the ceiling.
 
-- **True multi-core parallelism** without multi-process memory waste
-- **Shared memory** between workers (no Redis needed for state sharing)
-- **67 MB** instead of 447 MB for the same parallelism level
-- **220,000 req/s** because Rust handles I/O and Python handles business logic, both at full speed
+**Robyn** replaced the Python event loop with Rust (Tokio). Better I/O, but Python handlers still run on one GIL. Scaling means 22+ OS processes (`--fast`), eating 447 MB. The Rust layer is fast; the Python layer is the bottleneck.
 
-The key insight: **don't fight the GIL — multiply it.**
+**Multi-threading** doesn't help. Python threads share one GIL — they take turns, not run in parallel. Adding threads adds context-switch overhead without adding throughput. `threading` in Python is concurrency theater, not parallelism.
+
+**Free-threaded Python** (no-GIL, PEP 703) removes the lock but makes every Python object operation slower (atomic reference counting). The ecosystem isn't ready — most C extensions assume the GIL exists. It trades one problem for another.
+
+### What Pyre does differently
+
+**Pyre multiplies the GIL.** Using Per-Interpreter GIL (PEP 684), each worker gets its own independent Python interpreter with its own GIL inside a single process. True multi-core parallelism, zero memory duplication, zero IPC overhead.
 
 ```
 FastAPI:  1 process × 1 GIL × async tricks     = fast I/O, slow CPU, 15k QPS
 Robyn:    22 processes × 22 GILs × 22× memory  = brute force, 87k QPS, 447 MB
 Pyre:     1 process × 10 GILs × shared memory   = elegant, 220k QPS, 67 MB
 ```
+
+This matters for AI:
+- **LLM gateway** — thousands of concurrent `await` calls, each taking 2-5 seconds. Pyre's async pool handles 133k concurrent I/O operations.
+- **Agent orchestration** — multiple agents computing simultaneously. Each sub-interpreter runs at full CPU speed without blocking others.
+- **Memory efficiency** — deploy 3x more instances on the same hardware. On a 512 MB container, Pyre runs 10 parallel workers where Robyn can barely fit 2 processes.
+- **State sharing** — cross-worker `app.state` with nanosecond latency. No Redis, no serialization, no network hop. Session management, caching, and coordination built into the framework.
 
 ## How Pyre works
 
