@@ -23,13 +23,11 @@ jobs:
           # Linux x86_64
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-          # Linux aarch64
+          # Linux aarch64 (cross-compiled via QEMU)
           - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
-          # macOS x86_64
-          - os: macos-13
-            target: x86_64-apple-darwin
-          # macOS ARM (Apple Silicon)
+            qemu: true
+          # macOS ARM (Apple Silicon) — also builds x86_64 via universal2
           - os: macos-14
             target: aarch64-apple-darwin
     steps:
@@ -38,6 +36,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
+
+      - name: Set up QEMU
+        if: matrix.qemu
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
 
       - name: Build wheels
         uses: PyO3/maturin-action@v1
