@@ -19,6 +19,9 @@ use pyo3::prelude::*;
 /// Enable request logging in sub-interpreter workers (set by Python enable_logging)
 pub(crate) static REQUEST_LOGGING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// CORS allow-origin header value (empty = disabled)
+pub(crate) static CORS_ORIGIN: OnceLock<String> = OnceLock::new();
+
 /// Per-worker state accessible from C-FFI functions (no closure environment).
 struct WorkerState {
     rx: crossbeam_channel::Receiver<WorkRequest>,
@@ -773,9 +776,18 @@ sys.modules["skytrade.rpc"] = types.ModuleType("skytrade.rpc")
     ) -> Result<SubInterpResponse, String> {
         let ptr = result_obj.as_ptr();
 
-        // Check if it's a _SkyResponse (using cached class pointer)
+        // Check if it's a _SkyResponse or any response-like object
+        // (duck typing: has status_code + body attributes)
         let resp_cls = self.sky_response_cls;
-        if !resp_cls.is_null() && ffi::PyObject_IsInstance(ptr, resp_cls) == 1 {
+        let is_response = if !resp_cls.is_null() && ffi::PyObject_IsInstance(ptr, resp_cls) == 1 {
+            true
+        } else {
+            // Duck-type check: has status_code attribute?
+            let has_status = ffi::PyObject_HasAttrString(ptr, c"status_code".as_ptr()) == 1;
+            let has_body = ffi::PyObject_HasAttrString(ptr, c"body".as_ptr()) == 1;
+            has_status && has_body
+        };
+        if is_response {
             return self.parse_sky_response(result_obj);
         }
 

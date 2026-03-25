@@ -403,6 +403,12 @@ pub(crate) async fn handle_request_subinterp(
             for (k, v) in &resp.headers {
                 builder = builder.header(k.as_str(), v.as_str());
             }
+            // Add CORS headers if enabled
+            if let Some(origin) = crate::interp::CORS_ORIGIN.get() {
+                builder = builder.header("access-control-allow-origin", origin.as_str());
+                builder = builder.header("access-control-allow-methods", "GET, POST, PUT, DELETE, PATCH, OPTIONS");
+                builder = builder.header("access-control-allow-headers", "*");
+            }
             Ok(full_body(
                 builder.body(Full::new(Bytes::from(resp.body))).unwrap(),
             ))

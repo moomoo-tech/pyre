@@ -204,6 +204,10 @@ class Pyre:
         self._engine.before_request(_cors_before)
         self._engine.after_request(_cors_after)
 
+        # Also set Rust-level CORS for sub-interpreter mode
+        from skytrade.engine import set_cors_origin
+        set_cors_origin(allow_origins)
+
     # ------------------------------------------------------------------
 
     def rpc(self, path: str, *, proto_model=None):
