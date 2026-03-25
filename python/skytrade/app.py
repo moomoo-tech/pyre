@@ -95,13 +95,20 @@ class Pyre:
 
             def wrapper(req):
                 # Parse and validate JSON body → Pydantic model
-                validated = mdl.model_validate_json(req.body)
+                try:
+                    validated = mdl.model_validate_json(req.body)
+                except Exception as e:
+                    # Return 422 Unprocessable Entity with validation errors
+                    return SkyResponse(
+                        body=str(e),
+                        status_code=422,
+                        content_type="text/plain",
+                    )
                 # If handler accepts 2 args (req, data), pass both
                 if len(params) >= 2:
                     return fn(req, validated)
-                # Otherwise inject as req.data
-                req._validated_data = validated
-                return fn(req)
+                # Otherwise just pass validated data
+                return fn(validated)
 
             wrapper.__name__ = fn.__name__
             wrapper.__qualname__ = fn.__qualname__
@@ -233,9 +240,18 @@ class Pyre:
     # Logging
     # ------------------------------------------------------------------
 
-    def enable_logging(self) -> None:
-        """Enable built-in request/response logging."""
+    def enable_logging(self, level: str = "info") -> None:
+        """Enable structured request/response logging.
+
+        Output format::
+
+            2026-03-24 17:30:01 [INFO]  GET /api/trade → 200 (2.3ms)
+            2026-03-24 17:30:01 [ERROR] POST /rpc/add → 500 (0.4ms) TypeError: ...
+        """
+        from datetime import datetime
+
         _timings: dict[int, float] = {}
+        _min_level = {"debug": 0, "info": 1, "warn": 2, "error": 3}.get(level.lower(), 1)
 
         def _log_before(req):
             _timings[id(req)] = time.monotonic()
@@ -245,7 +261,31 @@ class Pyre:
             start = _timings.pop(id(req), None)
             elapsed = (time.monotonic() - start) * 1000 if start else 0
             status = getattr(resp, "status_code", 200)
-            print(f"  {req.method} {req.path} → {status} ({elapsed:.1f}ms)")
+            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+            # Determine log level by status code
+            if status >= 500:
+                tag, lvl = "ERROR", 3
+            elif status >= 400:
+                tag, lvl = "WARN ", 2
+            else:
+                tag, lvl = "INFO ", 1
+
+            if lvl >= _min_level:
+                # Extract error message from body if 500
+                err = ""
+                if status >= 500:
+                    body = getattr(resp, "body", "")
+                    if isinstance(body, str) and "error" in body:
+                        # Try to extract error from JSON response
+                        try:
+                            import json
+                            err = " " + json.loads(body).get("error", "")[:100]
+                        except Exception:
+                            pass
+
+                print(f"  {ts} [{tag}] {req.method} {req.path} → {status} ({elapsed:.1f}ms){err}", flush=True)
+
             return resp
 
         self._engine.before_request(_log_before)
