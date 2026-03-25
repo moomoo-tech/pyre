@@ -40,16 +40,46 @@ Benchmarked on Apple Silicon (M-series), Python 3.14, wrk -t4 -c256 -d10s.
 | P99 latency | **4.2 ms** | ~20 ms | 262 ms |
 | Processes | **1** | 1+ Gunicorn | 22 |
 
-## Why is Pyre fast?
+## Why Pyre?
 
-Pyre uses **Per-Interpreter GIL** (PEP 684) — each worker has its own independent Python interpreter with its own GIL. True multi-core parallelism in a single process, without the memory overhead of multi-processing.
+Python web frameworks face a fundamental problem: **the GIL makes true parallelism impossible.** Every existing framework works around this with compromises.
+
+**FastAPI** chose the ASGI path — pure Python async on a single core. It's elegant for I/O-bound workloads, but a single CPU-heavy request blocks the entire event loop. Scaling means running multiple processes via Gunicorn, each duplicating the full Python runtime in memory. At 15,000 req/s, you hit Python's interpreter overhead ceiling quickly.
+
+**Robyn** replaced the Python event loop with Rust (Tokio), which helped I/O throughput. But it still runs Python handlers on a single GIL. To go multi-core, it spawns 22+ OS processes (`--fast`), eating 447 MB of memory. The Rust layer is fast, but the Python layer remains the bottleneck.
+
+**Pyre** takes a fundamentally different approach: **eliminate the GIL bottleneck entirely using Per-Interpreter GIL (PEP 684).**
+
+Instead of multiple processes, Pyre runs multiple Python sub-interpreters inside a single process. Each has its own independent GIL. This gives you:
+
+- **True multi-core parallelism** without multi-process memory waste
+- **Shared memory** between workers (no Redis needed for state sharing)
+- **67 MB** instead of 447 MB for the same parallelism level
+- **220,000 req/s** because Rust handles I/O and Python handles business logic, both at full speed
+
+The key insight: **don't fight the GIL — multiply it.**
 
 ```
-Traditional (FastAPI/Robyn):
-  1 process × 1 GIL = all cores fight for one lock
+FastAPI:  1 process × 1 GIL × async tricks     = fast I/O, slow CPU, 15k QPS
+Robyn:    22 processes × 22 GILs × 22× memory  = brute force, 87k QPS, 447 MB
+Pyre:     1 process × 10 GILs × shared memory   = elegant, 220k QPS, 67 MB
+```
 
-Pyre:
-  1 process × 10 sub-interpreters × 10 independent GILs = true parallelism
+## How Pyre works
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    Pyre Architecture                     │
+├─────────────────────────────────────────────────────────┤
+│  Python handlers (def / async def / gil=True)           │
+│      ↓                                                   │
+│  Rust core (Tokio + Hyper)                              │
+│  ├── Sync worker pool ──→ 10 sub-interpreters (OWN_GIL) │
+│  ├── Async worker pool ──→ 10 asyncio event loops       │
+│  ├── Hybrid dispatch ──→ main interpreter (numpy/C ext) │
+│  ├── SharedState ──→ DashMap (nanosecond, cross-worker) │
+│  └── Backpressure ──→ bounded channels (503 on overload)│
+└─────────────────────────────────────────────────────────┘
 ```
 
 ## Feature Comparison
