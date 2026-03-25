@@ -1,8 +1,17 @@
-# Pyre
+# Pyre 🔥
 
 **High-performance Python web framework powered by Rust.**
 
-220,000 req/s. 67 MB memory. Sub-interpreter parallelism. One process.
+Built on Per-Interpreter GIL (PEP 684) and a Rust async core, Pyre runs Python handlers across all CPU cores in a single process.
+
+- vs FastAPI: **24-28x** throughput, **29-34x** lower latency.
+- vs Robyn: **2.5x** QPS, **62x** lower P99, **85%** less memory — single process.
+
+### What others can't do, Pyre has built-in
+
+- **SharedState** — cross-worker memory sharing without Redis (nanosecond latency)
+- **AI-native** — MCP server, MsgPack RPC, SSE streaming
+- **Observable** — GIL watchdog, backpressure (503), request timeout (504)
 
 ```python
 from skytrade import Pyre
@@ -91,6 +100,26 @@ Benchmarked on Apple Silicon (M-series), Python 3.14, wrk -t4 -c256 -d10s.
 | Throughput per MB | **3,283 r/s/MB** | ~75 r/s/MB | 196 r/s/MB |
 | Processes | **1** | 1+ Gunicorn | 22 |
 | GIL contention | **0 μs** (independent) | N/A (single) | N/A (multi-process) |
+
+### Pyre vs Robyn: feature comparison
+
+| Capability | Pyre | Robyn |
+|------------|------|-------|
+| **Architecture** | 1 process, 10 sub-interpreters | 22 OS processes |
+| **SharedState** (cross-worker) | Built-in (DashMap, nanosecond) | Not supported (needs Redis) |
+| **MCP Server** (AI tool protocol) | Built-in | Not supported |
+| **MsgPack RPC** | Built-in + magic client | Not supported |
+| **SSE Streaming** | Built-in (SkyStream) | Not supported |
+| **GIL Watchdog** | Built-in (contention + hold time) | Not supported |
+| **Backpressure** (503 overload) | Built-in (bounded channels) | Not supported |
+| **Request Timeout** (504) | Built-in (30s zombie reaper) | Not supported |
+| **Hybrid Dispatch** (`gil=True`) | Auto-routes to main interpreter | Not supported |
+| **TestClient** | Built-in | Not supported |
+| **WebSocket** | Supported | Supported |
+| **CORS** | Supported | Supported |
+| **Static Files** | Supported (async, no GIL) | Supported |
+| **Middleware** | before/after hooks | Supported |
+| **Hot Reload** | Supported | Supported |
 
 ### Who is Pyre for?
 
