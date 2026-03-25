@@ -1,22 +1,35 @@
-# SkyTrade Engine (Pyre)
+# Pyre 🔥
 
-High-performance Python web framework powered by Rust. Goal: outperform Robyn.
+High-performance Python web framework powered by Rust. Per-Interpreter GIL (PEP 684) for true multi-core parallelism in a single process.
+
+**Benchmarks**: 220k req/s, 67 MB memory. 24-28x faster than FastAPI, 2.5x faster than Robyn with 85% less memory.
 
 ## Architecture
 
-- **Rust core** (`src/`): Modular — 9 files, each under 350 lines
-  - `lib.rs` — module declarations + `#[pymodule]` (18 lines)
+- **Rust core** (`src/`): 12 modules
+  - `lib.rs` — module declarations, `#[pymodule]`, mimalloc global allocator
   - `types.rs` — `SkyRequest`, `SkyResponse`, `extract_headers`
-  - `app.rs` — `SkyApp` with `run_gil()` / `run_subinterp()`
-  - `handlers.rs` — GIL and sub-interpreter request handlers
-  - `router.rs` — `RouteTable` + `SharedRoutes`
-  - `response.rs` — response builders + `extract_response_data`
+  - `app.rs` — `SkyApp` with `run_gil()` / `run_subinterp()`, graceful shutdown
+  - `handlers.rs` — GIL handler, sub-interp handler (30s zombie timeout), streaming
+  - `router.rs` — `RouteTable`, `MutableRoutes`, `FrozenRoutes`
+  - `response.rs` — response builders (200/404/413/500/503/504)
   - `json.rs` — Rust-side `py_to_json_value` serializer
-  - `static_fs.rs` — async static file serving + MIME detection
-  - `interp.rs` — `PyObjRef` RAII, channel-based worker pool, AST filter
+  - `static_fs.rs` — async static file serving + MIME detection + path traversal protection
+  - `interp.rs` — `PyObjRef` RAII, C-FFI bridge (`pyre_recv`/`pyre_send`), dual worker pool (sync+async), mock module injection
+  - `websocket.rs` — WebSocket upgrade, `SkyWebSocket` pyclass, async↔sync bridge
+  - `stream.rs` — `SkyStream` SSE with mpsc channel
+  - `monitor.rs` — GIL watchdog, memory RSS, atomic counters
+  - `state.rs` — `SharedState` backed by `Arc<DashMap>`
 - **Python interface** (`python/skytrade/`):
-  - `engine` (Rust): `SkyApp`, `SkyRequest`, `SkyResponse`
-  - `app.py`: `Pyre` class — decorator-friendly wrapper over `SkyApp`
+  - `engine` (Rust): `SkyApp`, `SkyRequest`, `SkyResponse`, `SkyWebSocket`, `SharedState`, `SkyStream`
+  - `app.py`: `Pyre` class — decorators, CORS, logging, Pydantic model=, env var config, hot reload, dual pool auto-detection
+  - `mcp.py`: MCP server (JSON-RPC 2.0) with tool/resource/prompt decorators
+  - `rpc.py`: MsgPack RPC + `PyreRPCClient` magic client
+  - `cookies.py`: Cookie get/set/delete utilities
+  - `uploads.py`: Multipart form-data parser
+  - `testing.py`: `TestClient` for tests without a running server
+  - `_async_engine.py`: Async engine script injected into sub-interpreter workers
+  - `engine.pyi`: Type stubs for IDE autocomplete
 - **Build**: Maturin (mixed python/rust project), module name `skytrade.engine`
 
 ## Development
@@ -32,44 +45,90 @@ maturin develop --release
 # Run example
 python examples/hello.py
 
-# Benchmark (requires wrk: brew install wrk)
+# Run tests
+pip install pytest websockets httpx pydantic numpy msgpack
+pytest tests/ --ignore=tests/test_ws_binary_client.py -q
+
+# Benchmark vs FastAPI (requires wrk: brew install wrk)
+bash benchmarks/run_comparison.sh
+
+# Benchmark vs Robyn
 bash benchmarks/run_bench.sh
 ```
 
 ## Key Design Decisions
 
-- Route table uses index-based lookup (Vec<Py<PyAny>> + Router<usize>) to avoid Py<PyAny> Clone issues in PyO3 0.28
-- GIL released via `py.detach()` during Tokio event loop, reacquired via `Python::attach()` per-request for handler calls
-- `#[pyclass(frozen)]` on SkyRequest/SkyResponse for thread safety — no mutable attributes
+- Route table uses index-based lookup (`Vec<Py<PyAny>>` + `Router<usize>`) to avoid `Py<PyAny>` Clone issues in PyO3 0.28
+- GIL released via `py.detach()` during Tokio event loop, reacquired via `Python::attach()` per-request
+- `#[pyclass(frozen)]` on SkyRequest/SkyResponse for thread safety
 - `Pyre` Python wrapper provides decorator syntax; `SkyApp` is the raw Rust engine
 - Sub-interpreter mode uses `crossbeam-channel` multi-consumer pool with `tokio::sync::oneshot` async responses
 - `PyObjRef` RAII wrapper for all raw FFI pointer operations — Drop auto-DECREFs
-- AST-based script filtering (`ast.parse` + `ast.unparse`) for sub-interpreter bootstrap
+- C-FFI bridge (`pyre_recv`/`pyre_send`) for native async in sub-interpreters — releases GIL during channel wait
+- Hybrid dispatch: `gil=True` routes go to main interpreter (for C extensions), others to sub-interpreters
+- Auto dual-pool: framework detects `async def` vs `def` handlers, routes to appropriate worker pool
+- Mock module injection in sub-interpreters for pydantic/skytrade submodules
 - Static files served via Tokio async fs — no GIL needed
-- Middleware: before_request/after_request hooks stored in RouteTable alongside route handlers
+- Middleware: before_request/after_request hooks stored in RouteTable
 - WebSocket: tokio-tungstenite async ↔ Python sync via dual channels, one OS thread per connection
+- SSE: `SkyStream` with mpsc unbounded channel, returned from handler
+- mimalloc global allocator for high-concurrency allocation performance
+- 30s zombie request timeout in sub-interpreter mode (504 Gateway Timeout)
+- Graceful shutdown via `signal::ctrl_c()` + `tokio::select!`
 
 ## Project Structure
 
 ```
 src/
-  lib.rs              # Module declarations + #[pymodule] (18 lines)
+  lib.rs              # Module declarations + #[pymodule] + mimalloc
   types.rs            # SkyRequest, SkyResponse, extract_headers
   app.rs              # SkyApp — route registration + server startup
   handlers.rs         # handle_request (GIL), handle_request_subinterp (channel)
-  router.rs           # RouteTable, SharedRoutes
+  router.rs           # RouteTable, MutableRoutes, FrozenRoutes
   response.rs         # Response builders, extract_response_data
   json.rs             # py_to_json_value
   static_fs.rs        # try_static_file, mime_from_ext
-  interp.rs           # PyObjRef RAII, channel worker pool, AST filter
+  interp.rs           # PyObjRef RAII, C-FFI bridge, dual worker pool, mock injection
   websocket.rs        # SkyWebSocket, upgrade handler, async↔sync bridge
+  stream.rs           # SkyStream SSE
+  monitor.rs          # GIL watchdog, memory RSS, atomic counters
+  state.rs            # SharedState (DashMap)
 python/skytrade/
-  __init__.py         # Re-exports Pyre, SkyApp, SkyRequest, SkyResponse
-  app.py              # Pyre class (decorator syntax, logging, static files)
-examples/hello.py     # Demo app with decorators + middleware
+  __init__.py         # Re-exports all public APIs
+  app.py              # Pyre class (decorators, CORS, logging, config)
+  mcp.py              # MCP server (JSON-RPC 2.0)
+  rpc.py              # MsgPack RPC + PyreRPCClient
+  cookies.py          # Cookie utilities
+  uploads.py          # Multipart form-data parser
+  testing.py          # TestClient
+  _async_engine.py    # Async engine script for sub-interpreters
+  engine.pyi          # Type stubs
+examples/
+  hello.py            # Basic demo
+  ai_agent_server.py  # MCP + SSE + SharedState + Pydantic
+  trading_api.py      # numpy + WebSocket + RPC + SharedState
+  fullstack_api.py    # CRUD + Cookie auth + file upload
+tests/
+  test_all_features.py      # 22 tests (11 per mode × 2)
+  test_async_isolation.py   # Proves async isolation
+  test_logging.py           # 4 logging tests
+  test_env_var_worker.py    # Env var + decorator tests
+  test_async_bridge.py      # Phase 7.2 async bridge
+  test_ws_binary_*.py       # WebSocket tests
+  multifile_app/            # Multi-file project tests
 benchmarks/
-  run_bench.sh        # Head-to-head benchmark vs Robyn
-  robyn_app.py        # Robyn equivalent for comparison
-  bench.py            # Standalone wrk runner
-  benchmark-*.md      # Benchmark results history
+  run_comparison.sh   # Pyre vs FastAPI head-to-head
+  run_bench.sh        # Pyre vs Robyn
+  benchmark-*.md      # Results history (11 reports)
+docs/
+  subinterp-safe-ecosystem.md  # Golden Path ecosystem guide
+  phase-7.2-async-bridge.md    # Native async bridge design
+  dual-engine-design.md        # Dual pool architecture
+  gil-monitor-design.md        # GIL watchdog design
+  gc-optimization-guide.md     # GC tuning
+  zero-copy-design.md          # Zero-copy design
+  rpc-engine-design.md         # RPC engine design
+  why-not-multiprocess.md      # Architecture rationale
+  developer-experience.md      # DX philosophy
+  subinterp-c-extension-compat.md  # C extension compatibility
 ```
