@@ -101,6 +101,22 @@ Benchmarked on Apple Silicon (M-series), Python 3.14, wrk -t4 -c256 -d10s.
 | Processes | **1** | 1+ Gunicorn | 22 |
 | GIL contention | **0 μs** (independent) | N/A (single) | N/A (multi-process) |
 
+### Stability (5-minute sustained load)
+
+Sustained 5-minute stress test on Apple M4, Python 3.14, wrk -t4 -c100 -d300s. Full report: [benchmarks/benchmark-12-stability.md](benchmarks/benchmark-12-stability.md)
+
+| Metric | Result |
+|--------|--------|
+| Total requests | **64,410,189** (64 million) |
+| Sustained QPS | **214,641 req/s** (consistent across 5 minutes) |
+| Non-2xx responses | **0** |
+| Socket errors | **0** |
+| Memory (start → end) | 1712 KB → **752 KB** (zero leak, RSS decreased) |
+| Max latency | 39.98ms |
+| Server crash | **None** (all endpoints responsive after test) |
+
+Followed by 3 additional 1-minute phases (path params, JSON POST, CPU-bound fib10) — all at 210-215k req/s, zero errors, RSS flat at 752 KB. Total: **90+ million requests, zero memory leaks, zero crashes.**
+
 ### Pyre vs Robyn: feature comparison
 
 | Capability | Pyre | Robyn |
