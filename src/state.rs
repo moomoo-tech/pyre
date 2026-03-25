@@ -23,11 +23,6 @@ impl SharedState {
     pub fn with_inner(inner: Arc<DashMap<String, Vec<u8>>>) -> Self {
         SharedState { inner }
     }
-
-    /// Get the inner Arc for cloning into sub-interpreters.
-    pub fn inner(&self) -> &Arc<DashMap<String, Vec<u8>>> {
-        &self.inner
-    }
 }
 
 #[pymethods]

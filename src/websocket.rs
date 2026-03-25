@@ -1,7 +1,5 @@
 //! WebSocket support — async Tokio ↔ sync Python bridge via channels.
 
-use std::sync::Arc;
-
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
 use http_body_util::Full;
@@ -77,9 +75,9 @@ impl SkyWebSocket {
     fn send(&self, msg: &str) -> PyResult<()> {
         let tx = self.outgoing_tx.lock().unwrap();
         match tx.as_ref() {
-            Some(tx) => tx.send(WsMsg::Text(msg.to_string())).map_err(|_| {
-                pyo3::exceptions::PyConnectionError::new_err("WebSocket closed")
-            }),
+            Some(tx) => tx
+                .send(WsMsg::Text(msg.to_string()))
+                .map_err(|_| pyo3::exceptions::PyConnectionError::new_err("WebSocket closed")),
             None => Err(pyo3::exceptions::PyConnectionError::new_err(
                 "WebSocket closed",
             )),
@@ -90,9 +88,9 @@ impl SkyWebSocket {
     fn send_bytes(&self, data: Vec<u8>) -> PyResult<()> {
         let tx = self.outgoing_tx.lock().unwrap();
         match tx.as_ref() {
-            Some(tx) => tx.send(WsMsg::Binary(data)).map_err(|_| {
-                pyo3::exceptions::PyConnectionError::new_err("WebSocket closed")
-            }),
+            Some(tx) => tx
+                .send(WsMsg::Binary(data))
+                .map_err(|_| pyo3::exceptions::PyConnectionError::new_err("WebSocket closed")),
             None => Err(pyo3::exceptions::PyConnectionError::new_err(
                 "WebSocket closed",
             )),
@@ -141,9 +139,7 @@ pub(crate) async fn handle_websocket(
     let path = req.uri().path().to_string();
 
     // Look up WebSocket handler (need GIL to clone Py<PyAny>)
-    let handler = Python::attach(|py| {
-        routes.ws_handlers.get(&path).map(|h| h.clone_ref(py))
-    });
+    let handler = Python::attach(|py| routes.ws_handlers.get(&path).map(|h| h.clone_ref(py)));
 
     let handler = match handler {
         Some(h) => h,

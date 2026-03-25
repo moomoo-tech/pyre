@@ -80,11 +80,10 @@ jobs:
           source .venv/bin/activate
           python tests/test_all_features.py
 
-  # ── Rust lint (advisory, non-blocking) ────────────────────────────
+  # ── Rust lint (blocking) ──────────────────────────────────────────
   rust-lint:
-    name: Rust lint (advisory)
+    name: Rust lint
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -92,6 +91,6 @@ jobs:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
       - name: cargo fmt
-        run: cargo fmt --check || echo "::warning::cargo fmt found formatting issues"
+        run: cargo fmt --check
       - name: cargo clippy
-        run: cargo clippy --all-targets 2>&1 || echo "::warning::clippy found warnings"
+        run: cargo clippy --all-targets -- -D warnings

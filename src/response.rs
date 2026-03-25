@@ -20,11 +20,11 @@ pub(crate) fn extract_response_data(
     obj: Bound<'_, pyo3::PyAny>,
 ) -> Result<ResponseData, String> {
     // SkyResponse
-    if let Ok(resp) = obj.downcast::<SkyResponse>() {
+    if let Ok(resp) = obj.cast::<SkyResponse>() {
         let resp = resp.get();
         let body_bound = resp.body.bind(py);
 
-        let (body_bytes, auto_ct) = if let Ok(s) = body_bound.downcast::<PyString>() {
+        let (body_bytes, auto_ct) = if let Ok(s) = body_bound.cast::<PyString>() {
             let st = s.to_string();
             let ct = if st.starts_with('{') || st.starts_with('[') {
                 "application/json"
@@ -32,9 +32,7 @@ pub(crate) fn extract_response_data(
                 "text/plain; charset=utf-8"
             };
             (Bytes::from(st), ct)
-        } else if body_bound.downcast::<PyDict>().is_ok()
-            || body_bound.downcast::<PyList>().is_ok()
-        {
+        } else if body_bound.cast::<PyDict>().is_ok() || body_bound.cast::<PyList>().is_ok() {
             let val = py_to_json_value(body_bound).map_err(|e| format!("json error: {e}"))?;
             let json_bytes =
                 serde_json::to_vec(&val).map_err(|e| format!("json serialize error: {e}"))?;
@@ -60,7 +58,7 @@ pub(crate) fn extract_response_data(
     }
 
     // Plain string
-    if let Ok(s) = obj.downcast::<PyString>() {
+    if let Ok(s) = obj.cast::<PyString>() {
         let st = s.to_string();
         let ct = if st.starts_with('{') || st.starts_with('[') {
             "application/json"
@@ -76,7 +74,7 @@ pub(crate) fn extract_response_data(
     }
 
     // dict → JSON
-    if obj.downcast::<PyDict>().is_ok() {
+    if obj.cast::<PyDict>().is_ok() {
         let val = py_to_json_value(&obj).map_err(|e| format!("json error: {e}"))?;
         let json_bytes =
             serde_json::to_vec(&val).map_err(|e| format!("json serialize error: {e}"))?;
@@ -89,7 +87,7 @@ pub(crate) fn extract_response_data(
     }
 
     // list → JSON
-    if obj.downcast::<PyList>().is_ok() {
+    if obj.cast::<PyList>().is_ok() {
         let val = py_to_json_value(&obj).map_err(|e| format!("json error: {e}"))?;
         let json_bytes =
             serde_json::to_vec(&val).map_err(|e| format!("json serialize error: {e}"))?;
@@ -149,9 +147,10 @@ pub(crate) fn error_response(msg: &str) -> Response<Full<Bytes>> {
         .status(StatusCode::INTERNAL_SERVER_ERROR)
         .header("content-type", "application/json")
         .header("server", SERVER_HEADER)
-        .body(Full::new(Bytes::from(
-            format!(r#"{{"error":"{}"}}"#, msg.replace('"', "\\\"")),
-        )))
+        .body(Full::new(Bytes::from(format!(
+            r#"{{"error":"{}"}}"#,
+            msg.replace('"', "\\\"")
+        ))))
         .unwrap()
 }
 
@@ -162,9 +161,10 @@ pub(crate) fn overloaded_response(msg: &str) -> Response<Full<Bytes>> {
         .header("content-type", "application/json")
         .header("server", SERVER_HEADER)
         .header("retry-after", "1")
-        .body(Full::new(Bytes::from(
-            format!(r#"{{"error":"{}"}}"#, msg.replace('"', "\\\"")),
-        )))
+        .body(Full::new(Bytes::from(format!(
+            r#"{{"error":"{}"}}"#,
+            msg.replace('"', "\\\"")
+        ))))
         .unwrap()
 }
 
@@ -219,7 +219,10 @@ mod tests {
         let resp = not_found_response();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
         assert_eq!(resp.headers()["content-type"], "application/json");
-        assert!(resp.headers()["server"].to_str().unwrap().starts_with("Pyre/"));
+        assert!(resp.headers()["server"]
+            .to_str()
+            .unwrap()
+            .starts_with("Pyre/"));
         assert_eq!(body_bytes(resp), b"{\"error\":\"not found\"}");
     }
 

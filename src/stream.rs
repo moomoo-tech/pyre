@@ -50,12 +50,7 @@ impl SkyStream {
 
     /// Send an SSE event: `event: {event}\ndata: {data}\n\n`
     #[pyo3(signature = (data, event=None, id=None))]
-    fn send_event(
-        &self,
-        data: &str,
-        event: Option<&str>,
-        id: Option<&str>,
-    ) -> PyResult<()> {
+    fn send_event(&self, data: &str, event: Option<&str>, id: Option<&str>) -> PyResult<()> {
         let mut msg = String::new();
         if let Some(id) = id {
             msg.push_str(&format!("id: {id}\n"));

@@ -424,8 +424,11 @@ class Pyre:
             return
 
         import signal
+        import threading
         # Suppress Python's noisy KeyboardInterrupt during threading shutdown
-        signal.signal(signal.SIGINT, signal.SIG_DFL)
+        # (only works in main thread — TestClient runs in a background thread)
+        if threading.current_thread() is threading.main_thread():
+            signal.signal(signal.SIGINT, signal.SIG_DFL)
         self._engine.run(host=host, port=port, workers=workers, mode=mode)
 
     def _run_with_reload(self):

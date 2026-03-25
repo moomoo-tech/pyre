@@ -7,7 +7,7 @@ use pyo3::prelude::*;
 // SkyRequest
 // ---------------------------------------------------------------------------
 
-#[pyclass(frozen)]
+#[pyclass(frozen, skip_from_py_object)]
 #[derive(Clone)]
 pub(crate) struct SkyRequest {
     #[pyo3(get)]

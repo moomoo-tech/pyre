@@ -54,15 +54,16 @@ impl RouteTable {
         self.handler_names.push(handler_name);
         self.requires_gil.push(gil);
         self.is_async.push(is_async);
-        let router = self
-            .routers
-            .entry(method.to_uppercase())
-            .or_insert_with(Router::new);
+        let router = self.routers.entry(method.to_uppercase()).or_default();
         router.insert(path, idx).map_err(|e| e.to_string())?;
         Ok(())
     }
 
-    pub(crate) fn lookup(&self, method: &str, path: &str) -> Option<(usize, HashMap<String, String>)> {
+    pub(crate) fn lookup(
+        &self,
+        method: &str,
+        path: &str,
+    ) -> Option<(usize, HashMap<String, String>)> {
         let router = self.routers.get(method)?;
         let matched = router.at(path).ok()?;
         let params: HashMap<String, String> = matched

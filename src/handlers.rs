@@ -58,7 +58,9 @@ fn resolve_coroutine(py: Python<'_>, obj: Py<PyAny>) -> Result<Py<PyAny>, String
         let mut slot = tl.borrow_mut();
 
         if slot.is_none() {
-            let asyncio = py.import("asyncio").map_err(|e| format!("import asyncio: {e}"))?;
+            let asyncio = py
+                .import("asyncio")
+                .map_err(|e| format!("import asyncio: {e}"))?;
             let new_loop = asyncio
                 .call_method0("new_event_loop")
                 .map_err(|e| format!("new_event_loop: {e}"))?;
@@ -127,11 +129,12 @@ pub(crate) async fn handle_request(
     };
 
     // spawn_blocking: prevent GIL acquisition from starving Tokio workers
-    let handler_result = tokio::task::spawn_blocking(move || {
-        call_handler_with_hooks(routes, handler_idx, sky_req)
-    })
-    .await
-    .unwrap_or_else(|_| HandlerResult::Response(Err("handler thread panicked".to_string())));
+    let handler_result =
+        tokio::task::spawn_blocking(move || call_handler_with_hooks(routes, handler_idx, sky_req))
+            .await
+            .unwrap_or_else(|_| {
+                HandlerResult::Response(Err("handler thread panicked".to_string()))
+            });
 
     match handler_result {
         HandlerResult::Response(result) => Ok(full_body(build_response(result)?)),
@@ -158,8 +161,11 @@ fn call_handler_with_hooks(
         let hold_start = std::time::Instant::now();
 
         // FrozenRoutes: no lock needed — direct Arc<RouteTable> access
-        let before_hooks: Vec<Py<PyAny>> =
-            routes.before_hooks.iter().map(|h| h.clone_ref(py)).collect();
+        let before_hooks: Vec<Py<PyAny>> = routes
+            .before_hooks
+            .iter()
+            .map(|h| h.clone_ref(py))
+            .collect();
         let after_hooks: Vec<Py<PyAny>> =
             routes.after_hooks.iter().map(|h| h.clone_ref(py)).collect();
 
@@ -175,15 +181,11 @@ fn call_handler_with_hooks(
                 Ok(result) => {
                     let bound = result.bind(py);
                     if !bound.is_none() {
-                        return HandlerResult::Response(
-                            extract_response_data(py, bound.clone()),
-                        );
+                        return HandlerResult::Response(extract_response_data(py, bound.clone()));
                     }
                 }
                 Err(e) => {
-                    return HandlerResult::Response(Err(format!(
-                        "before_request hook error: {e}"
-                    )))
+                    return HandlerResult::Response(Err(format!("before_request hook error: {e}")))
                 }
             }
         }
@@ -207,7 +209,7 @@ fn call_handler_with_hooks(
                 if type_name == "SkyStream" {
                     // Downcast to SkyStream and wire up the channel
                     let bound = obj.bind(py);
-                    let stream_ref = match bound.downcast::<SkyStream>() {
+                    let stream_ref = match bound.cast::<SkyStream>() {
                         Ok(s) => s.get(),
                         Err(e) => return HandlerResult::Response(Err(e.to_string())),
                     };
@@ -215,7 +217,7 @@ fn call_handler_with_hooks(
                         Some(r) => r,
                         None => {
                             return HandlerResult::Response(Err(
-                                "SkyStream already consumed".to_string(),
+                                "SkyStream already consumed".to_string()
                             ))
                         }
                     };
@@ -271,10 +273,7 @@ fn call_handler_with_hooks(
         };
 
         // Record GIL hold time before releasing GIL
-        crate::monitor::GIL_HOLD_MAX_US.fetch_max(
-            hold_start.elapsed().as_micros() as u64,
-            Relaxed,
-        );
+        crate::monitor::GIL_HOLD_MAX_US.fetch_max(hold_start.elapsed().as_micros() as u64, Relaxed);
 
         handler_result
     })
@@ -381,12 +380,7 @@ pub(crate) async fn handle_request_subinterp(
         return Ok(full_body(overloaded_response(&e)));
     }
 
-    let result = match tokio::time::timeout(
-        std::time::Duration::from_secs(30),
-        response_rx,
-    )
-    .await
-    {
+    let result = match tokio::time::timeout(std::time::Duration::from_secs(30), response_rx).await {
         Ok(Ok(r)) => r,
         Ok(Err(_)) => Err("worker thread dropped response".to_string()),
         Err(_) => {
@@ -415,7 +409,10 @@ pub(crate) async fn handle_request_subinterp(
             // Add CORS headers if enabled (per-instance config)
             if let Some(origin) = pool.cors_origin.as_ref() {
                 builder = builder.header("access-control-allow-origin", origin.as_str());
-                builder = builder.header("access-control-allow-methods", "GET, POST, PUT, DELETE, PATCH, OPTIONS");
+                builder = builder.header(
+                    "access-control-allow-methods",
+                    "GET, POST, PUT, DELETE, PATCH, OPTIONS",
+                );
                 builder = builder.header("access-control-allow-headers", "*");
             }
             Ok(full_body(

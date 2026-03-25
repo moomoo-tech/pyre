@@ -22,7 +22,8 @@ pub static GIL_TOTAL_WAIT_US: AtomicU64 = AtomicU64::new(0);
 pub static MEMORY_RSS_BYTES: AtomicU64 = AtomicU64::new(0);
 
 /// Number of threads currently waiting to acquire the main GIL
-pub static GIL_QUEUE_LENGTH: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+pub static GIL_QUEUE_LENGTH: std::sync::atomic::AtomicIsize =
+    std::sync::atomic::AtomicIsize::new(0);
 /// Peak business handler GIL hold time (microseconds, reset on read)
 pub static GIL_HOLD_MAX_US: AtomicU64 = AtomicU64::new(0);
 
@@ -53,10 +54,7 @@ pub fn spawn_gil_watchdog() {
 
                 // Alert if GIL blocked > 50ms
                 if elapsed_us > 50_000 {
-                    eprintln!(
-                        "⚠️  [WATCHDOG] Main GIL congested: {}ms",
-                        elapsed_us / 1000
-                    );
+                    eprintln!("⚠️  [WATCHDOG] Main GIL congested: {}ms", elapsed_us / 1000);
                 }
 
                 // Sample memory RSS
@@ -140,5 +138,7 @@ pub fn get_gil_metrics() -> (u64, u64, u64, u64, u64, isize, u64, u64, u64) {
     let hold_peak = GIL_HOLD_MAX_US.swap(0, Ordering::Relaxed);
     let dropped = DROPPED_REQUESTS.load(Ordering::Relaxed);
     let total_req = TOTAL_REQUESTS.load(Ordering::Relaxed);
-    (last, peak, count, total, rss, queue, hold_peak, dropped, total_req)
+    (
+        last, peak, count, total, rss, queue, hold_peak, dropped, total_req,
+    )
 }

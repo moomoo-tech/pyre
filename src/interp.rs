@@ -23,7 +23,8 @@ use std::sync::atomic::AtomicBool;
 /// Per-worker state accessible from C-FFI functions (no closure environment).
 struct WorkerState {
     rx: crossbeam_channel::Receiver<WorkRequest>,
-    response_map: Mutex<HashMap<u64, tokio::sync::oneshot::Sender<Result<SubInterpResponse, String>>>>,
+    response_map:
+        Mutex<HashMap<u64, tokio::sync::oneshot::Sender<Result<SubInterpResponse, String>>>>,
     next_req_id: AtomicU64,
 }
 
@@ -66,32 +67,61 @@ unsafe extern "C" fn pyre_recv_cfunc(
     match req_opt {
         Some(req) => {
             let req_id = state.next_req_id.fetch_add(1, Ordering::Relaxed);
-            state.response_map.lock().unwrap().insert(req_id, req.response_tx);
+            state
+                .response_map
+                .lock()
+                .unwrap()
+                .insert(req_id, req.response_tx);
 
             let tuple = ffi::PyTuple_New(7);
             ffi::PyTuple_SetItem(tuple, 0, ffi::PyLong_FromUnsignedLongLong(req_id));
-            ffi::PyTuple_SetItem(tuple, 1, ffi::PyLong_FromUnsignedLongLong(req.handler_idx as u64));
             ffi::PyTuple_SetItem(
-                tuple, 2,
-                ffi::PyUnicode_FromStringAndSize(req.method.as_ptr() as *const _, req.method.len() as isize),
+                tuple,
+                1,
+                ffi::PyLong_FromUnsignedLongLong(req.handler_idx as u64),
             );
             ffi::PyTuple_SetItem(
-                tuple, 3,
-                ffi::PyUnicode_FromStringAndSize(req.path.as_ptr() as *const _, req.path.len() as isize),
+                tuple,
+                2,
+                ffi::PyUnicode_FromStringAndSize(
+                    req.method.as_ptr() as *const _,
+                    req.method.len() as isize,
+                ),
             );
             ffi::PyTuple_SetItem(
-                tuple, 4,
-                ffi::PyUnicode_FromStringAndSize(req.query.as_ptr() as *const _, req.query.len() as isize),
+                tuple,
+                3,
+                ffi::PyUnicode_FromStringAndSize(
+                    req.path.as_ptr() as *const _,
+                    req.path.len() as isize,
+                ),
             );
             ffi::PyTuple_SetItem(
-                tuple, 5,
-                ffi::PyBytes_FromStringAndSize(req.body.as_ptr() as *const _, req.body.len() as isize),
+                tuple,
+                4,
+                ffi::PyUnicode_FromStringAndSize(
+                    req.query.as_ptr() as *const _,
+                    req.query.len() as isize,
+                ),
+            );
+            ffi::PyTuple_SetItem(
+                tuple,
+                5,
+                ffi::PyBytes_FromStringAndSize(
+                    req.body.as_ptr() as *const _,
+                    req.body.len() as isize,
+                ),
             );
             // Serialize headers as JSON string for Python
-            let headers_json = serde_json::to_string(&req.headers).unwrap_or_else(|_| "{}".to_string());
+            let headers_json =
+                serde_json::to_string(&req.headers).unwrap_or_else(|_| "{}".to_string());
             ffi::PyTuple_SetItem(
-                tuple, 6,
-                ffi::PyUnicode_FromStringAndSize(headers_json.as_ptr() as *const _, headers_json.len() as isize),
+                tuple,
+                6,
+                ffi::PyUnicode_FromStringAndSize(
+                    headers_json.as_ptr() as *const _,
+                    headers_json.len() as isize,
+                ),
             );
             tuple
         }
@@ -132,7 +162,11 @@ unsafe extern "C" fn pyre_send_cfunc(
     }
 
     let ctype = if !ctype_str.is_null() {
-        Some(std::ffi::CStr::from_ptr(ctype_str).to_string_lossy().into_owned())
+        Some(
+            std::ffi::CStr::from_ptr(ctype_str)
+                .to_string_lossy()
+                .into_owned(),
+        )
     } else {
         None
     };
@@ -318,7 +352,7 @@ struct SubInterpreterWorker {
     /// Cached: _SkyResponse class pointer
     sky_response_cls: *mut ffi::PyObject,
     /// Cached: persistent asyncio event loop for this sub-interpreter
-    asyncio_loop: *mut ffi::PyObject,
+    _asyncio_loop: *mut ffi::PyObject,
     /// Cached: loop.run_until_complete method
     loop_run_func: *mut ffi::PyObject,
 }
@@ -331,11 +365,7 @@ impl SubInterpreterWorker {
     /// # Safety
     /// Must be called while the main interpreter's thread state is current.
     /// Switches to the new sub-interpreter and back to main on completion.
-    unsafe fn new(
-        script: &str,
-        script_path: &str,
-        func_names: &[String],
-    ) -> Result<Self, String> {
+    unsafe fn new(script: &str, script_path: &str, func_names: &[String]) -> Result<Self, String> {
         let main_tstate = ffi::PyThreadState_Get();
 
         let mut new_tstate: *mut ffi::PyThreadState = std::ptr::null_mut();
@@ -358,12 +388,10 @@ impl SubInterpreterWorker {
         // We are now in the sub-interpreter's thread state.
         // Run the bootstrap (from external .py file) + user script.
         let bootstrap_src = include_str!("../python/skytrade/_bootstrap.py");
-        let bootstrap = format!(
-            "{bootstrap_src}\n# Execute full user script\n{script}"
-        );
+        let bootstrap = format!("{bootstrap_src}\n# Execute full user script\n{script}");
 
-        let globals = PyObjRef::from_owned(ffi::PyDict_New())
-            .ok_or("failed to create globals dict")?;
+        let globals =
+            PyObjRef::from_owned(ffi::PyDict_New()).ok_or("failed to create globals dict")?;
         let builtins = ffi::PyEval_GetBuiltins(); // borrowed ref
         ffi::PyDict_SetItemString(globals.as_ptr(), c"__builtins__".as_ptr(), builtins);
 
@@ -374,12 +402,12 @@ impl SubInterpreterWorker {
 
         let code_cstr = std::ffi::CString::new(bootstrap.as_bytes())
             .map_err(|e| format!("CString error: {e}"))?;
-        let _filename_cstr = std::ffi::CString::new(script_path)
-            .map_err(|e| format!("CString error: {e}"))?;
+        let _filename_cstr =
+            std::ffi::CString::new(script_path).map_err(|e| format!("CString error: {e}"))?;
 
         let result = PyObjRef::from_owned(ffi::PyRun_String(
             code_cstr.as_ptr(),
-            ffi::Py_file_input.try_into().unwrap(),
+            ffi::Py_file_input,
             globals.as_ptr(),
             globals.as_ptr(),
         ));
@@ -484,7 +512,7 @@ impl SubInterpreterWorker {
             json_dumps_func,
             sky_request_cls,
             sky_response_cls,
-            asyncio_loop,
+            _asyncio_loop: asyncio_loop,
             loop_run_func,
         })
     }
@@ -510,8 +538,8 @@ impl SubInterpreterWorker {
         let py_headers = py_str_dict(headers).ok_or("failed to create py_headers")?;
 
         // Build args tuple — PyTuple_SetItem steals references
-        let args = PyObjRef::from_owned(ffi::PyTuple_New(6))
-            .ok_or("failed to create args tuple")?;
+        let args =
+            PyObjRef::from_owned(ffi::PyTuple_New(6)).ok_or("failed to create args tuple")?;
         ffi::PyTuple_SetItem(args.as_ptr(), 0, py_method.into_raw());
         ffi::PyTuple_SetItem(args.as_ptr(), 1, py_path.into_raw());
         ffi::PyTuple_SetItem(args.as_ptr(), 2, py_params.into_raw());
@@ -525,9 +553,11 @@ impl SubInterpreterWorker {
             return Err("_SkyRequest class not found".to_string());
         }
 
-        let request_obj = PyObjRef::from_owned(
-            ffi::PyObject_Call(req_cls, args.as_ptr(), std::ptr::null_mut()),
-        );
+        let request_obj = PyObjRef::from_owned(ffi::PyObject_Call(
+            req_cls,
+            args.as_ptr(),
+            std::ptr::null_mut(),
+        ));
         // args dropped here → DECREF
 
         request_obj.ok_or_else(|| {
@@ -540,10 +570,7 @@ impl SubInterpreterWorker {
     ///
     /// # Safety
     /// Must be called with this sub-interpreter's GIL held.
-    unsafe fn parse_result(
-        &self,
-        result_obj: PyObjRef,
-    ) -> Result<SubInterpResponse, String> {
+    unsafe fn parse_result(&self, result_obj: PyObjRef) -> Result<SubInterpResponse, String> {
         let ptr = result_obj.as_ptr();
 
         // Check if it's a _SkyResponse or any response-like object
@@ -586,8 +613,7 @@ impl SubInterpreterWorker {
         }
 
         // fallback: str(result)
-        let str_obj = PyObjRef::from_owned(ffi::PyObject_Str(ptr))
-            .ok_or("str() failed")?;
+        let str_obj = PyObjRef::from_owned(ffi::PyObject_Str(ptr)).ok_or("str() failed")?;
         let s = pyobj_to_string(str_obj.as_ptr())?;
         Ok(SubInterpResponse {
             body: s.into_bytes(),
@@ -616,10 +642,8 @@ impl SubInterpreterWorker {
         let py_headers = py_str_dict(&resp.headers).ok_or("failed to create headers dict")?;
 
         // _SkyResponse(body, status_code, content_type, headers)
-        let args = PyObjRef::from_owned(ffi::PyTuple_New(0))
-            .ok_or("failed to create args")?;
-        let kwargs = PyObjRef::from_owned(ffi::PyDict_New())
-            .ok_or("failed to create kwargs")?;
+        let args = PyObjRef::from_owned(ffi::PyTuple_New(0)).ok_or("failed to create args")?;
+        let kwargs = PyObjRef::from_owned(ffi::PyDict_New()).ok_or("failed to create kwargs")?;
 
         ffi::PyDict_SetItemString(kwargs.as_ptr(), c"body".as_ptr(), py_body.as_ptr());
         ffi::PyDict_SetItemString(kwargs.as_ptr(), c"status_code".as_ptr(), py_status.as_ptr());
@@ -647,8 +671,8 @@ impl SubInterpreterWorker {
             return Err("async handler used but asyncio event loop not available".to_string());
         }
         // Call loop.run_until_complete(coroutine)
-        let args = PyObjRef::from_owned(ffi::PyTuple_New(1))
-            .ok_or("failed to create args tuple")?;
+        let args =
+            PyObjRef::from_owned(ffi::PyTuple_New(1)).ok_or("failed to create args tuple")?;
         ffi::PyTuple_SetItem(args.as_ptr(), 0, obj.into_raw());
         let result = PyObjRef::from_owned(ffi::PyObject_Call(
             self.loop_run_func,
@@ -670,13 +694,14 @@ impl SubInterpreterWorker {
             return Err("json.dumps not cached".to_string());
         }
 
-        let args = PyObjRef::from_owned(ffi::PyTuple_New(1))
-            .ok_or("failed to create tuple")?;
+        let args = PyObjRef::from_owned(ffi::PyTuple_New(1)).ok_or("failed to create tuple")?;
         ffi::PyTuple_SetItem(args.as_ptr(), 0, obj.into_raw());
 
-        let result = PyObjRef::from_owned(
-            ffi::PyObject_Call(self.json_dumps_func, args.as_ptr(), std::ptr::null_mut()),
-        )
+        let result = PyObjRef::from_owned(ffi::PyObject_Call(
+            self.json_dumps_func,
+            args.as_ptr(),
+            std::ptr::null_mut(),
+        ))
         .ok_or_else(|| {
             ffi::PyErr_Print();
             "json.dumps failed".to_string()
@@ -684,9 +709,8 @@ impl SubInterpreterWorker {
 
         // orjson.dumps returns bytes, json.dumps returns str
         if ffi::PyBytes_Check(result.as_ptr()) != 0 {
-            let mut size: isize = 0;
             let ptr = ffi::PyBytes_AsString(result.as_ptr());
-            size = ffi::PyBytes_Size(result.as_ptr());
+            let size = ffi::PyBytes_Size(result.as_ptr());
             if ptr.is_null() {
                 return Err("failed to extract bytes".to_string());
             }
@@ -698,17 +722,13 @@ impl SubInterpreterWorker {
     }
 
     /// Parse a _SkyResponse Python object.
-    unsafe fn parse_sky_response(
-        &self,
-        obj: PyObjRef,
-    ) -> Result<SubInterpResponse, String> {
+    unsafe fn parse_sky_response(&self, obj: PyObjRef) -> Result<SubInterpResponse, String> {
         let ptr = obj.as_ptr();
 
         // status_code
         let status = {
-            let attr = PyObjRef::from_owned(
-                ffi::PyObject_GetAttrString(ptr, c"status_code".as_ptr()),
-            );
+            let attr =
+                PyObjRef::from_owned(ffi::PyObject_GetAttrString(ptr, c"status_code".as_ptr()));
             match attr {
                 Some(a) => ffi::PyLong_AsLong(a.as_ptr()) as u16,
                 None => {
@@ -720,9 +740,8 @@ impl SubInterpreterWorker {
 
         // content_type
         let content_type = {
-            let attr = PyObjRef::from_owned(
-                ffi::PyObject_GetAttrString(ptr, c"content_type".as_ptr()),
-            );
+            let attr =
+                PyObjRef::from_owned(ffi::PyObject_GetAttrString(ptr, c"content_type".as_ptr()));
             match attr {
                 Some(a) if a.as_ptr() != ffi::Py_None() => pyobj_to_string(a.as_ptr()).ok(),
                 _ => {
@@ -735,9 +754,7 @@ impl SubInterpreterWorker {
         // headers
         let mut resp_headers = HashMap::new();
         {
-            let attr = PyObjRef::from_owned(
-                ffi::PyObject_GetAttrString(ptr, c"headers".as_ptr()),
-            );
+            let attr = PyObjRef::from_owned(ffi::PyObject_GetAttrString(ptr, c"headers".as_ptr()));
             if let Some(a) = &attr {
                 if ffi::PyDict_Check(a.as_ptr()) != 0 {
                     let mut pos: isize = 0;
@@ -748,7 +765,9 @@ impl SubInterpreterWorker {
                         let str_key = PyObjRef::from_owned(ffi::PyObject_Str(key));
                         let str_val = PyObjRef::from_owned(ffi::PyObject_Str(val));
                         if let (Some(sk), Some(sv)) = (str_key, str_val) {
-                            if let (Ok(k), Ok(v)) = (pyobj_to_string(sk.as_ptr()), pyobj_to_string(sv.as_ptr())) {
+                            if let (Ok(k), Ok(v)) =
+                                (pyobj_to_string(sk.as_ptr()), pyobj_to_string(sv.as_ptr()))
+                            {
                                 resp_headers.insert(k, v);
                             }
                         }
@@ -760,9 +779,7 @@ impl SubInterpreterWorker {
 
         // body (returns Vec<u8>)
         let (body, is_json): (Vec<u8>, bool) = {
-            let attr = PyObjRef::from_owned(
-                ffi::PyObject_GetAttrString(ptr, c"body".as_ptr()),
-            );
+            let attr = PyObjRef::from_owned(ffi::PyObject_GetAttrString(ptr, c"body".as_ptr()));
             match attr {
                 Some(a) => {
                     if ffi::PyDict_Check(a.as_ptr()) != 0 {
@@ -781,11 +798,17 @@ impl SubInterpreterWorker {
                             (Vec::new(), false)
                         }
                     } else if ffi::PyUnicode_Check(a.as_ptr()) != 0 {
-                        (pyobj_to_string(a.as_ptr()).unwrap_or_default().into_bytes(), false)
+                        (
+                            pyobj_to_string(a.as_ptr()).unwrap_or_default().into_bytes(),
+                            false,
+                        )
                     } else {
                         let str_obj = PyObjRef::from_owned(ffi::PyObject_Str(a.as_ptr()));
                         match str_obj {
-                            Some(s) => (pyobj_to_string(s.as_ptr()).unwrap_or_default().into_bytes(), false),
+                            Some(s) => (
+                                pyobj_to_string(s.as_ptr()).unwrap_or_default().into_bytes(),
+                                false,
+                            ),
                             None => {
                                 ffi::PyErr_Clear();
                                 (Vec::new(), false)
@@ -813,6 +836,7 @@ impl SubInterpreterWorker {
     ///
     /// # Safety
     /// Must be called with this sub-interpreter's GIL held.
+    #[allow(clippy::too_many_arguments)]
     unsafe fn call_handler(
         &self,
         handler_name: &str,
@@ -860,8 +884,8 @@ impl SubInterpreterWorker {
         }
 
         // Call handler(request)
-        let call_args = PyObjRef::from_owned(ffi::PyTuple_New(1))
-            .ok_or("failed to create call args")?;
+        let call_args =
+            PyObjRef::from_owned(ffi::PyTuple_New(1)).ok_or("failed to create call args")?;
         ffi::PyTuple_SetItem(call_args.as_ptr(), 0, request_obj.into_raw());
 
         let result_obj = PyObjRef::from_owned(ffi::PyObject_Call(
@@ -885,8 +909,7 @@ impl SubInterpreterWorker {
         // Run after_request hooks: hook(request, response) → response
         if !after_hook_names.is_empty() {
             // Rebuild request object for hooks (reuse the original params)
-            let req_for_hooks =
-                self.build_request(method, path, params, query, body, headers)?;
+            let req_for_hooks = self.build_request(method, path, params, query, body, headers)?;
 
             for hook_name in after_hook_names {
                 if let Some(&hook_func) = self.handlers.get(hook_name) {
@@ -933,7 +956,7 @@ pub(crate) struct InterpreterPool {
     /// Worker threads — joined on drop to ensure clean sub-interpreter shutdown.
     worker_threads: Option<Vec<std::thread::JoinHandle<()>>>,
     routers: HashMap<String, Router<usize>>,
-    handler_names: Vec<String>,
+    _handler_names: Vec<String>,
     pub(crate) requires_gil: Vec<bool>,
     pub(crate) is_async_handler: Vec<bool>,
     pub(crate) static_dirs: Vec<(String, String)>,
@@ -941,7 +964,8 @@ pub(crate) struct InterpreterPool {
     /// Per-instance CORS origin (None = disabled).
     pub(crate) cors_origin: Option<String>,
     /// Per-instance request logging flag, shared with worker threads.
-    request_logging: Arc<AtomicBool>,
+    /// Read via Arc clone in worker_thread_loop, not directly from the struct.
+    _request_logging: Arc<AtomicBool>,
 }
 
 impl Drop for InterpreterPool {
@@ -969,9 +993,10 @@ impl InterpreterPool {
     /// Create N sub-interpreters, each in its own OS thread, connected via channels.
     ///
     /// Must be called with the main interpreter's GIL held (before `py.detach()`).
+    #[allow(clippy::too_many_arguments)]
     pub unsafe fn new(
         n: usize,
-        py: Python<'_>,
+        _py: Python<'_>,
         script_path: &str,
         handler_names: &[String],
         routers: HashMap<String, Router<usize>>,
@@ -1011,7 +1036,7 @@ impl InterpreterPool {
         };
 
         // Determine worker split: if async handlers exist, split workers
-        let (sync_count, async_count) = if has_any_async {
+        let (sync_count, _async_count) = if has_any_async {
             let async_n = (n / 2).max(2); // At least 2 async workers
             (n - async_n, async_n)
         } else {
@@ -1023,12 +1048,8 @@ impl InterpreterPool {
         let mut threads = Vec::new();
 
         for i in 0..n {
-            let worker = SubInterpreterWorker::new(
-                &raw_script,
-                script_path,
-                &all_func_names,
-            )
-            .map_err(|e| format!("sub-interpreter {i}: {e}"))?;
+            let worker = SubInterpreterWorker::new(&raw_script, script_path, &all_func_names)
+                .map_err(|e| format!("sub-interpreter {i}: {e}"))?;
             workers.push(worker);
         }
 
@@ -1060,9 +1081,7 @@ impl InterpreterPool {
                 std::thread::Builder::new()
                     .name(format!("pyre-async-worker-{i}"))
                     .spawn(move || {
-                        worker_thread_loop_async(
-                            worker, &handler_names_clone, i,
-                        );
+                        worker_thread_loop_async(worker, &handler_names_clone, i);
                     })
                     .map_err(|e| format!("failed to spawn async worker {i}: {e}"))?
             } else {
@@ -1072,8 +1091,11 @@ impl InterpreterPool {
                     .name(format!("pyre-worker-{i}"))
                     .spawn(move || {
                         worker_thread_loop(
-                            worker, rx, &handler_names_clone,
-                            &before_hooks_clone, &after_hooks_clone,
+                            worker,
+                            rx,
+                            &handler_names_clone,
+                            &before_hooks_clone,
+                            &after_hooks_clone,
                             &logging,
                         );
                     })
@@ -1088,13 +1110,13 @@ impl InterpreterPool {
             async_work_tx,
             worker_threads: Some(threads),
             routers,
-            handler_names: handler_names.to_vec(),
+            _handler_names: handler_names.to_vec(),
             requires_gil,
             is_async_handler: is_async_handler.clone(),
             static_dirs,
             has_async_workers: has_any_async,
             cors_origin,
-            request_logging: logging_flag,
+            _request_logging: logging_flag,
         })
     }
 
@@ -1111,18 +1133,15 @@ impl InterpreterPool {
     }
 
     /// Get handler name by index.
-    pub fn handler_name(&self, idx: usize) -> &str {
-        &self.handler_names[idx]
-    }
-
     /// Submit a work request. Routes to sync or async pool based on handler type.
-    pub fn submit(
-        &self,
-        req: WorkRequest,
-    ) -> Result<(), String> {
+    pub fn submit(&self, req: WorkRequest) -> Result<(), String> {
         // Route to async pool if handler is async and pool exists
         let tx = if self.has_async_workers
-            && self.is_async_handler.get(req.handler_idx).copied().unwrap_or(false)
+            && self
+                .is_async_handler
+                .get(req.handler_idx)
+                .copied()
+                .unwrap_or(false)
         {
             self.async_work_tx.as_ref().unwrap()
         } else {
@@ -1131,7 +1150,9 @@ impl InterpreterPool {
 
         tx.try_send(req).map_err(|e| match e {
             crossbeam_channel::TrySendError::Full(_) => "server overloaded".to_string(),
-            crossbeam_channel::TrySendError::Disconnected(_) => "worker pool channel closed".to_string(),
+            crossbeam_channel::TrySendError::Disconnected(_) => {
+                "worker pool channel closed".to_string()
+            }
         })
     }
 }
@@ -1177,12 +1198,17 @@ fn worker_thread_loop(
 
         // Log request if enabled
         if request_logging.load(Ordering::Relaxed) {
-            let elapsed = std::time::Instant::now(); // approximation
             let status = match &response {
                 Ok(r) => r.status,
                 Err(_) => 500,
             };
-            let tag = if status >= 500 { "ERROR" } else if status >= 400 { "WARN " } else { "INFO " };
+            let tag = if status >= 500 {
+                "ERROR"
+            } else if status >= 400 {
+                "WARN "
+            } else {
+                "INFO "
+            };
             eprintln!("  [{tag}] {} {} → {status}", req.method, req.path);
         }
 
@@ -1216,15 +1242,16 @@ fn worker_thread_loop_async(
 
     // Load async engine from external Python file (syntax highlighting + maintainability)
     let engine_template = include_str!("../python/skytrade/_async_engine.py");
-    let engine_script = format!(
-        "WORKER_ID = {worker_idx}\nHANDLER_NAMES = [{handlers_array}]\n{engine_template}"
-    );
+    let engine_script =
+        format!("WORKER_ID = {worker_idx}\nHANDLER_NAMES = [{handlers_array}]\n{engine_template}");
 
     unsafe {
         ffi::PyEval_RestoreThread(worker.tstate);
 
-        // Register C-FFI functions in sub-interpreter globals
-        // Using thread-local statics to avoid cross-interpreter issues
+        // Register C-FFI functions in sub-interpreter globals.
+        // transmute: PyCFunction (2 args) → PyCFunctionWithKeywords (3 args) —
+        // safe because METH_VARARGS ignores the third (kwargs) parameter.
+        #[allow(clippy::missing_transmute_annotations)]
         let recv_def = Box::into_raw(Box::new(ffi::PyMethodDef {
             ml_name: c"_pyre_recv".as_ptr(),
             ml_meth: ffi::PyMethodDefPointer {
@@ -1233,6 +1260,7 @@ fn worker_thread_loop_async(
             ml_flags: ffi::METH_VARARGS,
             ml_doc: std::ptr::null(),
         }));
+        #[allow(clippy::missing_transmute_annotations)]
         let send_def = Box::into_raw(Box::new(ffi::PyMethodDef {
             ml_name: c"_pyre_send".as_ptr(),
             ml_meth: ffi::PyMethodDefPointer {
@@ -1242,8 +1270,10 @@ fn worker_thread_loop_async(
             ml_doc: std::ptr::null(),
         }));
 
-        let recv_func = ffi::PyCFunction_NewEx(recv_def, std::ptr::null_mut(), std::ptr::null_mut());
-        let send_func = ffi::PyCFunction_NewEx(send_def, std::ptr::null_mut(), std::ptr::null_mut());
+        let recv_func =
+            ffi::PyCFunction_NewEx(recv_def, std::ptr::null_mut(), std::ptr::null_mut());
+        let send_func =
+            ffi::PyCFunction_NewEx(send_def, std::ptr::null_mut(), std::ptr::null_mut());
 
         ffi::PyDict_SetItemString(worker.globals, c"_pyre_recv".as_ptr(), recv_func);
         ffi::PyDict_SetItemString(worker.globals, c"_pyre_send".as_ptr(), send_func);
@@ -1254,7 +1284,7 @@ fn worker_thread_loop_async(
         let code = std::ffi::CString::new(engine_script).unwrap();
         let result = ffi::PyRun_String(
             code.as_ptr(),
-            ffi::Py_file_input.try_into().unwrap(),
+            ffi::Py_file_input,
             worker.globals,
             worker.globals,
         );

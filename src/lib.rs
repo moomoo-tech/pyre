@@ -5,13 +5,13 @@ mod app;
 mod handlers;
 mod interp;
 mod json;
+mod monitor;
 mod response;
 mod router;
-mod static_fs;
-mod types;
-mod monitor;
 mod state;
+mod static_fs;
 mod stream;
+mod types;
 mod websocket;
 
 use pyo3::prelude::*;

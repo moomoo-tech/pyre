@@ -27,6 +27,44 @@ pub fn mime_from_ext(ext: &str) -> &'static str {
     }
 }
 
+pub(crate) async fn try_static_file(
+    req_path: &str,
+    static_dirs: &[(String, String)],
+) -> Option<Response<Full<Bytes>>> {
+    for (prefix, directory) in static_dirs {
+        if !req_path.starts_with(prefix.as_str()) {
+            continue;
+        }
+        let rel = req_path[prefix.len()..].trim_start_matches('/');
+        if rel.is_empty() {
+            continue;
+        }
+        if rel.contains("..") {
+            return Some(
+                Response::builder()
+                    .status(StatusCode::FORBIDDEN)
+                    .header("server", crate::response::SERVER_HEADER)
+                    .body(Full::new(Bytes::from_static(b"forbidden")))
+                    .unwrap(),
+            );
+        }
+        let file_path = std::path::PathBuf::from(directory).join(rel);
+        if let Ok(contents) = tokio::fs::read(&file_path).await {
+            let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            let ct = mime_from_ext(ext);
+            return Some(
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .header("content-type", ct)
+                    .header("server", crate::response::SERVER_HEADER)
+                    .body(Full::new(Bytes::from(contents)))
+                    .unwrap(),
+            );
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -41,7 +79,10 @@ mod tests {
     fn mime_js_css() {
         assert_eq!(mime_from_ext("css"), "text/css; charset=utf-8");
         assert_eq!(mime_from_ext("js"), "application/javascript; charset=utf-8");
-        assert_eq!(mime_from_ext("mjs"), "application/javascript; charset=utf-8");
+        assert_eq!(
+            mime_from_ext("mjs"),
+            "application/javascript; charset=utf-8"
+        );
     }
 
     #[test]
@@ -78,45 +119,4 @@ mod tests {
         assert_eq!(mime_from_ext(""), "application/octet-stream");
         assert_eq!(mime_from_ext("bin"), "application/octet-stream");
     }
-}
-
-pub(crate) async fn try_static_file(
-    req_path: &str,
-    static_dirs: &[(String, String)],
-) -> Option<Response<Full<Bytes>>> {
-    for (prefix, directory) in static_dirs {
-        if !req_path.starts_with(prefix.as_str()) {
-            continue;
-        }
-        let rel = req_path[prefix.len()..].trim_start_matches('/');
-        if rel.is_empty() {
-            continue;
-        }
-        if rel.contains("..") {
-            return Some(
-                Response::builder()
-                    .status(StatusCode::FORBIDDEN)
-                    .header("server", crate::response::SERVER_HEADER)
-                    .body(Full::new(Bytes::from_static(b"forbidden")))
-                    .unwrap(),
-            );
-        }
-        let file_path = std::path::PathBuf::from(directory).join(rel);
-        if let Ok(contents) = tokio::fs::read(&file_path).await {
-            let ext = file_path
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("");
-            let ct = mime_from_ext(ext);
-            return Some(
-                Response::builder()
-                    .status(StatusCode::OK)
-                    .header("content-type", ct)
-                    .header("server", crate::response::SERVER_HEADER)
-                    .body(Full::new(Bytes::from(contents)))
-                    .unwrap(),
-            );
-        }
-    }
-    None
 }

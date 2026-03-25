@@ -76,7 +76,13 @@ impl SkyApp {
     }
 
     #[pyo3(signature = (path, handler, gil=false))]
-    fn delete(&mut self, path: &str, handler: Py<PyAny>, gil: bool, py: Python<'_>) -> PyResult<()> {
+    fn delete(
+        &mut self,
+        path: &str,
+        handler: Py<PyAny>,
+        gil: bool,
+        py: Python<'_>,
+    ) -> PyResult<()> {
         let name = handler.getattr(py, "__name__")?.extract::<String>(py)?;
         self.add_route("DELETE", path, handler, name, gil, py)
     }
@@ -166,11 +172,12 @@ impl SkyApp {
         let host = host.unwrap_or("127.0.0.1");
         let port = port.unwrap_or(8000);
         let mode = mode.unwrap_or("default");
-        let addr: SocketAddr = format!("{host}:{port}")
-            .parse()
-            .map_err(|e: std::net::AddrParseError| {
-                pyo3::exceptions::PyValueError::new_err(e.to_string())
-            })?;
+        let addr: SocketAddr =
+            format!("{host}:{port}")
+                .parse()
+                .map_err(|e: std::net::AddrParseError| {
+                    pyo3::exceptions::PyValueError::new_err(e.to_string())
+                })?;
 
         let num_cpus = std::thread::available_parallelism()
             .map(|n| n.get())
@@ -188,7 +195,11 @@ impl SkyApp {
                 requires_gil: table.requires_gil.clone(),
                 is_async: table.is_async.clone(),
                 routers: table.routers.clone(),
-                ws_handlers: table.ws_handlers.iter().map(|(k, v)| (k.clone(), v.clone_ref(py))).collect(),
+                ws_handlers: table
+                    .ws_handlers
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone_ref(py)))
+                    .collect(),
                 before_hooks: table.before_hooks.iter().map(|h| h.clone_ref(py)).collect(),
                 after_hooks: table.after_hooks.iter().map(|h| h.clone_ref(py)).collect(),
                 before_hook_names: table.before_hook_names.clone(),
@@ -325,7 +336,14 @@ impl SkyApp {
             main_mod.getattr("__file__")?.extract::<String>()?
         };
 
-        let (handler_names, routers, before_hook_names, after_hook_names, static_dirs, requires_gil) = (
+        let (
+            handler_names,
+            routers,
+            before_hook_names,
+            after_hook_names,
+            static_dirs,
+            requires_gil,
+        ) = (
             routes.handler_names.clone(),
             routes.routers.clone(),
             routes.before_hook_names.clone(),
@@ -340,7 +358,10 @@ impl SkyApp {
         let async_count_routes = routes.is_async.iter().filter(|&&a| a).count();
         let has_async = async_count_routes > 0;
         let mode_label = if has_async { "hybrid-async" } else { "hybrid" };
-        println!("\n  Pyre v{} [{mode_label} mode]", env!("CARGO_PKG_VERSION"));
+        println!(
+            "\n  Pyre v{} [{mode_label} mode]",
+            env!("CARGO_PKG_VERSION")
+        );
         println!("  Listening on http://{addr}");
         println!("  Sub-interpreters: {workers} (CPUs: {num_cpus})");
         if has_async {
@@ -348,7 +369,9 @@ impl SkyApp {
             let async_w = (workers / 2).max(2);
             println!("  Workers: {sync_w} sync + {async_w} async");
         }
-        println!("  Routes: {subinterp_count} sub-interp + {gil_count} GIL + {async_count_routes} async");
+        println!(
+            "  Routes: {subinterp_count} sub-interp + {gil_count} GIL + {async_count_routes} async"
+        );
         println!("  Script: {script_path}\n");
 
         let pool = unsafe {
