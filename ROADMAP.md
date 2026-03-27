@@ -137,18 +137,27 @@ Benchmark: SubInterp 215k (channel pool, -0.5% vs mutex), GIL 104k (+3%), Robyn 
 - PyO3 tracking issue: https://github.com/PyO3/pyo3/issues/3451
 - 如果 Step 2 的 fork 稳定，可以向 PyO3 上游提 PR
 - ~~关注 numpy/orjson/pydantic 等库的 `Py_MOD_PER_INTERPRETER_GIL_SUPPORTED` 适配进度~~
-- ✅ **PEP 684 子解释器第三方库兼容性测试通过** (Python 3.14, 2026-03-27)
+- 🔬 **PEP 684 子解释器第三方库兼容性测试** (Python 3.14, 2026-03-27)
   - 30/30 库通过 sub-interpreter import + 基本操作测试
-  - 8 并发 sub-interpreter 压测全部通过
+  - 8 并发 sub-interpreter 短时压测通过
   - `check_multi_interp_extensions: 1` 无需关闭
-  - Pyre 时代的 shared GIL workaround 不再需要
-  - **已验证兼容列表：**
+  - **已通过基本测试（import + 简单操作）：**
     - 数据科学：numpy 2.4, pandas 3.0, scipy 1.17, polars 1.39, pyarrow 23.0
     - ML：scikit-learn 1.8, xgboost 3.2, lightgbm 4.6
     - 序列化：orjson 3.11, msgpack 1.1, json, csv
     - 网络：requests, aiohttp, websockets
     - 数据库：sqlite3
     - 标准库：collections, dataclasses, typing, math, statistics, decimal, datetime, re, hashlib, struct, ctypes, threading, queue, logging
+  - ⚠️ **风险警示：**
+    - 测试仅覆盖了 import 和基本操作，**不代表所有使用场景都安全**
+    - PEP 684 sub-interpreter 的 C 扩展兼容性仍是新领域，可能存在：
+      - **double free / use-after-free**：C 扩展内部的全局状态在解释器销毁时可能被多次释放
+      - **全局状态泄漏**：某些 C 扩展可能在 `PyModule_GetState` 外维护隐式全局状态，跨解释器共享导致数据污染
+      - **内存泄漏**：解释器销毁时 C 扩展分配的内存可能不被正确回收
+      - **线程安全 + 解释器安全不等价**：一个库声明了 thread-safe 不代表它是 sub-interpreter-safe
+    - **未测试的库默认视为不兼容**，在生产环境使用前需要独立验证
+    - 建议在非关键路径（如数据预处理）中使用，交易决策路径尽量只依赖已验证的库
+    - 长时间运行（数小时/数天）的稳定性尚未验证，建议监控内存使用
 
 ## Phase 6 — 协议突破 (进行中) — v0.4.0
 
