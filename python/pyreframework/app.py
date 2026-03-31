@@ -29,15 +29,31 @@ def _is_worker() -> bool:
     return os.environ.get("PYRE_WORKER") == "1"
 
 
-def _setup_python_logging_bridge() -> None:
+def _setup_python_logging_bridge(rust_level: str = "DEBUG") -> None:
     """Hijack Python's root logger to route all logs through Rust tracing.
 
     Replaces default StreamHandler (synchronous, GIL-blocking I/O) with a
     lightweight handler that crosses FFI into Rust's tracing system.
     The actual filtering, formatting, and I/O happen in Rust — Python only
     does the minimal work of extracting the log record fields.
+
+    The ``rust_level`` parameter syncs Rust's EnvFilter level to Python's
+    root logger, so calls below the threshold (e.g. logger.debug() when
+    level=ERROR) are rejected by Python's own level check *before* any
+    getMessage() formatting or FFI crossing occurs.
     """
     import logging
+
+    _LEVEL_MAP = {
+        "TRACE": logging.DEBUG,
+        "DEBUG": logging.DEBUG,
+        "INFO": logging.INFO,
+        "WARN": logging.WARNING,
+        "WARNING": logging.WARNING,
+        "ERROR": logging.ERROR,
+        "CRITICAL": logging.CRITICAL,
+        "OFF": logging.CRITICAL + 10,  # above CRITICAL — blocks everything
+    }
 
     class PyreRustHandler(logging.Handler):
         """logging.Handler that bridges to Rust tracing via FFI."""
@@ -64,8 +80,9 @@ def _setup_python_logging_bridge() -> None:
     root = logging.getLogger()
     root.handlers.clear()
     root.addHandler(PyreRustHandler())
-    # Let everything through — Rust EnvFilter does the real filtering
-    root.setLevel(logging.DEBUG)
+    # Sync Python's level gate with Rust's EnvFilter — avoids wasted
+    # getMessage() + FFI calls for records that Rust would discard anyway
+    root.setLevel(_LEVEL_MAP.get(rust_level.upper(), logging.DEBUG))
 
 
 class Pyre:
@@ -490,12 +507,14 @@ class Pyre:
         # enable_logging() can adjust the config first)
         if not self._logger_initialized:
             self._logger_initialized = True
+            # Expose level to sub-interpreter bootstrap via env var
+            os.environ["PYRE_LOG_LEVEL"] = self._log_config["level"]
             init_logger(
                 self._log_config["level"],
                 self._log_config["access_log"],
                 self._log_config["format"],
             )
-            _setup_python_logging_bridge()
+            _setup_python_logging_bridge(self._log_config["level"])
         # Auto-register /mcp endpoint if any MCP handlers exist
         if self._mcp._tools or self._mcp._resources or self._mcp._prompts:
             mcp = self._mcp

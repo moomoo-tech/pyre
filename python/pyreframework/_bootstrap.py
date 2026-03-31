@@ -17,6 +17,7 @@ succeed but does NOT perform real validation.
 # -- Python logging bridge to Rust tracing -----------------------------------
 
 import logging as _logging
+import os as _os
 
 class _PyreRustHandler(_logging.Handler):
     """Routes Python logging records through Rust tracing via C-FFI.
@@ -52,7 +53,18 @@ class _PyreRustHandler(_logging.Handler):
 _root = _logging.getLogger()
 _root.handlers.clear()
 _root.addHandler(_PyreRustHandler())
-_root.setLevel(_logging.DEBUG)  # Let Rust EnvFilter do the real filtering
+# Sync Python's level gate with Rust's EnvFilter — rejects calls below
+# threshold *before* getMessage() formatting or FFI crossing occurs.
+# e.g. level=ERROR → logger.debug() returns immediately, no FFI overhead.
+_PYRE_LEVEL_MAP = {
+    "TRACE": _logging.DEBUG, "DEBUG": _logging.DEBUG,
+    "INFO": _logging.INFO, "WARN": _logging.WARNING, "WARNING": _logging.WARNING,
+    "ERROR": _logging.ERROR, "CRITICAL": _logging.CRITICAL,
+    "OFF": _logging.CRITICAL + 10,
+}
+_root.setLevel(_PYRE_LEVEL_MAP.get(
+    _os.environ.get("PYRE_LOG_LEVEL", "DEBUG").upper(), _logging.DEBUG
+))
 
 # -- Request / Response stubs ------------------------------------------------
 
