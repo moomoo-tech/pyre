@@ -20,6 +20,17 @@ classifiers = [
     "Framework :: AsyncIO",
 ]
 
+[project.optional-dependencies]
+test = [
+    "pytest>=8",
+    "pytest-asyncio>=1",
+    "httpx",
+    "websockets",
+    "pydantic",
+    "numpy",
+    "msgpack",
+]
+
 [tool.maturin]
 features = ["pyo3/extension-module"]
 python-source = "python"

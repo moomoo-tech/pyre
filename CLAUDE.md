@@ -47,7 +47,7 @@ maturin develop --release
 python examples/hello.py
 
 # Run tests
-pip install pytest websockets httpx pydantic numpy msgpack
+uv pip install -e ".[test]"
 pytest tests/ --ignore=tests/test_ws_binary_client.py -q
 
 # Benchmark vs FastAPI (requires wrk: brew install wrk)
