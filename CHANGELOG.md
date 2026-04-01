@@ -1,5 +1,50 @@
 # Changelog
 
+## v1.4.0 (2026-04-01)
+
+### Performance — Linux 42万 QPS
+- **SO_REUSEPORT multi-accept** — N=io_workers 个独立 accept loop，Linux 内核级四元组哈希负载均衡，macOS 自动降级为 1
+- **M:N scheduling** — `io_workers` (Tokio I/O threads) 和 `workers` (Python sub-interpreters) 独立配置，解耦网络层与计算层
+- **LTO fat + codegen-units=1** — 编译期全局优化，+4% JSON/params 路由
+- **TCP_QUICKACK** — Linux 禁用延迟 ACK，降低首字节延迟
+- **Headers OnceLock lazy view** — 不访问 headers 时零开销，延迟转换
+- **serde_json + pythonize** — Rust 侧 JSON 序列化，替代 Python json.loads
+- **SharedState Bytes** — 零拷贝 clone
+- **Arc\<str\> method/path** — 请求路径零分配
+- **IpAddr lazy eval** — 不访问时不解析
+- **Bytes zero-copy body** — 请求体零拷贝
+- **mimalloc global allocator** — 高并发分配性能
+
+### Features
+- `io_workers` parameter — `app.run(workers=24, io_workers=16)` 或 `PYRE_IO_WORKERS=16`
+- `client_ip` — 请求客户端 IP 地址
+- Lifecycle hooks — `on_startup` / `on_shutdown`
+- Zero-cost logging — Rust tracing engine + Python→Rust FFI bridge, OFF 级别原子跳过
+
+### Benchmarks (Linux, AMD Ryzen 7 7840HS 8C/16T)
+- **GET /: 420k req/s** (P99 571μs) — vs macOS v1.2.0 214k (+96%)
+- **300s sustained: 401k req/s**, 1.2 亿请求, 0 错误, 内存仅 +27 MB
+- **vs Robyn: 14-16x faster** across all routes
+
+## v1.3.0 (2026-03-31)
+
+### Features
+- **Zero-cost logging system** — Rust `tracing` + `EnvFilter`, three targets, Python logging bridge via C-FFI
+- **client_ip** property on PyreRequest
+- **on_startup / on_shutdown** lifecycle hooks
+
+### Performance
+- IpAddr lazy evaluation
+- Bytes zero-copy request body
+- Arc\<str\> method/path to eliminate allocations
+- Vec params (from HashMap)
+- Zero-allocation hook iteration
+- Sync Python log level with Rust EnvFilter
+
+### Docs
+- Sub-interpreter C extension compatibility guide (30/30 libs confirmed)
+- English translations for all benchmark reports
+
 ## v1.2.0 (2026-03-25)
 
 ### Features

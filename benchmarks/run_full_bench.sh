@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ╔══════════════════════════════════════════════════════════════════╗
-# ║  Pyre v1.3.0 Full Benchmark Suite — Multi-phase + Latency Bins ║
+# ║  Pyre v1.4.0 Full Benchmark Suite — Multi-phase + Latency Bins ║
 # ╚══════════════════════════════════════════════════════════════════╝
 #
 # Usage:
@@ -178,7 +178,7 @@ run_bench() {
 # ─── Start server ────────────────────────────────────────────────
 echo ""
 echo "╔══════════════════════════════════════════════════════════╗"
-echo "║       Pyre v1.3.0 — Full Benchmark Suite                ║"
+echo "║       Pyre v1.4.0 — Full Benchmark Suite                ║"
 echo "╠══════════════════════════════════════════════════════════╣"
 printf "║  OS: %-49s║\n" "$OS_NAME ($(uname -m))"
 printf "║  CPUs: %-47s║\n" "$NUM_CPUS"
@@ -266,7 +266,7 @@ MEM_FINAL=$(ps -o rss= -p $SERVER_PID 2>/dev/null | awk '{printf "%.1f", $1/1024
 
 print_header "Summary"
 echo ""
-printf "  Server:     Pyre v1.3.0 (%s)\n" "$OS_NAME"
+printf "  Server:     Pyre v1.4.0 (%s)\n" "$OS_NAME"
 printf "  Memory:     %s MB (final)\n" "$MEM_FINAL"
 printf "  Process:    alive ✅\n"
 

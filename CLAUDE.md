@@ -2,7 +2,7 @@
 
 High-performance Python web framework powered by Rust. Per-Interpreter GIL (PEP 684) for true multi-core parallelism in a single process.
 
-**Benchmarks**: 220k req/s, 67 MB memory. 24-28x faster than FastAPI, 2.5x faster than Robyn with 85% less memory.
+**Benchmarks**: 420k req/s (Linux), 222 MB memory. 15x faster than Robyn, 300s sustained 400k QPS zero errors.
 
 ## Architecture
 
