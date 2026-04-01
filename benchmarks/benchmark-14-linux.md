@@ -190,6 +190,52 @@ Pyre 用 **1/3 的内存**做到 **2.7x 的吞吐量**。每 MB 内存产出的 
 
 > macOS 上 SO_REUSEPORT 不做内核负载均衡，多路 accept 反而增加 kqueue 注册开销。v1.4.0 已自动检测：Linux 用 N 路 accept，macOS 固定 1 路。
 
+## 多核扩展估算
+
+本次压测在 8C/16T 上完成。以下基于实测数据推算不同规格下的预期吞吐量。
+
+### 估算模型
+
+实测 8C/16T 上 GET / 达到 429k QPS。分析瓶颈分布：
+
+1. **Tokio I/O 层**（accept + 解析 + 响应）：P50 ~50μs，远未饱和
+2. **Python sub-interpreter 层**（handler 执行）：P50 ~150μs，主要瓶颈
+3. **crossbeam channel**：MPMC 竞争随 consumer 数增长，但 < 32 workers 时开销可忽略
+
+超线程（SMT）对 Python 解释器的提升约 20-30%（共享 ALU/FPU，L1/L2 cache 竞争）。因此 8C/16T ≈ 等效 10-10.5 个满核的 Python 吞吐。
+
+### 扩展系数
+
+| 核心数 | 等效满核 (SMT ×1.25) | 相对 8C/16T | 估算 QPS (GET /) | 估算内存 |
+|--------|---------------------|------------|-----------------|---------|
+| 4C/8T | ~5 | 0.48× | ~205k | ~120 MB |
+| 8C/16T | ~10 | 1.00× | **429k** (实测) | 189 MB |
+| 16C/32T | ~20 | 1.90× | **~810k** | ~350 MB |
+| 32C/64T | ~38 | 3.62× | **~1.2M** | ~650 MB |
+| 64C/128T | ~72 | 5.80×* | **~1.5M*** | ~1.2 GB |
+
+> \* 64C 以上 channel 竞争和 NUMA 跨节点访问成为新瓶颈，线性度下降到 ~80%。
+
+### 关键假设与限制
+
+1. **客户端施压能力**：wrk -t4 在 429k 时已接近客户端瓶颈，16C+ 需要 `-t8` 或多台客户端
+2. **channel 竞争**：crossbeam MPMC 在 32+ consumers 时 CAS 失败率上升，但 flume bounded channel 可缓解
+3. **NUMA**：双路 EPYC 上跨 NUMA node 的 channel 访问延迟 ~100ns vs 同 node ~20ns，建议 `numactl --interleave=all`
+4. **内核 TCP 栈**：SO_REUSEPORT 在 32+ accept loops 时 softirq 分布可能不均，需要 RFS (Receive Flow Steering) 调优
+5. **内存**：每个 sub-interpreter ~10 MB 增量，线性可预测
+
+### 推荐配置
+
+| 硬件 | workers | io_workers | 预期 QPS |
+|------|---------|------------|---------|
+| 4C/8T (Raspberry Pi 5, 小型 VPS) | 8 | 4 | ~200k |
+| 8C/16T (Ryzen 7, 本次测试) | 16 | 16 | ~430k |
+| 16C/32T (Ryzen 9 / Xeon) | 32 | 16 | ~800k |
+| 32C/64T (EPYC 单路) | 48 | 32 | ~1.2M |
+| 64C/128T (EPYC 双路) | 80 | 64 | ~1.5M |
+
+> workers 不必等于线程数。CPU 密集路由用 N=核心数，I/O 密集路由可开到 2-3x 核心数。io_workers 对齐物理核即可。
+
 ## 总结
 
 1. **Linux 上 Pyre v1.4.0 达到 43 万 QPS**，相比 macOS v1.2.0 翻倍 (+100%)
