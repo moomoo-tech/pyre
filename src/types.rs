@@ -68,10 +68,11 @@ impl Clone for LazyHeaders {
 impl PyreRequest {
     /// Resolve headers to HashMap (lazy for Raw, immediate for Converted).
     pub(crate) fn resolved_headers(&self) -> &HashMap<String, String> {
-        self.headers_cache.get_or_init(|| match &self.headers_source {
-            LazyHeaders::Raw(hm) => extract_headers(hm),
-            LazyHeaders::Converted(m) => m.clone(),
-        })
+        self.headers_cache
+            .get_or_init(|| match &self.headers_source {
+                LazyHeaders::Raw(hm) => extract_headers(hm),
+                LazyHeaders::Converted(m) => m.clone(),
+            })
     }
 }
 
@@ -120,8 +121,9 @@ impl PyreRequest {
     /// Parse JSON in Rust (serde_json) → convert to Python objects (pythonize).
     /// ~3x faster than Python's json.loads for typical API payloads.
     fn json<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::PyAny>> {
-        let parsed: serde_json::Value = serde_json::from_slice(&self.body_bytes)
-            .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("JSON parse error: {e}")))?;
+        let parsed: serde_json::Value = serde_json::from_slice(&self.body_bytes).map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(format!("JSON parse error: {e}"))
+        })?;
         pythonize::pythonize(py, &parsed)
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("pythonize error: {e}")))
     }
@@ -243,7 +245,8 @@ mod tests {
             path: Arc::from("/search"),
             params: Vec::new(),
             query: "q=hello+world&page=2&lang=en".to_string(),
-            headers: HashMap::new(),
+            headers_source: LazyHeaders::Raw(hyper::HeaderMap::new()),
+            headers_cache: std::sync::OnceLock::new(),
             client_ip_addr: IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
             body_bytes: Bytes::new(),
         };
@@ -260,7 +263,8 @@ mod tests {
             path: Arc::from("/"),
             params: Vec::new(),
             query: "".to_string(),
-            headers: HashMap::new(),
+            headers_source: LazyHeaders::Raw(hyper::HeaderMap::new()),
+            headers_cache: std::sync::OnceLock::new(),
             client_ip_addr: IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
             body_bytes: Bytes::new(),
         };
@@ -274,7 +278,8 @@ mod tests {
             path: Arc::from("/"),
             params: Vec::new(),
             query: "name=%E4%B8%AD%E6%96%87".to_string(),
-            headers: HashMap::new(),
+            headers_source: LazyHeaders::Raw(hyper::HeaderMap::new()),
+            headers_cache: std::sync::OnceLock::new(),
             client_ip_addr: IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
             body_bytes: Bytes::new(),
         };

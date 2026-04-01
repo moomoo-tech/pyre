@@ -144,24 +144,20 @@ pub(crate) async fn handle_request(
     use http_body_util::Limited;
     let limited = Limited::new(req.into_body(), max_body_size());
     // Timeout body read to defend against Slowloris attacks
-    let body_bytes = match tokio::time::timeout(
-        std::time::Duration::from_secs(30),
-        limited.collect(),
-    )
-    .await
-    {
-        Ok(Ok(c)) => c.to_bytes(),
-        Ok(Err(_)) => {
-            let mut r = full_body(payload_too_large_response());
-            apply_cors(&mut r, routes.cors_origin.as_deref());
-            return Ok(r);
-        }
-        Err(_) => {
-            let mut r = full_body(crate::response::gateway_timeout_response());
-            apply_cors(&mut r, routes.cors_origin.as_deref());
-            return Ok(r);
-        }
-    };
+    let body_bytes =
+        match tokio::time::timeout(std::time::Duration::from_secs(30), limited.collect()).await {
+            Ok(Ok(c)) => c.to_bytes(),
+            Ok(Err(_)) => {
+                let mut r = full_body(payload_too_large_response());
+                apply_cors(&mut r, routes.cors_origin.as_deref());
+                return Ok(r);
+            }
+            Err(_) => {
+                let mut r = full_body(crate::response::gateway_timeout_response());
+                apply_cors(&mut r, routes.cors_origin.as_deref());
+                return Ok(r);
+            }
+        };
 
     let lookup = routes.lookup(&method, &path);
     let has_fallback = routes.fallback_handler.is_some();
@@ -193,12 +189,11 @@ pub(crate) async fn handle_request(
 
     // spawn_blocking: prevent GIL acquisition from starving Tokio workers
     let routes_ref = Arc::clone(&routes);
-    let handler_result =
-        tokio::task::spawn_blocking(move || call_handler_with_hooks(routes_ref, handler_idx, sky_req))
-            .await
-            .unwrap_or_else(|_| {
-                HandlerResult::Response(Err("handler thread panicked".to_string()))
-            });
+    let handler_result = tokio::task::spawn_blocking(move || {
+        call_handler_with_hooks(routes_ref, handler_idx, sky_req)
+    })
+    .await
+    .unwrap_or_else(|_| HandlerResult::Response(Err("handler thread panicked".to_string())));
 
     let mut resp = match handler_result {
         HandlerResult::Response(result) => full_body(build_response(result)?),
@@ -395,24 +390,20 @@ pub(crate) async fn handle_request_subinterp(
 
     use http_body_util::Limited;
     let limited = Limited::new(req.into_body(), max_body_size());
-    let body_bytes = match tokio::time::timeout(
-        std::time::Duration::from_secs(30),
-        limited.collect(),
-    )
-    .await
-    {
-        Ok(Ok(c)) => c.to_bytes(),
-        Ok(Err(_)) => {
-            let mut r = full_body(payload_too_large_response());
-            apply_cors(&mut r, pool.cors_origin.as_deref());
-            return Ok(r);
-        }
-        Err(_) => {
-            let mut r = full_body(crate::response::gateway_timeout_response());
-            apply_cors(&mut r, pool.cors_origin.as_deref());
-            return Ok(r);
-        }
-    };
+    let body_bytes =
+        match tokio::time::timeout(std::time::Duration::from_secs(30), limited.collect()).await {
+            Ok(Ok(c)) => c.to_bytes(),
+            Ok(Err(_)) => {
+                let mut r = full_body(payload_too_large_response());
+                apply_cors(&mut r, pool.cors_origin.as_deref());
+                return Ok(r);
+            }
+            Err(_) => {
+                let mut r = full_body(crate::response::gateway_timeout_response());
+                apply_cors(&mut r, pool.cors_origin.as_deref());
+                return Ok(r);
+            }
+        };
 
     let lookup = pool.lookup(&method, &path);
     let has_fallback = routes.fallback_handler.is_some();

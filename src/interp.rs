@@ -995,7 +995,8 @@ impl SubInterpreterWorker {
                                     error = %e,
                                     "JSON serialization failed for response body dict"
                                 );
-                                let msg = format!(r#"{{"error":"json serialization failed: {}"}}"#, e);
+                                let msg =
+                                    format!(r#"{{"error":"json serialization failed: {}"}}"#, e);
                                 return Ok(SubInterpResponse {
                                     body: msg.into_bytes(),
                                     status: 500,
@@ -1109,10 +1110,7 @@ impl SubInterpreterWorker {
         let has_after_hooks = !after_hook_names.is_empty();
         let req_for_hooks = if has_after_hooks {
             ffi::Py_INCREF(request_obj.as_ptr());
-            Some(
-                PyObjRef::from_owned(request_obj.as_ptr())
-                    .ok_or("null request for hooks")?,
-            )
+            Some(PyObjRef::from_owned(request_obj.as_ptr()).ok_or("null request for hooks")?)
         } else {
             None
         };
@@ -1143,7 +1141,6 @@ impl SubInterpreterWorker {
         // Run after_request hooks: hook(request, response) → response
         // Reuses the original request object (RAII guard created above).
         if let Some(ref req_for_hooks) = req_for_hooks {
-
             for hook_name in after_hook_names {
                 if let Some(&hook_func) = self.handlers.get(hook_name) {
                     // Build _PyreResponse from current response
