@@ -73,13 +73,9 @@ def _setup_python_logging_bridge(rust_level: str = "DEBUG") -> None:
                     pathname=record.pathname or "",
                     lineno=record.lineno or 0,
                 )
-            except Exception as exc:
-                # Fallback to stderr — never silently swallow log messages
-                import sys
-                try:
-                    sys.stderr.write(f"[pyre] log bridge error: {exc} | original: {record.getMessage()}\n")
-                except Exception:
-                    pass  # Last resort: truly nothing we can do
+            except Exception:
+                # Fallback to Python's built-in error handler — prints to stderr
+                self.handleError(record)
 
     root = logging.getLogger()
     root.handlers.clear()
