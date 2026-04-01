@@ -51,6 +51,11 @@ impl PyreApp {
         self.request_logging = enabled;
     }
 
+    /// Set max request body size in bytes. Default: 10 MB.
+    fn set_max_body_size(&self, size: usize) {
+        crate::handlers::set_max_body_size(size);
+    }
+
     /// Access the shared state (cross-sub-interpreter, nanosecond latency).
     #[getter]
     fn state(&self) -> SharedState {
@@ -297,12 +302,12 @@ impl PyreApp {
                             tokio::spawn(async move {
                                 let svc = service_fn(move |req: Request<Incoming>| {
                                     let routes = Arc::clone(&routes);
-                                    let client_ip = remote_addr.ip().to_string();
+                                    let client_ip_addr = remote_addr.ip();
                                     async move {
                                         if websocket::is_websocket_upgrade(&req) {
                                             websocket::handle_websocket(req, routes).await
                                         } else {
-                                            handle_request(req, routes, client_ip).await
+                                            handle_request(req, routes, client_ip_addr).await
                                         }
                                     }
                                 });
@@ -457,12 +462,12 @@ impl PyreApp {
                                 let svc = service_fn(move |req: Request<Incoming>| {
                                     let pool = Arc::clone(&pool);
                                     let routes = Arc::clone(&routes);
-                                    let client_ip = remote_addr.ip().to_string();
+                                    let client_ip_addr = remote_addr.ip();
                                     async move {
                                         if websocket::is_websocket_upgrade(&req) {
                                             websocket::handle_websocket(req, routes).await
                                         } else {
-                                            handle_request_subinterp(req, pool, routes, client_ip).await
+                                            handle_request_subinterp(req, pool, routes, client_ip_addr).await
                                         }
                                     }
                                 });

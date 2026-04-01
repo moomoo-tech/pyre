@@ -156,6 +156,16 @@ class Pyre:
         return self._mcp
 
     @property
+    def max_body_size(self) -> int:
+        """Max request body size in bytes. Default: 10 MB."""
+        return 10 * 1024 * 1024  # getter returns default; actual value is in Rust
+
+    @max_body_size.setter
+    def max_body_size(self, size: int) -> None:
+        """Set max request body size. Example: ``app.max_body_size = 50 * 1024 * 1024``"""
+        self._engine.set_max_body_size(size)
+
+    @property
     def state(self):
         """Shared state across all sub-interpreters (nanosecond latency).
 

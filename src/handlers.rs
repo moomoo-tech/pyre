@@ -20,8 +20,20 @@ use crate::types::{extract_headers, PyreRequest, PyreResponse, ResponseData};
 
 type SharedPool = Arc<interp::InterpreterPool>;
 
-/// Max request body size (10 MB)
-const MAX_BODY_SIZE: usize = 10 * 1024 * 1024;
+/// Default max request body size (10 MB). Configurable via `app.max_body_size`.
+const DEFAULT_MAX_BODY_SIZE: usize = 10 * 1024 * 1024;
+
+/// Global max body size — set once at startup, read on every request (lock-free).
+static MAX_BODY_SIZE: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(DEFAULT_MAX_BODY_SIZE);
+
+pub(crate) fn set_max_body_size(size: usize) {
+    MAX_BODY_SIZE.store(size, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn max_body_size() -> usize {
+    MAX_BODY_SIZE.load(std::sync::atomic::Ordering::Relaxed)
+}
 
 /// Result from handler: either a normal response or a stream.
 enum HandlerResult {
@@ -44,8 +56,21 @@ struct StreamInfo {
 fn resolve_coroutine(py: Python<'_>, obj: Py<PyAny>) -> Result<Py<PyAny>, String> {
     use std::cell::RefCell;
 
+    /// RAII wrapper that calls `loop.close()` via GIL when the thread dies.
+    /// Prevents FD / task leaks from orphaned asyncio event loops.
+    struct LoopGuard(Option<Py<PyAny>>);
+    impl Drop for LoopGuard {
+        fn drop(&mut self) {
+            if let Some(loop_obj) = self.0.take() {
+                Python::attach(|py| {
+                    let _ = loop_obj.call_method0(py, "close");
+                });
+            }
+        }
+    }
+
     thread_local! {
-        static LOOP: RefCell<Option<Py<PyAny>>> = const { RefCell::new(None) };
+        static LOOP: RefCell<LoopGuard> = const { RefCell::new(LoopGuard(None)) };
     }
 
     let bound = obj.bind(py);
@@ -55,9 +80,9 @@ fn resolve_coroutine(py: Python<'_>, obj: Py<PyAny>) -> Result<Py<PyAny>, String
     }
 
     LOOP.with(|tl| {
-        let mut slot = tl.borrow_mut();
+        let mut guard = tl.borrow_mut();
 
-        if slot.is_none() {
+        if guard.0.is_none() {
             let asyncio = py
                 .import("asyncio")
                 .map_err(|e| format!("import asyncio: {e}"))?;
@@ -65,10 +90,10 @@ fn resolve_coroutine(py: Python<'_>, obj: Py<PyAny>) -> Result<Py<PyAny>, String
                 .call_method0("new_event_loop")
                 .map_err(|e| format!("new_event_loop: {e}"))?;
             let _ = asyncio.call_method1("set_event_loop", (&new_loop,));
-            *slot = Some(new_loop.unbind());
+            guard.0 = Some(new_loop.unbind());
         }
 
-        let event_loop = slot.as_ref().unwrap().bind(py);
+        let event_loop = guard.0.as_ref().unwrap().bind(py);
         let result = event_loop
             .call_method1("run_until_complete", (bound,))
             .map_err(|e| format!("run_until_complete error: {e}"))?;
@@ -89,7 +114,7 @@ pub(crate) fn full_body(resp: Response<Full<Bytes>>) -> Response<BoxBody> {
 pub(crate) async fn handle_request(
     req: Request<Incoming>,
     routes: FrozenRoutes,
-    client_ip: String,
+    client_ip_addr: std::net::IpAddr,
 ) -> Result<Response<BoxBody>, hyper::Error> {
     crate::monitor::TOTAL_REQUESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let start = std::time::Instant::now();
@@ -100,9 +125,9 @@ pub(crate) async fn handle_request(
     let headers = extract_headers(req.headers());
 
     use http_body_util::Limited;
-    let limited = Limited::new(req.into_body(), MAX_BODY_SIZE);
+    let limited = Limited::new(req.into_body(), max_body_size());
     let body_bytes = match limited.collect().await {
-        Ok(c) => c.to_bytes().to_vec(),
+        Ok(c) => c.to_bytes(),
         Err(_) => return Ok(full_body(payload_too_large_response())),
     };
 
@@ -117,7 +142,7 @@ pub(crate) async fn handle_request(
 
     let (handler_idx, params) = match lookup {
         Some(v) => v,
-        None if has_fallback => (usize::MAX, HashMap::new()),
+        None if has_fallback => (usize::MAX, Vec::new()),
         None => return Ok(full_body(not_found_response())),
     };
 
@@ -129,7 +154,7 @@ pub(crate) async fn handle_request(
         params,
         query,
         headers,
-        client_ip,
+        client_ip_addr,
         body_bytes,
     };
 
@@ -217,15 +242,9 @@ fn call_handler_with_hooks(
                 };
 
                 // Check if handler returned a PyreStream (SSE)
-                let type_name = obj
-                    .bind(py)
-                    .get_type()
-                    .name()
-                    .map(|n| n.to_string())
-                    .unwrap_or_default();
-                if type_name == "PyreStream" {
-                    // Downcast to PyreStream and wire up the channel
-                    let bound = obj.bind(py);
+                // Use is_instance_of — single C pointer compare, no string alloc.
+                let bound = obj.bind(py);
+                if bound.is_instance_of::<PyreStream>() {
                     let stream_ref = match bound.cast::<PyreStream>() {
                         Ok(s) => s.get(),
                         Err(e) => return HandlerResult::Response(Err(e.to_string())),
@@ -327,7 +346,7 @@ pub(crate) async fn handle_request_subinterp(
     req: Request<Incoming>,
     pool: SharedPool,
     routes: FrozenRoutes,
-    client_ip: String,
+    client_ip_addr: std::net::IpAddr,
 ) -> Result<Response<BoxBody>, hyper::Error> {
     crate::monitor::TOTAL_REQUESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let start = std::time::Instant::now();
@@ -338,9 +357,9 @@ pub(crate) async fn handle_request_subinterp(
     let headers = extract_headers(req.headers());
 
     use http_body_util::Limited;
-    let limited = Limited::new(req.into_body(), MAX_BODY_SIZE);
+    let limited = Limited::new(req.into_body(), max_body_size());
     let body_bytes = match limited.collect().await {
-        Ok(c) => c.to_bytes().to_vec(),
+        Ok(c) => c.to_bytes(),
         Err(_) => return Ok(full_body(payload_too_large_response())),
     };
 
@@ -355,7 +374,7 @@ pub(crate) async fn handle_request_subinterp(
 
     let (handler_idx, params) = match lookup {
         Some(v) => v,
-        None if has_fallback => (usize::MAX, HashMap::new()),
+        None if has_fallback => (usize::MAX, Vec::new()),
         None => return Ok(full_body(not_found_response())),
     };
 
@@ -373,7 +392,7 @@ pub(crate) async fn handle_request_subinterp(
             params,
             query,
             headers,
-            client_ip: client_ip.clone(),
+            client_ip_addr,
             body_bytes,
         };
 
@@ -414,7 +433,7 @@ pub(crate) async fn handle_request_subinterp(
         query,
         body: body_bytes,
         headers,
-        client_ip,
+        client_ip: client_ip_addr.to_string(),
         response_tx,
     }) {
         crate::monitor::DROPPED_REQUESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

@@ -74,7 +74,7 @@ unsafe extern "C" fn pyre_recv_cfunc(
                 .insert(req_id, req.response_tx);
 
             // Build params and headers as PyDict directly (avoid JSON round-trip)
-            let py_params = py_str_dict(&req.params);
+            let py_params = py_str_dict_from_vec(&req.params);
             let py_headers = py_str_dict(&req.headers);
             if py_params.is_none() || py_headers.is_none() {
                 ffi::Py_INCREF(ffi::Py_None());
@@ -421,7 +421,17 @@ pub(crate) unsafe fn py_str_dict(map: &HashMap<String, String>) -> Option<PyObjR
         let pk = py_str(k)?;
         let pv = py_str(v)?;
         ffi::PyDict_SetItem(dict.as_ptr(), pk.as_ptr(), pv.as_ptr());
-        // pk and pv are dropped here, DECREF'd automatically
+    }
+    Some(dict)
+}
+
+/// Same as `py_str_dict` but from a Vec of key-value pairs (for path params).
+pub(crate) unsafe fn py_str_dict_from_vec(pairs: &[(String, String)]) -> Option<PyObjRef> {
+    let dict = PyObjRef::from_owned(ffi::PyDict_New())?;
+    for (k, v) in pairs {
+        let pk = py_str(k)?;
+        let pv = py_str(v)?;
+        ffi::PyDict_SetItem(dict.as_ptr(), pk.as_ptr(), pv.as_ptr());
     }
     Some(dict)
 }
@@ -458,9 +468,9 @@ pub(crate) struct WorkRequest {
     pub handler_idx: usize,
     pub method: String,
     pub path: String,
-    pub params: HashMap<String, String>,
+    pub params: Vec<(String, String)>,
     pub query: String,
-    pub body: Vec<u8>,
+    pub body: bytes::Bytes,
     pub headers: HashMap<String, String>,
     pub client_ip: String,
     pub response_tx: tokio::sync::oneshot::Sender<Result<SubInterpResponse, String>>,
@@ -674,7 +684,7 @@ impl SubInterpreterWorker {
         &self,
         method: &str,
         path: &str,
-        params: &HashMap<String, String>,
+        params: &[(String, String)],
         query: &str,
         body: &[u8],
         headers: &HashMap<String, String>,
@@ -682,7 +692,7 @@ impl SubInterpreterWorker {
     ) -> Result<PyObjRef, String> {
         let py_method = py_str(method).ok_or("failed to create py_method")?;
         let py_path = py_str(path).ok_or("failed to create py_path")?;
-        let py_params = py_str_dict(params).ok_or("failed to create py_params")?;
+        let py_params = py_str_dict_from_vec(params).ok_or("failed to create py_params")?;
         let py_query = py_str(query).ok_or("failed to create py_query")?;
         let py_body = py_bytes(body).ok_or("failed to create py_body")?;
         let py_headers = py_str_dict(headers).ok_or("failed to create py_headers")?;
@@ -996,7 +1006,7 @@ impl SubInterpreterWorker {
         after_hook_names: &[String],
         method: &str,
         path: &str,
-        params: &HashMap<String, String>,
+        params: &[(String, String)],
         query: &str,
         body: &[u8],
         headers: &HashMap<String, String>,
@@ -1288,10 +1298,10 @@ impl InterpreterPool {
     }
 
     /// Look up a route.
-    pub fn lookup(&self, method: &str, path: &str) -> Option<(usize, HashMap<String, String>)> {
+    pub fn lookup(&self, method: &str, path: &str) -> Option<(usize, Vec<(String, String)>)> {
         let router = self.routers.get(method)?;
         let matched = router.at(path).ok()?;
-        let params: HashMap<String, String> = matched
+        let params: Vec<(String, String)> = matched
             .params
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))

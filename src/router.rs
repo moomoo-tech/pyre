@@ -63,10 +63,10 @@ impl RouteTable {
         &self,
         method: &str,
         path: &str,
-    ) -> Option<(usize, HashMap<String, String>)> {
+    ) -> Option<(usize, Vec<(String, String)>)> {
         let router = self.routers.get(method)?;
         let matched = router.at(path).ok()?;
-        let params: HashMap<String, String> = matched
+        let params: Vec<(String, String)> = matched
             .params
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
