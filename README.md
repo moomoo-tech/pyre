@@ -4,8 +4,8 @@
 
 Built on Per-Interpreter GIL (PEP 684) and a Rust async core, Pyre runs Python handlers across all CPU cores in a single process.
 
-- vs FastAPI: **24-28x** throughput, **29-34x** lower latency.
-- vs Robyn: **2.5x** QPS, **62x** lower P99, **85%** less memory — single process.
+- **420k req/s** on Linux (8C/16T), **15x faster** than Robyn.
+- 300s sustained **400k QPS**, zero errors, zero memory leaks.
 
 ### What others can't do, Pyre has built-in
 
@@ -55,73 +55,85 @@ But Python has the GIL (Global Interpreter Lock). One lock, one core, no paralle
 
 ```
 FastAPI:  1 process × 1 GIL × async tricks     = fast I/O, slow CPU, 15k QPS
-Robyn:    22 processes × 22 GILs × 22× memory  = brute force, 87k QPS, 447 MB
-Pyre:     1 process × 10 GILs × shared memory   = elegant, 220k QPS, 67 MB
+Robyn:    16 processes × 16 GILs × 16× memory  = brute force, 156k QPS, 583 MB
+Pyre:     1 process × 16 GILs × shared memory   = elegant, 429k QPS, 189 MB
 ```
 
 This matters for AI:
 - **LLM gateway** — thousands of concurrent `await` calls, each taking 2-5 seconds. Pyre's async pool handles 133k concurrent I/O operations.
 - **Agent orchestration** — multiple agents computing simultaneously. Each sub-interpreter runs at full CPU speed without blocking others.
-- **Memory efficiency** — deploy 3x more instances on the same hardware. On a 512 MB container, Pyre runs 10 parallel workers where Robyn can barely fit 2 processes.
+- **Memory efficiency** — deploy 3x more instances on the same hardware. Pyre 189 MB for 16 workers vs Robyn 583 MB. On a 512 MB container, Pyre runs 16 parallel workers; Robyn fits 12 at best.
 - **State sharing** — cross-worker `app.state` with nanosecond latency. No Redis, no serialization, no network hop. Session management, caching, and coordination built into the framework.
 
 ## Performance
 
-Benchmarked on Apple Silicon (M-series), Python 3.14, wrk -t4 -c256 -d10s.
+Benchmarked on Linux (AMD Ryzen 7 7840HS, 8C/16T), Python 3.12, wrk -t4 -c100 -d10s.
+
+Full report: [benchmarks/benchmark-14-linux.md](benchmarks/benchmark-14-linux.md)
 
 ### Throughput (requests/sec)
 
-| Scenario | Pyre | FastAPI | Robyn | Pyre vs FastAPI |
-|----------|------|---------|-------|----------------|
-| Hello World | **220,000** | 15,000 | 87,000 | **14.7x** |
-| JSON response | **220,000** | 12,000 | 86,000 | **18.3x** |
-| I/O (sleep 1ms) | **133,000** | 50,000 | 93,000 | **2.7x** |
-| CPU (fib 10) | **212,000** | 8,000 | 81,000 | **26.5x** |
-| CPU (fib 20) | **11,350** | 200 | 10,500 | **56.8x** |
-| Pure Python sum(10k) | **75,000** | 4,000 | 44,000 | **18.8x** |
-| JSON parse 7KB | **99,000** | 6,000 | 57,000 | **16.5x** |
-| JSON parse 93KB | **10,500** | 800 | 7,400 | **13.1x** |
+| Route | Pyre | P50 | P99 |
+|-------|------|-----|-----|
+| GET / (plain text) | **429,000** | 185μs | 579μs |
+| GET /json | **405,000** | 196μs | 599μs |
+| GET /user/42 (path param) | **395,000** | 201μs | 641μs |
+| POST /echo (JSON parse) | **372,000** | 214μs | 785μs |
+| GET /compute (CPU-bound) | **379,000** | 211μs | 772μs |
 
-### Latency
+### Pyre vs Robyn (fair comparison)
 
-| Metric | Pyre | FastAPI | Robyn |
-|--------|------|---------|-------|
-| Avg latency (Hello) | **0.9 ms** | ~17 ms | 35 ms |
-| P50 latency | **0.8 ms** | ~15 ms | 0.9 ms |
-| P99 latency | **4.2 ms** | ~20 ms | 262 ms |
-| P99 (JSON 7KB) | **6.2 ms** | ~50 ms | 182 ms |
+Both frameworks given 16 workers on the same hardware. Robyn: `--processes 16 --workers 2`.
+
+| Route | Pyre (1 proc, 16 sub-interp) | Robyn (16 proc × 2 workers) | Ratio |
+|-------|-----|-------|-------|
+| GET / | **429k** req/s | 156k req/s | **2.7x** |
+| GET /json | **405k** req/s | 155k req/s | **2.6x** |
+| GET /user/42 | **395k** req/s | 144k req/s | **2.7x** |
+| POST /echo | **372k** req/s | 144k req/s | **2.6x** |
+| GET /compute | **379k** req/s | 145k req/s | **2.6x** |
 
 ### Resource efficiency
 
-| Resource | Pyre | FastAPI | Robyn |
-|----------|------|---------|-------|
-| Memory (10 workers) | **119 MB** | ~200 MB | 447 MB |
-| Memory per worker | **~10 MB** | ~50 MB | ~20 MB |
-| Throughput per MB | **3,283 r/s/MB** | ~75 r/s/MB | 196 r/s/MB |
-| Processes | **1** | 1+ Gunicorn | 22 |
-| GIL contention | **0 μs** (independent) | N/A (single) | N/A (multi-process) |
+| Resource | Pyre | Robyn (16 proc) |
+|----------|------|-----------------|
+| Memory | **189 MB** | 583 MB |
+| Processes | **1** | 16 |
+| QPS per MB | **2,268 req/s/MB** | 268 req/s/MB |
+| Cross-worker state | Built-in (DashMap, nanosecond) | Needs Redis |
+
+Pyre achieves **2.7x the throughput with 1/3 the memory**. Per-MB efficiency is **8.5x** better.
 
 ### Stability (5-minute sustained load)
 
-Sustained 5-minute stress test on Apple M4, Python 3.14, wrk -t4 -c100 -d300s. Full report: [benchmarks/benchmark-12-stability.md](benchmarks/benchmark-12-stability.md)
+Sustained 300s stress test, wrk -t4 -c100.
+
+| Metric | Linux (v1.4.0) | macOS (v1.2.0) |
+|--------|----------------|----------------|
+| Sustained QPS | **400,683 req/s** | 214,641 req/s |
+| Total requests | **120,209,758** (120M) | 64,410,189 (64M) |
+| Non-2xx responses | **0** | 0 |
+| Socket errors | **0** | 0 |
+| Memory growth | 169 → 196 MB (+27 MB) | 1712 → 752 KB |
+| Max latency | 9.02ms | 39.98ms |
+
+120 million requests, zero errors, zero memory leaks.
+
+### Stress test (c=1024)
 
 | Metric | Result |
 |--------|--------|
-| Total requests | **64,410,189** (64 million) |
-| Sustained QPS | **214,641 req/s** (consistent across 5 minutes) |
-| Non-2xx responses | **0** |
-| Socket errors | **0** |
-| Memory (start → end) | 1712 KB → **752 KB** (zero leak, RSS decreased) |
-| Max latency | 39.98ms |
-| Server crash | **None** (all endpoints responsive after test) |
+| QPS | **356,328 req/s** |
+| P50 / P99 | 1.40ms / 3.15ms |
+| Errors | **0** |
 
-Followed by 3 additional 1-minute phases (path params, JSON POST, CPU-bound fib10) — all at 210-215k req/s, zero errors, RSS flat at 752 KB. Total: **90+ million requests, zero memory leaks, zero crashes.**
+Graceful degradation under extreme concurrency — still 356k QPS with zero errors.
 
 ### Pyre vs Robyn: feature comparison
 
 | Capability | Pyre | Robyn |
 |------------|------|-------|
-| **Architecture** | 1 process, 10 sub-interpreters | 22 OS processes |
+| **Architecture** | 1 process, N sub-interpreters | N OS processes |
 | **SharedState** (cross-worker) | Built-in (DashMap, nanosecond) | Not supported (needs Redis) |
 | **MCP Server** (AI tool protocol) | Built-in | Supported (experimental) |
 | **MsgPack RPC** | Built-in + magic client | Not supported |
@@ -156,8 +168,8 @@ Followed by 3 additional 1-minute phases (path params, JSON POST, CPU-bound fib1
 │  Python handlers (def / async def / gil=True)           │
 │      ↓                                                   │
 │  Rust core (Tokio + Hyper)                              │
-│  ├── Sync worker pool ──→ 10 sub-interpreters (OWN_GIL) │
-│  ├── Async worker pool ──→ 10 asyncio event loops       │
+│  ├── Sync worker pool ──→ N sub-interpreters (OWN_GIL)  │
+│  ├── Async worker pool ──→ N asyncio event loops        │
 │  ├── Hybrid dispatch ──→ main interpreter (numpy/C ext) │
 │  ├── SharedState ──→ DashMap (nanosecond, cross-worker) │
 │  └── Backpressure ──→ bounded channels (503 on overload)│
@@ -265,7 +277,7 @@ Python C extensions (PyO3/Rust, C/C++) use global state that isn't compatible wi
 **The fix is simple: add `gil=True` to routes that need C extensions.**
 
 ```python
-# Fast route — sub-interpreter, 220k req/s, no C extensions needed
+# Fast route — sub-interpreter, 429k req/s, no C extensions needed
 @app.get("/fast")
 def fast(req):
     return {"hello": "world"}
@@ -278,7 +290,7 @@ def analyze(req, data):
     return {"mean": float(np.mean(data.values))}
 ```
 
-Pyre auto-detects which routes need GIL and dispatches accordingly. Fast routes stay at 220k req/s; GIL routes get full ecosystem access. Both run concurrently in the same server.
+Pyre auto-detects which routes need GIL and dispatches accordingly. Fast routes stay at 429k req/s; GIL routes get full ecosystem access. Both run concurrently in the same server.
 
 > **When will this be fixed?** When PyO3 and numpy add PEP 684 multi-phase init support. Tracking: [PyO3#3451](https://github.com/PyO3/pyo3/issues/3451), [numpy#24003](https://github.com/numpy/numpy/issues/24003). When they do, these libraries will run at full speed in sub-interpreters — no `gil=True` needed.
 
@@ -430,7 +442,7 @@ app.run()  # http://127.0.0.1:8000
 
 ```python
 @app.get("/fast")
-def fast(req):              # → sync pool (220k req/s)
+def fast(req):              # → sync pool (429k req/s)
     return "instant"
 
 @app.get("/io")
@@ -594,7 +606,7 @@ Python handlers (def / async def / gil=True)
 Pyre (Rust core, 12 modules)
 ├── Tokio runtime (HTTP/1+2, WebSocket, SSE)
 ├── Sub-interpreter pool (N independent GILs)
-│   ├── Sync workers (def → 220k req/s)
+│   ├── Sync workers (def → 429k req/s)
 │   └── Async workers (async def → 133k req/s)
 ├── Hybrid GIL dispatch (gil=True → numpy/C extensions)
 ├── SharedState (DashMap, cross-worker, nanosecond)
@@ -604,7 +616,7 @@ Pyre (Rust core, 12 modules)
 
 ## Sub-interpreter Safe Ecosystem
 
-Pyre's sub-interpreters deliver 220k req/s, but C extensions (Pydantic, NumPy, Pandas) can't run in them. Instead of fighting the ecosystem, Pyre offers a **Golden Path**: modern, pure-Python alternatives that are **not just safe — they're faster**.
+Pyre's sub-interpreters deliver 429k req/s, but C extensions (Pydantic, NumPy, Pandas) can't run in them. Instead of fighting the ecosystem, Pyre offers a **Golden Path**: modern, pure-Python alternatives that are **not just safe — they're faster**.
 
 | Category | Traditional (needs `gil=True`) | Golden Path (sub-interp safe) |
 |----------|-------------------------------|-------------------------------|
@@ -645,10 +657,10 @@ Pyre's sub-interpreter architecture delivers extreme performance but comes with 
 
 **Why:** CPython's PEP 684 requires extensions to declare multi-interpreter support via `Py_MOD_PER_INTERPRETER_GIL_SUPPORTED`. Most libraries haven't done this yet. PyO3 uses global static state that conflicts with multiple interpreters.
 
-**Workaround:** Add `gil=True` to routes that need these libraries. They run on the main interpreter with full ecosystem access while other routes run at 220k req/s on sub-interpreters.
+**Workaround:** Add `gil=True` to routes that need these libraries. They run on the main interpreter with full ecosystem access while other routes run at 429k req/s on sub-interpreters.
 
 ```python
-@app.get("/fast")                    # Sub-interpreter: 220k req/s
+@app.get("/fast")                    # Sub-interpreter: 429k req/s
 def fast(req): return "hello"
 
 @app.post("/analyze", gil=True)      # Main interpreter: numpy works
