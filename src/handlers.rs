@@ -118,9 +118,9 @@ pub(crate) async fn handle_request(
 ) -> Result<Response<BoxBody>, hyper::Error> {
     crate::monitor::TOTAL_REQUESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let start = std::time::Instant::now();
-    let method = req.method().to_string();
+    let method: Arc<str> = Arc::from(req.method().as_str());
     let uri = req.uri().clone();
-    let path = uri.path().to_string();
+    let path: Arc<str> = Arc::from(uri.path());
     let query = uri.query().unwrap_or("").to_string();
     let headers = extract_headers(req.headers());
 
@@ -146,8 +146,9 @@ pub(crate) async fn handle_request(
         None => return Ok(full_body(not_found_response())),
     };
 
-    let method_log = method.clone();
-    let path_log = path.clone();
+    // Arc::clone is pointer-sized — no heap alloc for log variables.
+    let method_log = Arc::clone(&method);
+    let path_log = Arc::clone(&path);
     let sky_req = PyreRequest {
         method,
         path,
@@ -202,23 +203,19 @@ fn call_handler_with_hooks(
         crate::monitor::GIL_QUEUE_LENGTH.fetch_sub(1, Relaxed);
         let hold_start = std::time::Instant::now();
 
-        // FrozenRoutes: no lock needed — direct Arc<RouteTable> access
-        let before_hooks: Vec<Py<PyAny>> = routes
-            .before_hooks
-            .iter()
-            .map(|h| h.clone_ref(py))
-            .collect();
-        let after_hooks: Vec<Py<PyAny>> =
-            routes.after_hooks.iter().map(|h| h.clone_ref(py)).collect();
+        // FrozenRoutes: zero-cost iteration — direct Arc<RouteTable> reference.
+        // No Vec collect, no clone_ref. Just borrow from the Arc.
+        let before_hooks = &routes.before_hooks;
+        let after_hooks = &routes.after_hooks;
 
         let handler = if handler_idx == usize::MAX {
-            routes.fallback_handler.as_ref().unwrap().clone_ref(py)
+            routes.fallback_handler.as_ref().unwrap()
         } else {
-            routes.handlers[handler_idx].clone_ref(py)
+            &routes.handlers[handler_idx]
         };
 
         // before_request hooks
-        for hook in &before_hooks {
+        for hook in before_hooks {
             match hook.call1(py, (sky_req.clone(),)) {
                 Ok(result) => {
                     let bound = result.bind(py);
@@ -273,7 +270,7 @@ fn call_handler_with_hooks(
                     let mut resp_data = extract_response_data(py, obj.bind(py).clone())?;
 
                     // after_request hooks
-                    for hook in &after_hooks {
+                    for hook in after_hooks {
                         let body_py: Py<PyAny> = match std::str::from_utf8(&resp_data.body) {
                             Ok(s) => PyString::new(py, s).into_any().unbind(),
                             Err(_) => pyo3::types::PyBytes::new(py, &resp_data.body)
@@ -350,9 +347,9 @@ pub(crate) async fn handle_request_subinterp(
 ) -> Result<Response<BoxBody>, hyper::Error> {
     crate::monitor::TOTAL_REQUESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let start = std::time::Instant::now();
-    let method = req.method().to_string();
+    let method: Arc<str> = Arc::from(req.method().as_str());
     let uri = req.uri().clone();
-    let path = uri.path().to_string();
+    let path: Arc<str> = Arc::from(uri.path());
     let query = uri.query().unwrap_or("").to_string();
     let headers = extract_headers(req.headers());
 
@@ -379,13 +376,12 @@ pub(crate) async fn handle_request_subinterp(
     };
 
     // ── Hybrid dispatch: GIL routes use main interpreter ──
-    // Fallback handler (usize::MAX) always runs on GIL since it's registered on the main interpreter.
     let is_gil_route =
         handler_idx == usize::MAX || pool.requires_gil.get(handler_idx).copied().unwrap_or(false);
 
     if is_gil_route {
-        let method_log = method.clone();
-        let path_log = path.clone();
+        let method_log = Arc::clone(&method);
+        let path_log = Arc::clone(&path);
         let sky_req = PyreRequest {
             method,
             path,
@@ -421,14 +417,14 @@ pub(crate) async fn handle_request_subinterp(
     }
 
     // ── Default: sub-interpreter (fast path) ──
-    let method_log = method.clone();
-    let path_log = path.clone();
+    let method_log = Arc::clone(&method);
+    let path_log = Arc::clone(&path);
     let (response_tx, response_rx) = tokio::sync::oneshot::channel();
 
     if let Err(e) = pool.submit(interp::WorkRequest {
         handler_idx,
-        method,
-        path,
+        method: method.to_string(),
+        path: path.to_string(),
         params,
         query,
         body: body_bytes,
@@ -451,17 +447,17 @@ pub(crate) async fn handle_request_subinterp(
 
     let http_resp = match result {
         Ok(resp) => {
-            let ct = resp.content_type.unwrap_or_else(|| {
+            let ct = resp.content_type.as_deref().unwrap_or_else(|| {
                 if resp.is_json || resp.body.starts_with(b"{") || resp.body.starts_with(b"[") {
-                    "application/json".to_string()
+                    "application/json"
                 } else {
-                    "text/plain; charset=utf-8".to_string()
+                    "text/plain; charset=utf-8"
                 }
             });
             let status = StatusCode::from_u16(resp.status).unwrap_or(StatusCode::OK);
             let mut builder = Response::builder()
                 .status(status)
-                .header("content-type", &ct)
+                .header("content-type", ct)
                 .header("server", crate::response::SERVER_HEADER);
             for (k, v) in &resp.headers {
                 builder = builder.header(k.as_str(), v.as_str());

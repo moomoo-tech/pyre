@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
+use std::sync::Arc;
 
 use bytes::Bytes;
 use pyo3::prelude::*;
@@ -11,10 +12,10 @@ use pyo3::prelude::*;
 #[pyclass(frozen, skip_from_py_object)]
 #[derive(Clone)]
 pub(crate) struct PyreRequest {
-    #[pyo3(get)]
-    pub(crate) method: String,
-    #[pyo3(get)]
-    pub(crate) path: String,
+    /// Arc<str> — shared with access log, zero-cost clone.
+    pub(crate) method: Arc<str>,
+    /// Arc<str> — shared with access log, zero-cost clone.
+    pub(crate) path: Arc<str>,
     /// Stored as Vec for small-count path params (typically 1-2).
     /// Exposed to Python as dict via custom getter.
     pub(crate) params: Vec<(String, String)>,
@@ -30,6 +31,16 @@ pub(crate) struct PyreRequest {
 
 #[pymethods]
 impl PyreRequest {
+    #[getter]
+    fn method(&self) -> &str {
+        &self.method
+    }
+
+    #[getter]
+    fn path(&self) -> &str {
+        &self.path
+    }
+
     /// Converts Vec<(String, String)> → Python dict on access.
     #[getter]
     fn params(&self) -> HashMap<String, String> {
@@ -174,8 +185,8 @@ mod tests {
     #[test]
     fn query_params_parsing() {
         let req = PyreRequest {
-            method: "GET".to_string(),
-            path: "/search".to_string(),
+            method: Arc::from("GET"),
+            path: Arc::from("/search"),
             params: Vec::new(),
             query: "q=hello+world&page=2&lang=en".to_string(),
             headers: HashMap::new(),
@@ -191,8 +202,8 @@ mod tests {
     #[test]
     fn query_params_empty() {
         let req = PyreRequest {
-            method: "GET".to_string(),
-            path: "/".to_string(),
+            method: Arc::from("GET"),
+            path: Arc::from("/"),
             params: Vec::new(),
             query: "".to_string(),
             headers: HashMap::new(),
@@ -205,8 +216,8 @@ mod tests {
     #[test]
     fn query_params_percent_encoded() {
         let req = PyreRequest {
-            method: "GET".to_string(),
-            path: "/".to_string(),
+            method: Arc::from("GET"),
+            path: Arc::from("/"),
             params: Vec::new(),
             query: "name=%E4%B8%AD%E6%96%87".to_string(),
             headers: HashMap::new(),
