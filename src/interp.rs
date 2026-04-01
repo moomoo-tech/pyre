@@ -698,6 +698,7 @@ impl SubInterpreterWorker {
     ///
     /// # Safety
     /// Must be called with this sub-interpreter's GIL held.
+    #[allow(clippy::too_many_arguments)]
     unsafe fn build_request(
         &self,
         method: &str,
