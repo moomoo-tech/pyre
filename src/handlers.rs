@@ -451,9 +451,7 @@ pub(crate) async fn handle_request_subinterp(
                 );
                 builder = builder.header("access-control-allow-headers", "*");
             }
-            full_body(
-                builder.body(Full::new(Bytes::from(resp.body))).unwrap(),
-            )
+            full_body(builder.body(Full::new(Bytes::from(resp.body))).unwrap())
         }
         Err(e) => full_body(error_response(&e)),
     };

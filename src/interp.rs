@@ -246,16 +246,12 @@ unsafe extern "C" fn pyre_emit_log_cfunc(
         "unknown"
     };
     let message = if !msg_ptr.is_null() {
-        std::ffi::CStr::from_ptr(msg_ptr)
-            .to_str()
-            .unwrap_or("")
+        std::ffi::CStr::from_ptr(msg_ptr).to_str().unwrap_or("")
     } else {
         ""
     };
     let pathname = if !path_ptr.is_null() {
-        std::ffi::CStr::from_ptr(path_ptr)
-            .to_str()
-            .unwrap_or("")
+        std::ffi::CStr::from_ptr(path_ptr).to_str().unwrap_or("")
     } else {
         ""
     };
@@ -524,9 +520,7 @@ impl SubInterpreterWorker {
         let emit_log_def = Box::into_raw(Box::new(ffi::PyMethodDef {
             ml_name: c"_pyre_emit_log".as_ptr(),
             ml_meth: ffi::PyMethodDefPointer {
-                PyCFunctionWithKeywords: std::mem::transmute(
-                    pyre_emit_log_cfunc as *const (),
-                ),
+                PyCFunctionWithKeywords: std::mem::transmute(pyre_emit_log_cfunc as *const ()),
             },
             ml_flags: ffi::METH_VARARGS,
             ml_doc: std::ptr::null(),
@@ -534,11 +528,7 @@ impl SubInterpreterWorker {
         let emit_log_func =
             ffi::PyCFunction_NewEx(emit_log_def, std::ptr::null_mut(), std::ptr::null_mut());
         if !emit_log_func.is_null() {
-            ffi::PyDict_SetItemString(
-                globals.as_ptr(),
-                c"_pyre_emit_log".as_ptr(),
-                emit_log_func,
-            );
+            ffi::PyDict_SetItemString(globals.as_ptr(), c"_pyre_emit_log".as_ptr(), emit_log_func);
             ffi::Py_DECREF(emit_log_func);
         }
 
@@ -1485,9 +1475,7 @@ fn worker_thread_loop_async(
         let emit_log_def = Box::into_raw(Box::new(ffi::PyMethodDef {
             ml_name: c"_pyre_emit_log".as_ptr(),
             ml_meth: ffi::PyMethodDefPointer {
-                PyCFunctionWithKeywords: std::mem::transmute(
-                    pyre_emit_log_cfunc as *const (),
-                ),
+                PyCFunctionWithKeywords: std::mem::transmute(pyre_emit_log_cfunc as *const ()),
             },
             ml_flags: ffi::METH_VARARGS,
             ml_doc: std::ptr::null(),
@@ -1495,11 +1483,7 @@ fn worker_thread_loop_async(
         let emit_log_func =
             ffi::PyCFunction_NewEx(emit_log_def, std::ptr::null_mut(), std::ptr::null_mut());
         if !emit_log_func.is_null() {
-            ffi::PyDict_SetItemString(
-                worker.globals,
-                c"_pyre_emit_log".as_ptr(),
-                emit_log_func,
-            );
+            ffi::PyDict_SetItemString(worker.globals, c"_pyre_emit_log".as_ptr(), emit_log_func);
             ffi::Py_DECREF(emit_log_func);
         }
 
