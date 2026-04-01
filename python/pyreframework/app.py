@@ -540,11 +540,20 @@ class Pyre:
         workers: int | None = None,
         mode: str | None = None,
         reload: bool = False,
+        io_workers: int | None = None,
     ) -> None:
+        """Start the Pyre server.
+
+        Args:
+            workers: Python sub-interpreter count (default: CPU count).
+            io_workers: Tokio async I/O thread count + accept loop count
+                        (default: CPU count). Independent of workers.
+        """
         # Priority: param > env var > default
         host = host or os.environ.get("PYRE_HOST", "127.0.0.1")
         port = port or int(os.environ.get("PYRE_PORT", "8000"))
         workers = workers or (int(os.environ.get("PYRE_WORKERS")) if os.environ.get("PYRE_WORKERS") else None)
+        io_workers = io_workers or (int(os.environ.get("PYRE_IO_WORKERS")) if os.environ.get("PYRE_IO_WORKERS") else None)
 
         # Hot reload: watch .py files, restart on change
         reload = reload or os.environ.get("PYRE_RELOAD") == "1"
@@ -605,7 +614,7 @@ class Pyre:
             hook()
 
         try:
-            self._engine.run(host=host, port=port, workers=workers, mode=mode)
+            self._engine.run(host=host, port=port, workers=workers, mode=mode, io_workers=io_workers)
         finally:
             # Run shutdown hooks (even if server exits abnormally)
             for hook in self._shutdown_hooks:

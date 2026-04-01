@@ -215,7 +215,7 @@ impl PyreApp {
         Ok(())
     }
 
-    #[pyo3(signature = (host=None, port=None, workers=None, mode=None))]
+    #[pyo3(signature = (host=None, port=None, workers=None, mode=None, io_workers=None))]
     fn run(
         &self,
         py: Python<'_>,
@@ -223,6 +223,7 @@ impl PyreApp {
         port: Option<u16>,
         workers: Option<usize>,
         mode: Option<&str>,
+        io_workers: Option<usize>,
     ) -> PyResult<()> {
         // Start GIL watchdog (once, opt-in via PYRE_METRICS=1)
         use std::sync::Once;
@@ -247,7 +248,10 @@ impl PyreApp {
         let num_cpus = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(4);
+        // workers = Python sub-interpreter count (default: num_cpus)
         let workers = workers.unwrap_or(num_cpus);
+        // io_workers = Tokio async thread count + accept loop count (default: num_cpus)
+        let io_workers = io_workers.unwrap_or(num_cpus);
 
         // Freeze route table: extract from RwLock into read-only Arc.
         // After this point, no more route registration — zero-lock reads.
@@ -276,9 +280,9 @@ impl PyreApp {
         };
 
         if mode == "subinterp" || mode == "auto" {
-            self.run_subinterp(py, addr, workers, num_cpus, frozen)
+            self.run_subinterp(py, addr, workers, io_workers, num_cpus, frozen)
         } else {
-            self.run_gil(py, addr, workers, num_cpus, frozen)
+            self.run_gil(py, addr, io_workers, num_cpus, frozen)
         }
     }
 }
@@ -310,7 +314,7 @@ impl PyreApp {
         &self,
         py: Python<'_>,
         addr: SocketAddr,
-        workers: usize,
+        io_workers: usize,
         num_cpus: usize,
         routes: FrozenRoutes,
     ) -> PyResult<()> {
@@ -318,18 +322,18 @@ impl PyreApp {
             target: "pyre::server",
             version = env!("CARGO_PKG_VERSION"),
             %addr,
-            workers,
+            io_workers,
             cpus = num_cpus,
             mode = "gil",
             "Pyre started"
         );
         println!("\n  Pyre v{}", env!("CARGO_PKG_VERSION"));
         println!("  Listening on http://{addr}");
-        println!("  Workers: {workers} (CPUs: {num_cpus})\n");
+        println!("  IO workers: {io_workers} (CPUs: {num_cpus})\n");
 
         py.detach(move || -> PyResult<()> {
             let rt = RuntimeBuilder::new_multi_thread()
-                .worker_threads(workers)
+                .worker_threads(io_workers)
                 .enable_all()
                 .build()
                 .map_err(|e| {
@@ -416,6 +420,7 @@ impl PyreApp {
         py: Python<'_>,
         addr: SocketAddr,
         workers: usize,
+        io_workers: usize,
         num_cpus: usize,
         routes: FrozenRoutes,
     ) -> PyResult<()> {
@@ -465,7 +470,7 @@ impl PyreApp {
             env!("CARGO_PKG_VERSION")
         );
         println!("  Listening on http://{addr}");
-        println!("  Sub-interpreters: {workers} (CPUs: {num_cpus})");
+        println!("  Sub-interpreters: {workers} | IO threads: {io_workers} (CPUs: {num_cpus})");
         if has_async {
             let sync_w = workers - (workers / 2).max(2);
             let async_w = (workers / 2).max(2);
@@ -501,7 +506,7 @@ impl PyreApp {
 
         py.detach(move || -> PyResult<()> {
             let rt = RuntimeBuilder::new_multi_thread()
-                .worker_threads(workers)
+                .worker_threads(io_workers)
                 .enable_all()
                 .build()
                 .map_err(|e| {
@@ -510,7 +515,7 @@ impl PyreApp {
 
             rt.block_on(async move {
                 #[cfg(target_os = "linux")]
-                let n_accept = workers.min(num_cpus);
+                let n_accept = io_workers.min(num_cpus);
                 #[cfg(not(target_os = "linux"))]
                 let n_accept = 1;
                 let shutdown_token = tokio_util::sync::CancellationToken::new();
