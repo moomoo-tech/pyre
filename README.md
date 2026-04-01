@@ -4,8 +4,16 @@
 
 Built on Per-Interpreter GIL (PEP 684) and a Rust async core, Pyre runs Python handlers across all CPU cores in a single process.
 
-- **420k req/s** on Linux (8C/16T), **15x faster** than Robyn.
-- 300s sustained **400k QPS**, zero errors, zero memory leaks.
+- **429k req/s** on Linux (8C/16T), **2.7x faster** than Robyn at equal scale (16 workers each), **1/3 the memory**.
+- 300s sustained **400k QPS**, 120 million requests, zero errors, zero memory leaks.
+
+### What's new in v1.4.0
+
+- **M:N scheduling** — `io_workers` (Tokio I/O threads) and `workers` (Python sub-interpreters) configured independently
+- **SO_REUSEPORT multi-accept** — N independent accept loops with kernel-level load balancing on Linux
+- **LTO + TCP_QUICKACK + mimalloc** — compile-time whole-program optimization, reduced first-byte latency, high-concurrency allocator
+- **Headers OnceLock + serde_json/pythonize** — lazy header conversion, Rust-side JSON serialization
+- Full benchmark: [benchmarks/benchmark-14-linux.en.md](benchmarks/benchmark-14-linux.en.md)
 
 ### What others can't do, Pyre has built-in
 
