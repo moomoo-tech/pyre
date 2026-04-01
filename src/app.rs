@@ -286,7 +286,7 @@ impl PyreApp {
                 loop {
                     tokio::select! {
                         result = listener.accept() => {
-                            let (stream, _) = result.map_err(|e| {
+                            let (stream, remote_addr) = result.map_err(|e| {
                                 pyo3::exceptions::PyOSError::new_err(format!("accept error: {e}"))
                             })?;
 
@@ -297,11 +297,12 @@ impl PyreApp {
                             tokio::spawn(async move {
                                 let svc = service_fn(move |req: Request<Incoming>| {
                                     let routes = Arc::clone(&routes);
+                                    let client_ip = remote_addr.ip().to_string();
                                     async move {
                                         if websocket::is_websocket_upgrade(&req) {
                                             websocket::handle_websocket(req, routes).await
                                         } else {
-                                            handle_request(req, routes).await
+                                            handle_request(req, routes, client_ip).await
                                         }
                                     }
                                 });
@@ -443,7 +444,7 @@ impl PyreApp {
                 loop {
                     tokio::select! {
                         result = listener.accept() => {
-                            let (stream, _) = result.map_err(|e| {
+                            let (stream, remote_addr) = result.map_err(|e| {
                                 pyo3::exceptions::PyOSError::new_err(format!("accept error: {e}"))
                             })?;
 
@@ -456,11 +457,12 @@ impl PyreApp {
                                 let svc = service_fn(move |req: Request<Incoming>| {
                                     let pool = Arc::clone(&pool);
                                     let routes = Arc::clone(&routes);
+                                    let client_ip = remote_addr.ip().to_string();
                                     async move {
                                         if websocket::is_websocket_upgrade(&req) {
                                             websocket::handle_websocket(req, routes).await
                                         } else {
-                                            handle_request_subinterp(req, pool, routes).await
+                                            handle_request_subinterp(req, pool, routes, client_ip).await
                                         }
                                     }
                                 });

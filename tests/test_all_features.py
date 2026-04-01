@@ -140,6 +140,18 @@ def jsonroute(req):
 def error(req):
     return PyreResponse(body="nope", status_code=404)
 
+@app.get("/client-ip")
+def client_ip(req):
+    return {"ip": req.client_ip}
+
+@app.get("/ip-with-params/{id}")
+def ip_params(req):
+    return {"ip": req.client_ip, "id": req.params["id"]}
+
+@app.get("/nested/{a}/to/{b}")
+def nested(req):
+    return {"a": req.params["a"], "b": req.params["b"]}
+
 @app.get("/state-set/{key}/{val}")
 def state_set(req):
     app.state[req.params["key"]] = req.params["val"]
@@ -202,6 +214,18 @@ def jsonroute(req):
 @app.get("/error")
 def error(req):
     return PyreResponse(body="nope", status_code=404)
+
+@app.get("/client-ip")
+def client_ip(req):
+    return {"ip": req.client_ip}
+
+@app.get("/ip-with-params/{id}")
+def ip_params(req):
+    return {"ip": req.client_ip, "id": req.params["id"]}
+
+@app.get("/nested/{a}/to/{b}")
+def nested(req):
+    return {"a": req.params["a"], "b": req.params["b"]}
 
 @app.get("/state-set/{key}/{val}", gil=True)
 def state_set(req):
@@ -295,6 +319,21 @@ def run_feature_tests(mode, port=19999):
     http_get(port, "/state-set/testkey/testval")
     status, body, _ = http_get(port, "/state-get/testkey")
     check("SharedState", json.loads(body).get("val") == "testval")
+
+    # Client IP
+    status, body, _ = http_get(port, "/client-ip")
+    ip = json.loads(body).get("ip", "")
+    check("Client IP", ip in ("127.0.0.1", "::1"))
+
+    # Client IP with path params
+    status, body, _ = http_get(port, "/ip-with-params/42")
+    data = json.loads(body)
+    check("Client IP + params", data.get("ip") in ("127.0.0.1", "::1") and data.get("id") == "42")
+
+    # Nested path params
+    status, body, _ = http_get(port, "/nested/foo/to/bar")
+    data = json.loads(body)
+    check("Nested params", data.get("a") == "foo" and data.get("b") == "bar")
 
 
 def main():

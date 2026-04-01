@@ -20,6 +20,8 @@ pub(crate) struct PyreRequest {
     pub(crate) query: String,
     #[pyo3(get)]
     pub(crate) headers: HashMap<String, String>,
+    #[pyo3(get)]
+    pub(crate) client_ip: String,
     pub(crate) body_bytes: Vec<u8>,
 }
 
@@ -155,6 +157,7 @@ mod tests {
             params: HashMap::new(),
             query: "q=hello+world&page=2&lang=en".to_string(),
             headers: HashMap::new(),
+            client_ip: String::new(),
             body_bytes: Vec::new(),
         };
         let qp = req.query_params();
@@ -171,6 +174,7 @@ mod tests {
             params: HashMap::new(),
             query: "".to_string(),
             headers: HashMap::new(),
+            client_ip: String::new(),
             body_bytes: Vec::new(),
         };
         assert!(req.query_params().is_empty());
@@ -184,6 +188,7 @@ mod tests {
             params: HashMap::new(),
             query: "name=%E4%B8%AD%E6%96%87".to_string(),
             headers: HashMap::new(),
+            client_ip: String::new(),
             body_bytes: Vec::new(),
         };
         assert_eq!(req.query_params()["name"], "中文");

@@ -26,7 +26,7 @@ except ImportError:
 # Injected by Rust: HANDLER_NAMES = [{handlers_array}]
 
 
-async def _process_request(req_id, handler_idx, method, path, query, body_bytes, headers_json):
+async def _process_request(req_id, handler_idx, method, path, params, query, body_bytes, headers, client_ip):
     try:
         handler_name = HANDLER_NAMES[int(handler_idx)]
         handler = globals().get(handler_name)
@@ -34,9 +34,7 @@ async def _process_request(req_id, handler_idx, method, path, query, body_bytes,
             _pyre_send(WORKER_ID, req_id, 500, "text/plain", b"handler not found")
             return
 
-        import json as _json
-        headers = _json.loads(headers_json) if headers_json else {}
-        req = _PyreRequest(method, path, {}, query, body_bytes, headers)
+        req = _PyreRequest(method, path, params, query, body_bytes, headers, client_ip)
         res = handler(req)
 
         if asyncio.iscoroutine(res):
@@ -82,9 +80,9 @@ def _fetcher_thread(loop):
         req_data = _pyre_recv(WORKER_ID)
         if req_data is None:
             break
-        req_id, handler_idx, method, path, query, body_bytes, headers_json = req_data
+        req_id, handler_idx, method, path, params, query, body_bytes, headers, client_ip = req_data
         asyncio.run_coroutine_threadsafe(
-            _process_request(req_id, handler_idx, method, path, query, body_bytes, headers_json),
+            _process_request(req_id, handler_idx, method, path, params, query, body_bytes, headers, client_ip),
             loop,
         )
 

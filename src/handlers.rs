@@ -89,6 +89,7 @@ pub(crate) fn full_body(resp: Response<Full<Bytes>>) -> Response<BoxBody> {
 pub(crate) async fn handle_request(
     req: Request<Incoming>,
     routes: FrozenRoutes,
+    client_ip: String,
 ) -> Result<Response<BoxBody>, hyper::Error> {
     crate::monitor::TOTAL_REQUESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let start = std::time::Instant::now();
@@ -128,6 +129,7 @@ pub(crate) async fn handle_request(
         params,
         query,
         headers,
+        client_ip,
         body_bytes,
     };
 
@@ -325,6 +327,7 @@ pub(crate) async fn handle_request_subinterp(
     req: Request<Incoming>,
     pool: SharedPool,
     routes: FrozenRoutes,
+    client_ip: String,
 ) -> Result<Response<BoxBody>, hyper::Error> {
     crate::monitor::TOTAL_REQUESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let start = std::time::Instant::now();
@@ -370,6 +373,7 @@ pub(crate) async fn handle_request_subinterp(
             params,
             query,
             headers,
+            client_ip: client_ip.clone(),
             body_bytes,
         };
 
@@ -410,6 +414,7 @@ pub(crate) async fn handle_request_subinterp(
         query,
         body: body_bytes,
         headers,
+        client_ip,
         response_tx,
     }) {
         crate::monitor::DROPPED_REQUESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

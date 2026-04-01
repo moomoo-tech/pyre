@@ -40,7 +40,7 @@ fn get_worker_state(worker_id: usize) -> Option<Arc<WorkerState>> {
 // C-FFI bridge functions for async engine
 // ---------------------------------------------------------------------------
 
-/// pyre_recv(worker_id) → (req_id, handler_idx, method, path, query, body) or None
+/// pyre_recv(worker_id) → (req_id, handler_idx, method, path, params, query, body, headers, client_ip) or None
 /// RELEASES GIL during blocking recv — lets asyncio loop run freely.
 unsafe extern "C" fn pyre_recv_cfunc(
     _self: *mut ffi::PyObject,
@@ -73,7 +73,17 @@ unsafe extern "C" fn pyre_recv_cfunc(
                 .unwrap()
                 .insert(req_id, req.response_tx);
 
-            let tuple = ffi::PyTuple_New(7);
+            // Build params and headers as PyDict directly (avoid JSON round-trip)
+            let py_params = py_str_dict(&req.params);
+            let py_headers = py_str_dict(&req.headers);
+            if py_params.is_none() || py_headers.is_none() {
+                ffi::Py_INCREF(ffi::Py_None());
+                return ffi::Py_None();
+            }
+            let py_params = py_params.unwrap();
+            let py_headers = py_headers.unwrap();
+
+            let tuple = ffi::PyTuple_New(9);
             ffi::PyTuple_SetItem(tuple, 0, ffi::PyLong_FromUnsignedLongLong(req_id));
             ffi::PyTuple_SetItem(
                 tuple,
@@ -96,9 +106,11 @@ unsafe extern "C" fn pyre_recv_cfunc(
                     req.path.len() as isize,
                 ),
             );
+            // params as PyDict (was missing before — path params were lost)
+            ffi::PyTuple_SetItem(tuple, 4, py_params.into_raw());
             ffi::PyTuple_SetItem(
                 tuple,
-                4,
+                5,
                 ffi::PyUnicode_FromStringAndSize(
                     req.query.as_ptr() as *const _,
                     req.query.len() as isize,
@@ -106,21 +118,20 @@ unsafe extern "C" fn pyre_recv_cfunc(
             );
             ffi::PyTuple_SetItem(
                 tuple,
-                5,
+                6,
                 ffi::PyBytes_FromStringAndSize(
                     req.body.as_ptr() as *const _,
                     req.body.len() as isize,
                 ),
             );
-            // Serialize headers as JSON string for Python
-            let headers_json =
-                serde_json::to_string(&req.headers).unwrap_or_else(|_| "{}".to_string());
+            // headers as PyDict (was JSON string — avoid serialize+parse overhead)
+            ffi::PyTuple_SetItem(tuple, 7, py_headers.into_raw());
             ffi::PyTuple_SetItem(
                 tuple,
-                6,
+                8,
                 ffi::PyUnicode_FromStringAndSize(
-                    headers_json.as_ptr() as *const _,
-                    headers_json.len() as isize,
+                    req.client_ip.as_ptr() as *const _,
+                    req.client_ip.len() as isize,
                 ),
             );
             tuple
@@ -451,6 +462,7 @@ pub(crate) struct WorkRequest {
     pub query: String,
     pub body: Vec<u8>,
     pub headers: HashMap<String, String>,
+    pub client_ip: String,
     pub response_tx: tokio::sync::oneshot::Sender<Result<SubInterpResponse, String>>,
 }
 
@@ -666,6 +678,7 @@ impl SubInterpreterWorker {
         query: &str,
         body: &[u8],
         headers: &HashMap<String, String>,
+        client_ip: &str,
     ) -> Result<PyObjRef, String> {
         let py_method = py_str(method).ok_or("failed to create py_method")?;
         let py_path = py_str(path).ok_or("failed to create py_path")?;
@@ -673,16 +686,18 @@ impl SubInterpreterWorker {
         let py_query = py_str(query).ok_or("failed to create py_query")?;
         let py_body = py_bytes(body).ok_or("failed to create py_body")?;
         let py_headers = py_str_dict(headers).ok_or("failed to create py_headers")?;
+        let py_client_ip = py_str(client_ip).ok_or("failed to create py_client_ip")?;
 
         // Build args tuple — PyTuple_SetItem steals references
         let args =
-            PyObjRef::from_owned(ffi::PyTuple_New(6)).ok_or("failed to create args tuple")?;
+            PyObjRef::from_owned(ffi::PyTuple_New(7)).ok_or("failed to create args tuple")?;
         ffi::PyTuple_SetItem(args.as_ptr(), 0, py_method.into_raw());
         ffi::PyTuple_SetItem(args.as_ptr(), 1, py_path.into_raw());
         ffi::PyTuple_SetItem(args.as_ptr(), 2, py_params.into_raw());
         ffi::PyTuple_SetItem(args.as_ptr(), 3, py_query.into_raw());
         ffi::PyTuple_SetItem(args.as_ptr(), 4, py_body.into_raw());
         ffi::PyTuple_SetItem(args.as_ptr(), 5, py_headers.into_raw());
+        ffi::PyTuple_SetItem(args.as_ptr(), 6, py_client_ip.into_raw());
 
         // Use cached _PyreRequest class
         let req_cls = self.sky_request_cls;
@@ -985,13 +1000,15 @@ impl SubInterpreterWorker {
         query: &str,
         body: &[u8],
         headers: &HashMap<String, String>,
+        client_ip: &str,
     ) -> Result<SubInterpResponse, String> {
         let func = *self
             .handlers
             .get(handler_name)
             .ok_or_else(|| format!("handler '{}' not found", handler_name))?;
 
-        let request_obj = self.build_request(method, path, params, query, body, headers)?;
+        let request_obj =
+            self.build_request(method, path, params, query, body, headers, client_ip)?;
 
         // Run before_request hooks
         for hook_name in before_hook_names {
@@ -1021,6 +1038,14 @@ impl SubInterpreterWorker {
         }
 
         // Call handler(request)
+        // If we have after_request hooks, keep an extra ref to request_obj
+        // to avoid rebuilding it (saves ~1-3μs per request with hooks).
+        let has_after_hooks = !after_hook_names.is_empty();
+        if has_after_hooks {
+            ffi::Py_INCREF(request_obj.as_ptr());
+        }
+        let req_ptr_for_hooks = request_obj.as_ptr();
+
         let call_args =
             PyObjRef::from_owned(ffi::PyTuple_New(1)).ok_or("failed to create call args")?;
         ffi::PyTuple_SetItem(call_args.as_ptr(), 0, request_obj.into_raw());
@@ -1038,15 +1063,20 @@ impl SubInterpreterWorker {
                 self.parse_result(resolved)?
             }
             None => {
+                if has_after_hooks {
+                    ffi::Py_DECREF(req_ptr_for_hooks);
+                }
                 ffi::PyErr_Print();
                 return Err("handler raised an exception".to_string());
             }
         };
 
         // Run after_request hooks: hook(request, response) → response
-        if !after_hook_names.is_empty() {
-            // Rebuild request object for hooks (reuse the original params)
-            let req_for_hooks = self.build_request(method, path, params, query, body, headers)?;
+        // Reuses the original request object (extra INCREF above) instead of rebuilding.
+        if has_after_hooks {
+            // Wrap the extra ref as owned PyObjRef (INCREF was done above)
+            let req_for_hooks = PyObjRef::from_owned(req_ptr_for_hooks)
+                .ok_or("null request for hooks")?;
 
             for hook_name in after_hook_names {
                 if let Some(&hook_func) = self.handlers.get(hook_name) {
@@ -1357,6 +1387,7 @@ fn worker_thread_loop(
                 &req.query,
                 &req.body,
                 &req.headers,
+                &req.client_ip,
             )
             // _guard drops here → PyEval_SaveThread() → tstate_cell updated
         }));

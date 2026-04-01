@@ -129,6 +129,8 @@ class Pyre:
         self._fallback_name: str | None = None
         self._mcp = MCPServer()
         self.debug = debug
+        self._startup_hooks: list[Callable] = []
+        self._shutdown_hooks: list[Callable] = []
 
         # Resolve final logging config: debug mode defaults vs production defaults.
         # Actual init_logger call is deferred to run() so enable_logging() can
@@ -350,6 +352,48 @@ class Pyre:
         return decorator
 
     # ------------------------------------------------------------------
+    # Lifecycle hooks
+    # ------------------------------------------------------------------
+
+    def on_startup(self, handler: Callable | None = None):
+        """Register a startup hook. Called before the server starts accepting requests.
+
+        Usage::
+
+            @app.on_startup
+            def init_db():
+                app.state["db"] = create_pool()
+        """
+        if handler is not None:
+            self._startup_hooks.append(handler)
+            return handler
+
+        def decorator(fn: Callable) -> Callable:
+            self._startup_hooks.append(fn)
+            return fn
+
+        return decorator
+
+    def on_shutdown(self, handler: Callable | None = None):
+        """Register a shutdown hook. Called after the server stops.
+
+        Usage::
+
+            @app.on_shutdown
+            def cleanup():
+                close_pool(app.state["db"])
+        """
+        if handler is not None:
+            self._shutdown_hooks.append(handler)
+            return handler
+
+        def decorator(fn: Callable) -> Callable:
+            self._shutdown_hooks.append(fn)
+            return fn
+
+        return decorator
+
+    # ------------------------------------------------------------------
     # Fallback (custom 404)
     # ------------------------------------------------------------------
 
@@ -545,7 +589,20 @@ class Pyre:
         # (only works in main thread — TestClient runs in a background thread)
         if threading.current_thread() is threading.main_thread():
             signal.signal(signal.SIGINT, signal.SIG_DFL)
-        self._engine.run(host=host, port=port, workers=workers, mode=mode)
+
+        # Run startup hooks
+        for hook in self._startup_hooks:
+            hook()
+
+        try:
+            self._engine.run(host=host, port=port, workers=workers, mode=mode)
+        finally:
+            # Run shutdown hooks (even if server exits abnormally)
+            for hook in self._shutdown_hooks:
+                try:
+                    hook()
+                except Exception as e:
+                    print(f"  [shutdown] Hook {hook.__name__} error: {e}")
 
     def _run_with_reload(self):
         """Watch .py files and restart server on changes using OS-native events."""

@@ -23,6 +23,7 @@ class PyreRequest:
     params: dict[str, str]
     query: str
     headers: dict[str, str]
+    client_ip: str
     body: bytes
     query_params: dict[str, str]
     def text(self) -> str: ...

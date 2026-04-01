@@ -69,13 +69,14 @@ _root.setLevel(_PYRE_LEVEL_MAP.get(
 # -- Request / Response stubs ------------------------------------------------
 
 class _PyreRequest:
-    def __init__(self, method, path, params, query, body_bytes, headers):
+    def __init__(self, method, path, params, query, body_bytes, headers, client_ip=""):
         self.method = method
         self.path = path
         self.params = params
         self.query = query
         self.body_bytes = body_bytes
         self.headers = headers
+        self.client_ip = client_ip
     @property
     def body(self):
         return self.body_bytes
@@ -168,6 +169,10 @@ class _MockPyre:
         if handler: return handler
         return lambda f: f
     def static(self, *a): pass
+    def on_startup(self, f=None):
+        return f if f else lambda fn: fn
+    def on_shutdown(self, f=None):
+        return f if f else lambda fn: fn
     def enable_logging(self): pass
     def enable_cors(self, **kw): pass
     def run(self, **kw): pass
