@@ -345,7 +345,7 @@ impl PyreApp {
                 // Linux kernel load-balances connections across accept loops.
                 // macOS SO_REUSEPORT doesn't do kernel LB, so use 1 acceptor.
                 #[cfg(target_os = "linux")]
-                let n_accept = workers.min(num_cpus);
+                let n_accept = io_workers.min(num_cpus);
                 #[cfg(not(target_os = "linux"))]
                 let n_accept = 1;
                 let shutdown_token = tokio_util::sync::CancellationToken::new();
