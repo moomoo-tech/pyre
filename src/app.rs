@@ -339,7 +339,24 @@ impl PyreApp {
                             })?;
 
                             let routes = Arc::clone(&routes);
-                            let _ = stream.set_nodelay(true); // Disable Nagle for low latency
+                            let _ = stream.set_nodelay(true);
+                            // TCP_QUICKACK: disable delayed ACK (Linux only).
+                            // Shaves ~40ms off request-response round trips.
+                            #[cfg(target_os = "linux")]
+                            {
+                                use std::os::unix::io::AsRawFd;
+                                let fd = stream.as_raw_fd();
+                                let val: libc::c_int = 1;
+                                unsafe {
+                                    libc::setsockopt(
+                                        fd,
+                                        libc::SOL_TCP,
+                                        libc::TCP_QUICKACK,
+                                        &val as *const _ as *const libc::c_void,
+                                        std::mem::size_of_val(&val) as libc::socklen_t,
+                                    );
+                                }
+                            }
                             let io = TokioIo::new(stream);
 
                             tokio::spawn(async move {
@@ -501,7 +518,24 @@ impl PyreApp {
 
                             let pool = Arc::clone(&pool);
                             let routes = Arc::clone(&routes);
-                            let _ = stream.set_nodelay(true); // Disable Nagle for low latency
+                            let _ = stream.set_nodelay(true);
+                            // TCP_QUICKACK: disable delayed ACK (Linux only).
+                            // Shaves ~40ms off request-response round trips.
+                            #[cfg(target_os = "linux")]
+                            {
+                                use std::os::unix::io::AsRawFd;
+                                let fd = stream.as_raw_fd();
+                                let val: libc::c_int = 1;
+                                unsafe {
+                                    libc::setsockopt(
+                                        fd,
+                                        libc::SOL_TCP,
+                                        libc::TCP_QUICKACK,
+                                        &val as *const _ as *const libc::c_void,
+                                        std::mem::size_of_val(&val) as libc::socklen_t,
+                                    );
+                                }
+                            }
                             let io = TokioIo::new(stream);
 
                             tokio::spawn(async move {
