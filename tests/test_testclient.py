@@ -116,7 +116,7 @@ def cors_client():
             content_type="image/jpeg",
         )
 
-    c = TestClient(app, port=19878)
+    c = TestClient(app, port=19890)
     yield c
     c.close()
 
