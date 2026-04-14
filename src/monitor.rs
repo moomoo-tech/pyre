@@ -1,25 +1,41 @@
-//! GIL Watchdog — probe-based GIL contention monitor.
+//! Passive GIL contention monitor + decoupled RSS sampler.
 //!
-//! A background Rust thread attempts to acquire the main GIL every 10ms
-//! and records how long it took. If a handler holds the GIL for too long
-//! (e.g. numpy without releasing GIL), the watchdog barks.
+//! Previous design used an active watchdog thread that acquired the GIL every
+//! 10ms to probe contention. This caused two problems:
+//!
+//! 1. **Observer effect**: the probe itself competes for the GIL, creating
+//!    artificial contention and context switches (~5-10% throughput loss under
+//!    heavy Python workloads).
+//! 2. **Shutdown segfault**: the detached watchdog thread could outlive
+//!    Py_Finalize, causing use-after-free on the global interpreter state.
+//!
+//! New design (Haskell bracket-inspired):
+//! - **GIL metrics** are collected passively on the real request path — each
+//!   `call_handler_with_hooks` records GIL acquisition wait time as a
+//!   byproduct. Zero overhead when idle, zero artificial contention.
+//! - **RSS sampling** runs in a separate non-GIL thread with an explicit
+//!   stop flag and JoinHandle for deterministic shutdown.
 
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Duration;
 
 use crossbeam_utils::CachePadded;
 use pyo3::prelude::*;
 
-/// Last GIL probe latency (microseconds for precision)
+// ---------------------------------------------------------------------------
+// GIL contention metrics (updated passively by request handlers)
+// ---------------------------------------------------------------------------
+
+/// Last GIL acquisition wait time (microseconds)
 pub static GIL_LATENCY_LAST_US: AtomicU64 = AtomicU64::new(0);
-/// Peak GIL probe latency since last reset (microseconds)
+/// Peak GIL acquisition wait time since last reset (microseconds)
 pub static GIL_LATENCY_MAX_US: AtomicU64 = AtomicU64::new(0);
-/// Total probe count
+/// Total probe count (= total handler invocations that acquired GIL)
 pub static GIL_PROBE_COUNT: AtomicU64 = AtomicU64::new(0);
-/// Total accumulated wait (microseconds)
+/// Total accumulated GIL wait (microseconds)
 pub static GIL_TOTAL_WAIT_US: AtomicU64 = AtomicU64::new(0);
 
-/// Memory RSS in bytes (updated by watchdog)
+/// Memory RSS in bytes (updated by background sampler)
 pub static MEMORY_RSS_BYTES: AtomicU64 = AtomicU64::new(0);
 
 /// Number of threads currently waiting to acquire the main GIL
@@ -36,43 +52,62 @@ pub static DROPPED_REQUESTS: CachePadded<AtomicU64> = CachePadded::new(AtomicU64
 /// Total requests processed
 pub static TOTAL_REQUESTS: CachePadded<AtomicU64> = CachePadded::new(AtomicU64::new(0));
 
-/// Spawn the GIL watchdog background thread.
-pub fn spawn_gil_watchdog() {
+// ---------------------------------------------------------------------------
+// Passive GIL measurement (called from handlers.rs)
+// ---------------------------------------------------------------------------
+
+/// Record a GIL acquisition wait time. Called from `call_handler_with_hooks`
+/// immediately after `Python::attach` succeeds.
+///
+/// This replaces the active watchdog probe — measures real request latency
+/// instead of artificial contention from a background thread.
+#[inline]
+pub fn record_gil_wait(wait_us: u64) {
+    GIL_LATENCY_LAST_US.store(wait_us, Ordering::Relaxed);
+    GIL_LATENCY_MAX_US.fetch_max(wait_us, Ordering::Relaxed);
+    GIL_TOTAL_WAIT_US.fetch_add(wait_us, Ordering::Relaxed);
+    GIL_PROBE_COUNT.fetch_add(1, Ordering::Relaxed);
+
+    if wait_us > 50_000 {
+        tracing::warn!(
+            target: "pyre::server",
+            latency_ms = wait_us / 1000,
+            "GIL congested (measured on real request)"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Decoupled RSS sampler (no GIL, deterministic shutdown)
+// ---------------------------------------------------------------------------
+
+/// Stop flag for the RSS sampler thread.
+static RSS_SAMPLER_RUNNING: AtomicBool = AtomicBool::new(false);
+
+/// Spawn a lightweight background thread that samples process RSS.
+/// Returns a JoinHandle for deterministic shutdown (caller must join).
+///
+/// This thread never touches Python or the GIL — it only reads /proc/self/statm.
+pub fn spawn_rss_sampler() -> std::thread::JoinHandle<()> {
+    RSS_SAMPLER_RUNNING.store(true, Ordering::Release);
     std::thread::Builder::new()
-        .name("pyre-watchdog".to_string())
+        .name("pyre-rss-sampler".to_string())
         .spawn(|| {
-            loop {
-                let start = Instant::now();
-
-                // Probe: try to acquire the main GIL
-                Python::attach(|_py| {
-                    // Got it — do nothing, release immediately
-                });
-
-                let elapsed_us = start.elapsed().as_micros() as u64;
-
-                GIL_LATENCY_LAST_US.store(elapsed_us, Ordering::Relaxed);
-                GIL_PROBE_COUNT.fetch_add(1, Ordering::Relaxed);
-                GIL_TOTAL_WAIT_US.fetch_add(elapsed_us, Ordering::Relaxed);
-                GIL_LATENCY_MAX_US.fetch_max(elapsed_us, Ordering::Relaxed);
-
-                // Alert if GIL blocked > 50ms
-                if elapsed_us > 50_000 {
-                    tracing::warn!(
-                        target: "pyre::server",
-                        latency_ms = elapsed_us / 1000,
-                        "GIL watchdog: main GIL congested"
-                    );
-                }
-
-                // Sample memory RSS
+            while RSS_SAMPLER_RUNNING.load(Ordering::Relaxed) {
                 MEMORY_RSS_BYTES.store(get_rss_bytes(), Ordering::Relaxed);
-
-                // Probe interval: 10ms (~100 samples/sec)
-                std::thread::sleep(Duration::from_millis(10));
+                // 1 second interval — RSS doesn't change fast enough to warrant
+                // more frequent sampling, and this thread does zero GIL work.
+                std::thread::sleep(Duration::from_secs(1));
             }
+            tracing::debug!(target: "pyre::server", "RSS sampler stopped");
         })
-        .expect("failed to spawn GIL watchdog");
+        .expect("failed to spawn RSS sampler")
+}
+
+/// Signal the RSS sampler to stop. Non-blocking — call join() on the
+/// returned JoinHandle to wait for actual termination.
+pub fn stop_rss_sampler() {
+    RSS_SAMPLER_RUNNING.store(false, Ordering::Release);
 }
 
 /// Get current process RSS in bytes (platform-specific, zero dependencies).

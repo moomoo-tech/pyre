@@ -58,13 +58,23 @@ fn resolve_coroutine(py: Python<'_>, obj: Py<PyAny>) -> Result<Py<PyAny>, String
 
     /// RAII wrapper that calls `loop.close()` via GIL when the thread dies.
     /// Prevents FD / task leaks from orphaned asyncio event loops.
+    ///
+    /// Safety: guards against Py_Finalize race — if the Python interpreter
+    /// is already shutting down when this thread exits, we skip the FFI call
+    /// (leak the loop object) rather than segfault on invalid thread state.
     struct LoopGuard(Option<Py<PyAny>>);
     impl Drop for LoopGuard {
         fn drop(&mut self) {
             if let Some(loop_obj) = self.0.take() {
-                Python::attach(|py| {
-                    let _ = loop_obj.call_method0(py, "close");
-                });
+                // Check that the Python interpreter is still alive.
+                // During process shutdown, Tokio's blocking thread pool may
+                // tear down threads AFTER Py_Finalize has run, making
+                // Python::attach() UB (use-after-free on global interpreter).
+                if unsafe { pyo3::ffi::Py_IsInitialized() } != 0 {
+                    Python::attach(|py| {
+                        let _ = loop_obj.call_method0(py, "close");
+                    });
+                }
             }
         }
     }
@@ -231,8 +241,14 @@ fn call_handler_with_hooks(
     // Track GIL queue: +1 before acquiring, -1 after acquiring
     crate::monitor::GIL_QUEUE_LENGTH.fetch_add(1, Relaxed);
 
+    // Passive GIL contention measurement: record the wall-clock time spent
+    // waiting to acquire the GIL. This replaces the active watchdog probe —
+    // measures real request latency instead of artificial contention.
+    let gil_wait_start = std::time::Instant::now();
+
     Python::attach(|py| {
         crate::monitor::GIL_QUEUE_LENGTH.fetch_sub(1, Relaxed);
+        crate::monitor::record_gil_wait(gil_wait_start.elapsed().as_micros() as u64);
         let hold_start = std::time::Instant::now();
 
         // FrozenRoutes: zero-cost iteration — direct Arc<RouteTable> reference.

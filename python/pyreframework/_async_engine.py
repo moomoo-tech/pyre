@@ -26,6 +26,11 @@ except ImportError:
 # Injected by Rust: HANDLER_NAMES = [{handlers_array}]
 
 
+# Timeout for async handlers — 2s before Rust's 30s gateway timeout,
+# so Python can abort cleanly instead of computing a result nobody wants.
+_HANDLER_TIMEOUT = 28
+
+
 async def _process_request(req_id, handler_idx, method, path, params, query, body_bytes, headers, client_ip):
     try:
         handler_name = HANDLER_NAMES[int(handler_idx)]
@@ -38,7 +43,9 @@ async def _process_request(req_id, handler_idx, method, path, params, query, bod
         res = handler(req)
 
         if asyncio.iscoroutine(res):
-            res = await res
+            # Bracket pattern: bound the coroutine's lifetime so cancelled/timed-out
+            # requests don't accumulate as phantom load in the event loop.
+            res = await asyncio.wait_for(res, timeout=_HANDLER_TIMEOUT)
 
         if isinstance(res, _PyreResponse):
             body = (
@@ -71,6 +78,12 @@ async def _process_request(req_id, handler_idx, method, path, params, query, bod
                 else "text/plain"
             )
             _pyre_send(WORKER_ID, req_id, 200, ct, body)
+    except asyncio.TimeoutError:
+        _pyre_send(WORKER_ID, req_id, 504, "text/plain", b"handler timeout")
+    except asyncio.CancelledError:
+        # Propagated cancellation — client disconnected or Rust future dropped.
+        # Don't send response; the oneshot receiver is already gone.
+        pass
     except Exception as e:
         _pyre_send(WORKER_ID, req_id, 500, "text/plain", str(e).encode("utf-8"))
 

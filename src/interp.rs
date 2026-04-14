@@ -201,15 +201,41 @@ unsafe extern "C" fn pyre_send_cfunc(
     };
 
     if let Some(state) = get_worker_state(worker_id as usize) {
-        if let Some(tx) = state.response_map.lock().unwrap().remove(&req_id) {
-            let resp = SubInterpResponse {
-                body,
-                status,
-                content_type: ctype,
-                headers: HashMap::new(),
-                is_json: false,
-            };
-            let _ = tx.send(Ok(resp));
+        let mut map = state.response_map.lock().unwrap();
+        if let Some(tx) = map.remove(&req_id) {
+            // Check if the receiver is still alive (client may have timed out).
+            // If closed, skip the send — the response would be discarded anyway.
+            if tx.is_closed() {
+                tracing::debug!(
+                    target: "pyre::server",
+                    req_id,
+                    worker_id,
+                    "response_map: receiver gone (client timed out), dropping result"
+                );
+            } else {
+                let resp = SubInterpResponse {
+                    body,
+                    status,
+                    content_type: ctype,
+                    headers: HashMap::new(),
+                    is_json: false,
+                };
+                let _ = tx.send(Ok(resp));
+            }
+        } else {
+            tracing::debug!(
+                target: "pyre::server",
+                req_id,
+                worker_id,
+                "response_map miss — client already timed out (504)"
+            );
+        }
+
+        // Periodic orphan sweep: when the map grows large, purge entries whose
+        // receivers have been dropped (Rust side timed out). Prevents unbounded
+        // memory growth from handlers that crash after pyre_recv but before pyre_send.
+        if map.len() > 64 {
+            map.retain(|_id, tx| !tx.is_closed());
         }
     }
 

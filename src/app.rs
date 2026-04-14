@@ -225,13 +225,15 @@ impl PyreApp {
         mode: Option<&str>,
         io_workers: Option<usize>,
     ) -> PyResult<()> {
-        // Start GIL watchdog (once, opt-in via PYRE_METRICS=1)
+        // Start RSS sampler (once, opt-in via PYRE_METRICS=1).
+        // GIL contention is now measured passively on the request path —
+        // no active watchdog thread needed (zero observer-effect overhead).
         use std::sync::Once;
-        static WATCHDOG_INIT: Once = Once::new();
-        WATCHDOG_INIT.call_once(|| {
+        static METRICS_INIT: Once = Once::new();
+        METRICS_INIT.call_once(|| {
             if std::env::var("PYRE_METRICS").unwrap_or_default() == "1" {
-                crate::monitor::spawn_gil_watchdog();
-                tracing::info!(target: "pyre::server", "GIL watchdog enabled (PYRE_METRICS=1)");
+                crate::monitor::spawn_rss_sampler();
+                tracing::info!(target: "pyre::server", "Metrics enabled (PYRE_METRICS=1): passive GIL monitor + RSS sampler");
             }
         });
 
@@ -420,6 +422,7 @@ impl PyreApp {
                 signal::ctrl_c().await.ok();
                 tracing::info!(target: "pyre::server", "Shutting down gracefully...");
                 println!("\n  Shutting down gracefully...");
+                crate::monitor::stop_rss_sampler();
                 shutdown_token.cancel();
 
                 Ok(())
@@ -593,6 +596,7 @@ impl PyreApp {
                 signal::ctrl_c().await.ok();
                 tracing::info!(target: "pyre::server", "Shutting down gracefully...");
                 println!("\n  Shutting down gracefully...");
+                crate::monitor::stop_rss_sampler();
                 shutdown_token.cancel();
 
                 Ok(())

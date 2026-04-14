@@ -2,6 +2,10 @@
 //!
 //! Handler returns a `PyreStream` object, then calls `stream.send("data")`
 //! in a loop. Each send pushes a chunk to the HTTP response body.
+//!
+//! Resource lifecycle: `close()` performs deterministic channel teardown,
+//! independent of Python GC timing. This prevents zombie TCP connections
+//! when PyreStream is held by long-lived Python references.
 
 use bytes::Bytes;
 use pyo3::prelude::*;
@@ -10,7 +14,9 @@ use tokio::sync::mpsc;
 /// Python-facing stream object. Handler calls send()/send_event()/close().
 #[pyclass(frozen)]
 pub(crate) struct PyreStream {
-    tx: mpsc::UnboundedSender<Result<Bytes, std::convert::Infallible>>,
+    // Wrapped in Option so close() can deterministically drop the Sender,
+    // decoupling channel lifetime from Python GC (Haskell bracket pattern).
+    tx: std::sync::Mutex<Option<mpsc::UnboundedSender<Result<Bytes, std::convert::Infallible>>>>,
     rx: std::sync::Mutex<Option<mpsc::UnboundedReceiver<Result<Bytes, std::convert::Infallible>>>>,
     /// Custom headers to include in the response
     #[pyo3(get)]
@@ -33,7 +39,7 @@ impl PyreStream {
     ) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         PyreStream {
-            tx,
+            tx: std::sync::Mutex::new(Some(tx)),
             rx: std::sync::Mutex::new(Some(rx)),
             content_type: content_type.unwrap_or_else(|| "text/event-stream".to_string()),
             status_code,
@@ -43,34 +49,47 @@ impl PyreStream {
 
     /// Send raw data chunk.
     fn send(&self, data: &str) -> PyResult<()> {
-        self.tx
-            .send(Ok(Bytes::from(data.to_string())))
-            .map_err(|_| pyo3::exceptions::PyConnectionError::new_err("stream closed"))
+        let tx_guard = self.tx.lock().unwrap();
+        if let Some(tx) = tx_guard.as_ref() {
+            tx.send(Ok(Bytes::from(data.to_string())))
+                .map_err(|_| pyo3::exceptions::PyConnectionError::new_err("client disconnected"))
+        } else {
+            Err(pyo3::exceptions::PyConnectionError::new_err(
+                "stream was explicitly closed",
+            ))
+        }
     }
 
     /// Send an SSE event: `event: {event}\ndata: {data}\n\n`
     #[pyo3(signature = (data, event=None, id=None))]
     fn send_event(&self, data: &str, event: Option<&str>, id: Option<&str>) -> PyResult<()> {
-        let mut msg = String::new();
+        let mut msg = String::with_capacity(data.len() + 64);
         if let Some(id) = id {
-            msg.push_str(&format!("id: {id}\n"));
+            msg.push_str("id: ");
+            msg.push_str(id);
+            msg.push('\n');
         }
         if let Some(event) = event {
-            msg.push_str(&format!("event: {event}\n"));
+            msg.push_str("event: ");
+            msg.push_str(event);
+            msg.push('\n');
         }
         for line in data.lines() {
-            msg.push_str(&format!("data: {line}\n"));
+            msg.push_str("data: ");
+            msg.push_str(line);
+            msg.push('\n');
         }
         msg.push('\n'); // End of event
         self.send(&msg)
     }
 
-    /// Close the stream (drop the sender).
+    /// Deterministic channel teardown — drops the Sender immediately,
+    /// causing the Tokio Receiver to see channel-closed and end the HTTP
+    /// response. Does not depend on Python GC timing.
     fn close(&self) {
-        // Dropping tx would close the channel, but we can't drop a field.
-        // Instead, send a special empty marker — the stream reader will just see channel closed
-        // when all senders are dropped (which happens when PyreStream is garbage collected).
-        // For explicit close, we do nothing — the channel closes when PyreStream is dropped.
+        if let Ok(mut lock) = self.tx.lock() {
+            let _ = lock.take();
+        }
     }
 }
 
