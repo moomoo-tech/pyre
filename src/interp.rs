@@ -854,13 +854,59 @@ def _attach_pyre_request_helpers(t):\n    from urllib.parse import parse_qs\n   
         headers: &HashMap<String, String>,
         client_ip: &str,
     ) -> Result<*mut ffi::PyObject, String> {
-        let py_method = py_str(method).ok_or("failed to create py_method")?;
-        let py_path = py_str(path).ok_or("failed to create py_path")?;
-        let py_params = py_str_dict_from_vec(params).ok_or("failed to create py_params")?;
-        let py_query = py_str(query).ok_or("failed to create py_query")?;
-        let py_body = py_bytes(body).ok_or("failed to create py_body")?;
-        let py_headers = py_str_dict(headers).ok_or("failed to create py_headers")?;
-        let py_client_ip = py_str(client_ip).ok_or("failed to create py_client_ip")?;
+        // ── Leak-hunt bisection of slot constructors (leak_detect only) ──
+        // PYRE_BISECT_SLOT=<name> replaces that slot's value with Py_None:
+        //   method | path | params | query | body | headers | client_ip
+        //   all    — every slot becomes None (alloc shell only)
+        //   none   — normal (default)
+        #[cfg(feature = "leak_detect")]
+        let slot_mode = std::env::var("PYRE_BISECT_SLOT").ok();
+        #[cfg(not(feature = "leak_detect"))]
+        let slot_mode: Option<String> = None;
+        let skip = |name: &str| -> bool {
+            match slot_mode.as_deref() {
+                Some("all") => true,
+                Some(s) => s == name,
+                None => false,
+            }
+        };
+        let none_ref = || unsafe { PyObjRef::from_borrowed(ffi::Py_None()).unwrap() };
+
+        let py_method = if skip("method") {
+            none_ref()
+        } else {
+            py_str(method).ok_or("failed to create py_method")?
+        };
+        let py_path = if skip("path") {
+            none_ref()
+        } else {
+            py_str(path).ok_or("failed to create py_path")?
+        };
+        let py_params = if skip("params") {
+            none_ref()
+        } else {
+            py_str_dict_from_vec(params).ok_or("failed to create py_params")?
+        };
+        let py_query = if skip("query") {
+            none_ref()
+        } else {
+            py_str(query).ok_or("failed to create py_query")?
+        };
+        let py_body = if skip("body") {
+            none_ref()
+        } else {
+            py_bytes(body).ok_or("failed to create py_body")?
+        };
+        let py_headers = if skip("headers") {
+            none_ref()
+        } else {
+            py_str_dict(headers).ok_or("failed to create py_headers")?
+        };
+        let py_client_ip = if skip("client_ip") {
+            none_ref()
+        } else {
+            py_str(client_ip).ok_or("failed to create py_client_ip")?
+        };
 
         if self.sky_request_cls.is_null() {
             return Err("_PyreRequest type not registered".to_string());
@@ -1213,11 +1259,61 @@ def _attach_pyre_request_helpers(t):\n    from urllib.parse import parse_qs\n   
         // `tp_dealloc` synchronously DECREFs all slot fields when this
         // PyObjRef drops at scope end — no SlotClearer / instance
         // recycling needed, no PEP 684 finalizer bug to work around.
-        let request = PyObjRef::from_owned(
-            self.build_request(method, path, params, query, body, headers, client_ip)?,
-        )
-        .ok_or("build_request returned null")?;
+        // ── Leak-hunt bisection hook (leak_detect feature only) ──────
+        // PYRE_BISECT values:
+        //   "skip_all"     — no build_request, no handler call; return a
+        //                    fixed SubInterpResponse. Exercises hyper +
+        //                    channel only. If this still leaks, the
+        //                    leak is NOT in the Python side at all.
+        //   "skip_handler" — build_request + dealloc runs, but handler
+        //                    is not invoked. Isolates request-object
+        //                    construction from handler/response path.
+        //   "skip_build"   — handler runs with Py_None as the request
+        //                    arg (user code will crash, but we only
+        //                    care about memory — use a handler that
+        //                    ignores its arg, e.g. `def h(req): return "ok"`).
+        // Unset / any other value: normal execution.
+        #[cfg(feature = "leak_detect")]
+        let bisect_mode = std::env::var("PYRE_BISECT").ok();
+        #[cfg(not(feature = "leak_detect"))]
+        let bisect_mode: Option<String> = None;
+
+        if bisect_mode.as_deref() == Some("skip_all") {
+            return Ok(SubInterpResponse {
+                body: b"ok".to_vec(),
+                status: 200,
+                content_type: None,
+                headers: HashMap::new(),
+                is_json: false,
+            });
+        }
+
+        let request_ref: Option<PyObjRef> = if bisect_mode.as_deref() == Some("skip_build") {
+            // Hand the handler Py_None instead of a built request.
+            Some(PyObjRef::from_borrowed(ffi::Py_None()).unwrap())
+        } else {
+            Some(
+                PyObjRef::from_owned(
+                    self.build_request(method, path, params, query, body, headers, client_ip)?,
+                )
+                .ok_or("build_request returned null")?,
+            )
+        };
+        let request = request_ref.unwrap();
         let request_ptr = request.as_ptr();
+
+        if bisect_mode.as_deref() == Some("skip_handler") {
+            // Drop request (triggers tp_dealloc) and return a fixed
+            // response — skips hooks, Vectorcall, parse_result.
+            drop(request);
+            return Ok(SubInterpResponse {
+                body: b"ok".to_vec(),
+                status: 200,
+                content_type: None,
+                headers: HashMap::new(),
+                is_json: false,
+            });
+        }
 
         // Run before_request hooks
         for hook_name in before_hook_names {

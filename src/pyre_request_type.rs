@@ -98,6 +98,19 @@ pub(crate) struct PyreRequestInner {
 
 // --- tp_dealloc ---------------------------------------------------------
 
+// --- tp_dealloc ---------------------------------------------------------
+//
+// NOTE: We deliberately do NOT set `Py_TPFLAGS_HAVE_GC` on this type,
+// even though CPython issue gh-116946 (vstinner) recommends it for
+// heap types that hold owned PyObject refs. We measured +GC → leak
+// went from 63 B/req to 313 B/req in OWN_GIL sub-interp mode. Even
+// the empty-slots shell case (all=None) went from 0 to 48 B/req,
+// indicating PyGC_Head bookkeeping itself is costly-or-leaky under
+// PEP 684. gh-116946's concern is interp-teardown cycle collection;
+// our workload has no cycles and doesn't rely on teardown cleanup
+// (each request's tp_dealloc is synchronous). So we opt out of GC
+// tracking entirely and rely on explicit Py_XDECREF + PyDict_Clear.
+
 unsafe extern "C" fn pyre_request_dealloc(obj: *mut ffi::PyObject) {
     #[cfg(feature = "leak_detect")]
     DEALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
@@ -108,9 +121,6 @@ unsafe extern "C" fn pyre_request_dealloc(obj: *mut ffi::PyObject) {
 
     #[cfg(feature = "leak_detect")]
     {
-        // Tally refcount of each slot at dealloc time.
-        // rc=1 → freed on DECREF. rc>=2 → someone else holds a ref;
-        // we drop to rc-1 and the value orphan-leaks.
         record_slot_rc(0, (*inner).method);
         record_slot_rc(1, (*inner).path);
         record_slot_rc(2, (*inner).params);
@@ -120,8 +130,19 @@ unsafe extern "C" fn pyre_request_dealloc(obj: *mut ffi::PyObject) {
         record_slot_rc(6, (*inner).client_ip);
     }
 
-    // DECREF each slot. Py_XDECREF is a no-op on NULL, so partial
-    // construction (e.g. OOM mid-alloc_and_init) is safe.
+    // For dict slots (params, headers): PyDict_Clear synchronously
+    // DECREFs every key+value under our sub-interp GIL. Measured as
+    // responsible for ~54 B/req; source reading suggests dict_dealloc
+    // *should* do the same via dictkeys_decref but empirically it
+    // doesn't fully reclaim under PEP 684. Treated as a CPython
+    // oddity worth an upstream investigation.
+    if !(*inner).params.is_null() {
+        ffi::PyDict_Clear((*inner).params);
+    }
+    if !(*inner).headers.is_null() {
+        ffi::PyDict_Clear((*inner).headers);
+    }
+
     ffi::Py_XDECREF((*inner).method);
     ffi::Py_XDECREF((*inner).path);
     ffi::Py_XDECREF((*inner).params);
@@ -130,7 +151,6 @@ unsafe extern "C" fn pyre_request_dealloc(obj: *mut ffi::PyObject) {
     ffi::Py_XDECREF((*inner).headers);
     ffi::Py_XDECREF((*inner).client_ip);
 
-    // Hand storage back to the type's allocator.
     if let Some(free) = (*tp).tp_free {
         free(obj as *mut c_void);
     } else {
@@ -331,7 +351,8 @@ pub(crate) unsafe fn register_type() -> Result<*mut ffi::PyObject, String> {
         name: TYPE_NAME.as_ptr() as *const c_char,
         basicsize: std::mem::size_of::<PyreRequestInner>() as c_int,
         itemsize: 0,
-        // Intentionally NO `Py_TPFLAGS_BASETYPE` — see module docstring.
+        // Intentionally NO Py_TPFLAGS_BASETYPE — see module docstring.
+        // Intentionally NO Py_TPFLAGS_HAVE_GC — see tp_dealloc comment.
         flags: ffi::Py_TPFLAGS_DEFAULT as u32,
         slots: slots.as_mut_ptr(),
     }));
