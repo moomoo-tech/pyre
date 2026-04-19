@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 
 use matchit::Router;
 use pyo3::ffi;
@@ -29,11 +29,18 @@ struct WorkerState {
 }
 
 /// Global registry of worker states, indexed by worker_id.
-/// Uses Vec for O(1) access (no lock on hot path after init).
-static WORKER_STATES: OnceLock<Vec<Arc<WorkerState>>> = OnceLock::new();
+///
+/// Must support RE-INSTALLATION: a test suite or a hot-reload path may
+/// call `InterpreterPool::new()` more than once per process lifetime.
+/// `OnceLock` would silently fail the second `set()`, leaving the
+/// second pool with STALE channels from the first pool → permanent
+/// deadlock on recv. Use `RwLock<Vec>` instead: read lock on the hot
+/// path (~5 ns uncontended), write lock only at pool init.
+static WORKER_STATES: std::sync::RwLock<Vec<Arc<WorkerState>>> =
+    std::sync::RwLock::new(Vec::new());
 
 fn get_worker_state(worker_id: usize) -> Option<Arc<WorkerState>> {
-    WORKER_STATES.get().and_then(|v| v.get(worker_id).cloned())
+    WORKER_STATES.read().ok().and_then(|v| v.get(worker_id).cloned())
 }
 
 // ---------------------------------------------------------------------------
@@ -1607,7 +1614,13 @@ impl InterpreterPool {
                     next_req_id: AtomicU64::new(0),
                 }));
             }
-            let _ = WORKER_STATES.set(states);
+            // Overwrite rather than .set() — this pool may not be the
+            // first one created in the process (tests / hot-reload).
+            // Stale states from a prior pool would cause workers to
+            // recv() on closed channels forever.
+            if let Ok(mut w) = WORKER_STATES.write() {
+                *w = states;
+            }
         }
 
         let logging_flag = Arc::new(AtomicBool::new(request_logging));
@@ -1926,5 +1939,87 @@ fn worker_thread_loop_async(
         // Cleanup
         ffi::Py_EndInterpreter(ffi::PyThreadState_Get());
         worker.tstate = std::ptr::null_mut();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    /// Helper: mint a fresh `Arc<WorkerState>` backed by a dedicated
+    /// crossbeam channel so the test has observable state (the rx
+    /// handle identifies which install the state came from).
+    fn mint_state() -> (Arc<WorkerState>, crossbeam_channel::Sender<WorkRequest>) {
+        let (tx, rx) = crossbeam_channel::unbounded::<WorkRequest>();
+        let st = Arc::new(WorkerState {
+            rx,
+            response_map: Mutex::new(HashMap::new()),
+            next_req_id: AtomicU64::new(0),
+        });
+        (st, tx)
+    }
+
+    /// Regression for the advisor-flagged hot-reload / test-isolation
+    /// bug: the original `OnceLock<Vec<Arc<WorkerState>>>` silently
+    /// rejected a second `.set()`, leaving any subsequent
+    /// `InterpreterPool::new()` operating on stale channels from the
+    /// prior pool — a permanent deadlock on async recv.
+    ///
+    /// With the fix (`RwLock<Vec<Arc<WorkerState>>>`) a second install
+    /// overwrites the first. This test verifies:
+    ///   1. First install makes states visible via `get_worker_state`.
+    ///   2. Second install REPLACES them — the new Arc identity wins.
+    ///   3. The old states are still drop-safe (refcount goes to
+    ///      whatever test-scope clones we held; no double-free).
+    #[test]
+    fn worker_states_can_be_reinstalled() {
+        // --- Install #1 --------------------------------------------------
+        let (s0_first, _tx0_first) = mint_state();
+        let (s1_first, _tx1_first) = mint_state();
+        {
+            let mut w = WORKER_STATES.write().unwrap();
+            *w = vec![s0_first.clone(), s1_first.clone()];
+        }
+
+        let got0 = get_worker_state(0).expect("install #1 slot 0 missing");
+        let got1 = get_worker_state(1).expect("install #1 slot 1 missing");
+        assert!(Arc::ptr_eq(&got0, &s0_first));
+        assert!(Arc::ptr_eq(&got1, &s1_first));
+        drop(got0);
+        drop(got1);
+
+        // --- Install #2 (simulating a second app.run() / hot reload) -----
+        let (s0_second, _tx0_second) = mint_state();
+        let (s1_second, _tx1_second) = mint_state();
+        let (s2_second, _tx2_second) = mint_state();
+        {
+            let mut w = WORKER_STATES.write().unwrap();
+            *w = vec![s0_second.clone(), s1_second.clone(), s2_second.clone()];
+        }
+
+        // New identities are visible — the old ones are gone from the
+        // registry (though still alive via the test-local `s0_first`
+        // etc. clones, which is exactly the invariant we want).
+        let got0 = get_worker_state(0).expect("install #2 slot 0 missing");
+        let got1 = get_worker_state(1).expect("install #2 slot 1 missing");
+        let got2 = get_worker_state(2).expect("install #2 slot 2 missing");
+        assert!(Arc::ptr_eq(&got0, &s0_second), "slot 0 still points at pool #1 — OnceLock-style silent failure regression");
+        assert!(Arc::ptr_eq(&got1, &s1_second));
+        assert!(Arc::ptr_eq(&got2, &s2_second));
+        assert!(!Arc::ptr_eq(&got0, &s0_first));
+        assert!(!Arc::ptr_eq(&got1, &s1_first));
+
+        // Out-of-range lookup returns None.
+        assert!(get_worker_state(99).is_none());
+
+        // Leave the registry empty for the next test in case of global
+        // state bleed (RwLock is a static).
+        let mut w = WORKER_STATES.write().unwrap();
+        w.clear();
     }
 }

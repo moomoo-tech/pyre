@@ -74,6 +74,14 @@ fn resolve_coroutine(py: Python<'_>, obj: Py<PyAny>) -> Result<Py<PyAny>, String
                     Python::attach(|py| {
                         let _ = loop_obj.call_method0(py, "close");
                     });
+                    // loop_obj's Py<PyAny>::Drop fires here under a live
+                    // interp → benign refcount decrement.
+                } else {
+                    // Interp is gone. Py<PyAny>::Drop would try to
+                    // Py_DECREF on a finalized interpreter → segfault.
+                    // Physically leak the pointer — at this point the
+                    // whole process is exiting, so the OS reclaims it.
+                    std::mem::forget(loop_obj);
                 }
             }
         }

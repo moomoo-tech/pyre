@@ -442,6 +442,7 @@ impl PyreApp {
                                     setup_tcp_quickack(&stream);
                                     let io = TokioIo::new(stream);
 
+                                    let conn_token = token.clone();
                                     tokio::spawn(async move {
                                         let svc = service_fn(move |req: Request<Incoming>| {
                                             let routes = Arc::clone(&routes);
@@ -454,16 +455,32 @@ impl PyreApp {
                                                 }
                                             }
                                         });
-                                        if let Err(e) = AutoBuilder::new(hyper_util::rt::TokioExecutor::new())
-                                            .serve_connection_with_upgrades(io, svc)
-                                            .await
-                                        {
-                                            let msg = e.to_string();
-                                            if !msg.contains("connection closed")
-                                                && !msg.contains("reset by peer")
-                                                && !msg.contains("broken pipe")
-                                            {
-                                                tracing::warn!(target: "pyre::server", error = %e, "Connection error");
+                                        let builder = AutoBuilder::new(hyper_util::rt::TokioExecutor::new());
+                                        let conn = builder.serve_connection_with_upgrades(io, svc);
+                                        tokio::pin!(conn);
+                                        let mut graceful_sent = false;
+                                        loop {
+                                            tokio::select! {
+                                                res = conn.as_mut() => {
+                                                    if let Err(e) = res {
+                                                        let msg = e.to_string();
+                                                        if !msg.contains("connection closed")
+                                                            && !msg.contains("reset by peer")
+                                                            && !msg.contains("broken pipe")
+                                                        {
+                                                            tracing::warn!(target: "pyre::server", error = %e, "Connection error");
+                                                        }
+                                                    }
+                                                    break;
+                                                }
+                                                _ = conn_token.cancelled(), if !graceful_sent => {
+                                                    // Shutdown: tell hyper to stop accepting
+                                                    // new requests on this connection and drain
+                                                    // in-flight ones. Keep driving the
+                                                    // connection future until it completes.
+                                                    conn.as_mut().graceful_shutdown();
+                                                    graceful_sent = true;
+                                                }
                                             }
                                         }
                                     });
@@ -618,6 +635,7 @@ impl PyreApp {
                                     setup_tcp_quickack(&stream);
                                     let io = TokioIo::new(stream);
 
+                                    let conn_token = token.clone();
                                     tokio::spawn(async move {
                                         let svc = service_fn(move |req: Request<Incoming>| {
                                             let pool = Arc::clone(&pool);
@@ -631,16 +649,28 @@ impl PyreApp {
                                                 }
                                             }
                                         });
-                                        if let Err(e) = AutoBuilder::new(hyper_util::rt::TokioExecutor::new())
-                                            .serve_connection_with_upgrades(io, svc)
-                                            .await
-                                        {
-                                            let msg = e.to_string();
-                                            if !msg.contains("connection closed")
-                                                && !msg.contains("reset by peer")
-                                                && !msg.contains("broken pipe")
-                                            {
-                                                tracing::warn!(target: "pyre::server", error = %e, "Connection error");
+                                        let builder = AutoBuilder::new(hyper_util::rt::TokioExecutor::new());
+                                        let conn = builder.serve_connection_with_upgrades(io, svc);
+                                        tokio::pin!(conn);
+                                        let mut graceful_sent = false;
+                                        loop {
+                                            tokio::select! {
+                                                res = conn.as_mut() => {
+                                                    if let Err(e) = res {
+                                                        let msg = e.to_string();
+                                                        if !msg.contains("connection closed")
+                                                            && !msg.contains("reset by peer")
+                                                            && !msg.contains("broken pipe")
+                                                        {
+                                                            tracing::warn!(target: "pyre::server", error = %e, "Connection error");
+                                                        }
+                                                    }
+                                                    break;
+                                                }
+                                                _ = conn_token.cancelled(), if !graceful_sent => {
+                                                    conn.as_mut().graceful_shutdown();
+                                                    graceful_sent = true;
+                                                }
                                             }
                                         }
                                     });
