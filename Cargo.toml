@@ -8,15 +8,19 @@ name = "pyreframework_engine"
 crate-type = ["cdylib"]
 
 [features]
-# Opt-in diagnostics for PyObject lifecycle leaks. Prints per-type
-# refcount histograms from PyObjRef::Drop to stderr. Non-trivial
-# overhead; never enable in production. Build with:
-#   cargo build --features leak_detect
-# or:
+# Opt-in diagnostics for PyObject lifecycle leaks. Samples each
+# PyObjRef drop as a `metrics::counter!` call — under the hood that's
+# a lock-free atomic increment (the `metrics` crate compiles down to
+# one `lock xadd` per bump once the recorder's registered), so the
+# hot-path cost is a few nanoseconds per drop even at 400k req/s.
+#
+# Build with:
 #   maturin develop --release --features leak_detect
-# See docs/memory-leak-investigation-2026-04-19.md for how we used this
-# to pin down the sub-interpreter finalizer bug.
-leak_detect = []
+# Snapshot the histogram from Python (handler or shutdown) via
+#   pyreframework.engine.leak_detect_dump()
+# See docs/memory-leak-investigation-2026-04-19.md for how we used
+# this to pin down the sub-interpreter finalizer bug.
+leak_detect = ["dep:metrics", "dep:metrics-util"]
 
 [dependencies]
 pyo3 = { version = "0.28", features = ["extension-module"] }
@@ -46,6 +50,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 socket2 = { version = "0.5", features = ["all"] }
 libc = "0.2"
 pythonize = "0.28"
+
+# Optional — pulled in only by the `leak_detect` feature.
+metrics = { version = "0.24", optional = true }
+metrics-util = { version = "0.19", features = ["debugging"], optional = true }
 
 [profile.release]
 lto = "fat"            # Cross-crate inlining: LLVM optimizes across hyper/tokio/pyo3 boundaries

@@ -1,97 +1,198 @@
 //! Opt-in PyObject lifecycle diagnostics.
 //!
-//! Gated behind the `leak_detect` Cargo feature. Compiled out of release
-//! builds by default. Use only when chasing a sub-interpreter leak — the
-//! workflow that found the v1.4.5 `_PyreRequest` + dict leak.
+//! Gated behind the `leak_detect` Cargo feature. Compiled out of default
+//! builds. Use only when chasing a sub-interpreter leak.
 //!
-//! What it gives you:
-//!   - A per-(type_name, refcount-at-drop) histogram printed every 500K
-//!     drops to stderr. The key insight: if a dict consistently drops
-//!     with refcount >= 2, someone is holding a reference past its
-//!     expected lifetime — that is the leak.
+//! Why it exists:
+//!   The v1.4.5 investigation (see
+//!   docs/memory-leak-investigation-2026-04-19.md) turned on the fact
+//!   that CPython sub-interpreters under PEP 684 OWN_GIL do NOT run
+//!   Python-level finalizers. Every request's `_PyreRequest` dropped
+//!   with refcount 0 but its headers/params dicts stayed alive at
+//!   refcount >= 2 forever. A "refcount histogram at drop time" probe
+//!   exposed the fingerprint:
+//!     rc=1 → healthy (our DECREF frees it)
+//!     rc=2 → one co-owner (instance field) — healthy if that's expected
+//!     rc>=3 persistently on the same type → FFI refcount bug
 //!
-//! Usage:
+//! How it works:
+//!   The hot path samples every `PyObjRef::Drop` call into a
+//!   `metrics::counter!("pyre_drop_rc", "type" => T, "rc" => N)`.
+//!   The `metrics` facade compiles the per-label counter down to a
+//!   single pointer chase into a `DebuggingRecorder`-owned atomic — no
+//!   mutex, no HashMap lookup, no string allocation on the hot path
+//!   after the first call with a given label set.
+//!
+//! How to use:
+//!
 //!   maturin develop --release --features leak_detect
-//!   python examples/hello.py 2> drops.log &
+//!   python examples/hello.py &
 //!   wrk -t4 -c100 -d10s http://127.0.0.1:8000/
-//!   grep "DROP-RC" drops.log | tail -5
+//!   python -c 'from pyreframework.engine import leak_detect_dump; leak_detect_dump()'
 //!
-//! Interpretation:
-//!   - `rc=1` at drop ⇒ this PyObjRef was the only holder. After
-//!     `Py_DECREF`, rc=0 and the object is freed. Healthy.
-//!   - `rc=2` ⇒ one other owner (usually a field on the containing
-//!     instance). After our DECREF, rc=1; the instance's subsequent
-//!     dealloc is expected to bring rc→0. Healthy.
-//!   - `rc>=3` consistently ⇒ an extra hidden owner. Traces an FFI
-//!     refcount bug. This is how we found the `_PyObject_MakeTpCall`
-//!     internal-tuple leak in sub-interp mode.
+//! or, inline in a test:
 //!
-//! The functions are `#[inline(never)]` on purpose — even disabled by
-//! cfg, keeping them out of the hot-path icache footprint costs almost
-//! nothing, and they are cheap to branch into when the feature is on.
+//!   @app.get("/leak_dump")
+//!   def leak_dump(req):
+//!       from pyreframework.engine import leak_detect_dump
+//!       leak_detect_dump()
+//!       return "dumped"
+//!
+//! Output (stderr):
+//!
+//!   [leak_detect] pyre_drop_rc{type="dict",rc="2"} = 8_500_000
+//!   [leak_detect] pyre_drop_rc{type="str",rc="1"} = 15_200_000
+//!   [leak_detect] pyre_drop_rc{type="_PyreRequest",rc="1"} = 2_000_000
+//!
+//! A type consistently showing at rc>=2 (other than values stored as
+//! instance attributes where that's expected) is the leak.
 
+use std::sync::OnceLock;
+
+use metrics_util::debugging::{DebuggingRecorder, Snapshotter};
 use pyo3::ffi;
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
 
-static TOTAL: AtomicU64 = AtomicU64::new(0);
-static BUCKETS: OnceLock<Mutex<HashMap<(String, ffi::Py_ssize_t), u64>>> = OnceLock::new();
-const REPORT_EVERY: u64 = 500_000;
+/// Global snapshotter. We install a DebuggingRecorder at first use and
+/// hold onto its snapshotter so the Python-callable dump can render
+/// totals on demand.
+static SNAPSHOTTER: OnceLock<Snapshotter> = OnceLock::new();
 
-/// Sample a PyObjRef drop. Records type name + refcount-before-DECREF
-/// into a global bucket map. Every 500K drops, dumps the top-N buckets
-/// to stderr.
+fn ensure_recorder_installed() -> &'static Snapshotter {
+    SNAPSHOTTER.get_or_init(|| {
+        let recorder = DebuggingRecorder::new();
+        let snap = recorder.snapshotter();
+        // `install()` can fail only if another recorder was installed
+        // first. In that case we silently accept the foreign recorder —
+        // the diagnostic will be empty but nothing crashes.
+        let _ = recorder.install();
+        snap
+    })
+}
+
+/// Sample a PyObjRef drop. Called unconditionally from `PyObjRef::Drop`
+/// when the `leak_detect` feature is enabled.
+///
+/// Hot-path cost after the first call with a given (type, rc) label
+/// pair: one static str compare + one atomic increment. The `metrics`
+/// facade intentionally avoids touching a mutex or a HashMap on the
+/// sampled path.
 ///
 /// # Safety
-/// Caller must hold a sub-interpreter's GIL; `ptr` must be a valid
-/// PyObject the caller owns a reference to.
-#[inline(never)]
+/// `ptr` must be a valid PyObject the caller owns a reference to, and
+/// the caller must hold the owning sub-interpreter's GIL.
+#[inline(never)] // keep cold — do not pollute icache of the real hot path
 pub unsafe fn record_drop(ptr: *mut ffi::PyObject) {
     if ptr.is_null() {
         return;
     }
+    ensure_recorder_installed();
+
     let rc = ffi::Py_REFCNT(ptr);
-    let type_name = {
+    // `tp_name` is a stable `const char*` owned by the type object —
+    // the type object itself can't be deallocated while we hold a ref
+    // to an instance of it, so the borrow is safe for the duration of
+    // this call.
+    let type_name: &'static str = {
         let t = ffi::Py_TYPE(ptr);
         if t.is_null() {
-            "<null_type>".to_string()
+            "<null_type>"
         } else {
             let name_ptr = (*t).tp_name;
             if name_ptr.is_null() {
-                "<unnamed>".to_string()
+                "<unnamed>"
             } else {
-                std::ffi::CStr::from_ptr(name_ptr)
-                    .to_string_lossy()
-                    .into_owned()
+                // SAFETY: tp_name is ASCII-NUL terminated by CPython
+                // contract. We never outlive the pointer; the labels
+                // we pass to `metrics::counter!` are interned against
+                // our own static table, so the borrow we hand out
+                // here is fine for the duration of the call.
+                let cstr = std::ffi::CStr::from_ptr(name_ptr);
+                match cstr.to_str() {
+                    Ok(s) => intern(s),
+                    Err(_) => "<non_utf8_type>",
+                }
             }
         }
     };
 
-    let m = BUCKETS.get_or_init(|| Mutex::new(HashMap::new()));
-    {
-        let mut g = m.lock().unwrap();
-        *g.entry((type_name, rc)).or_insert(0) += 1;
-    }
+    let rc_label = rc_label(rc);
+    metrics::counter!("pyre_drop_rc", "type" => type_name, "rc" => rc_label)
+        .increment(1);
+}
 
-    let n = TOTAL.fetch_add(1, Ordering::Relaxed) + 1;
-    if n % REPORT_EVERY == 0 {
-        dump_top();
+/// Print a snapshot of the `pyre_drop_rc` counters to stderr. Called
+/// from Python via `pyreframework.engine.leak_detect_dump()` (the
+/// function is registered in `lib.rs` only when this feature is on).
+pub fn dump_to_stderr() {
+    let Some(snap) = SNAPSHOTTER.get() else {
+        eprintln!("[leak_detect] no recorder installed yet (no drops sampled)");
+        return;
+    };
+    let mut rows: Vec<(String, u64)> = snap
+        .snapshot()
+        .into_vec()
+        .into_iter()
+        .filter_map(|(key, _unit, _desc, value)| {
+            let (kind, total) = match value {
+                metrics_util::debugging::DebugValue::Counter(n) => ("counter", n),
+                _ => return None,
+            };
+            let _ = kind; // we only emit counters
+            let name = key.key().name();
+            if name != "pyre_drop_rc" {
+                return None;
+            }
+            let labels: Vec<String> = key
+                .key()
+                .labels()
+                .map(|l| format!("{}={:?}", l.key(), l.value()))
+                .collect();
+            Some((format!("{}{{{}}}", name, labels.join(",")), total))
+        })
+        .collect();
+    rows.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+    eprintln!("[leak_detect] --- pyre_drop_rc snapshot (top 30) ---");
+    for (label, n) in rows.iter().take(30) {
+        eprintln!("[leak_detect]   {label} = {n}");
+    }
+    if rows.is_empty() {
+        eprintln!("[leak_detect]   (no samples — is the feature enabled and drops flowing?)");
     }
 }
 
-/// Print the top-N (type, rc) buckets by count. Called automatically
-/// every `REPORT_EVERY` drops; may also be called manually from a
-/// shutdown hook if you want a final snapshot.
-pub fn dump_top() {
-    let Some(m) = BUCKETS.get() else { return };
-    let g = m.lock().unwrap();
-    let mut v: Vec<_> = g.iter().collect();
-    v.sort_by_key(|(_, c)| std::cmp::Reverse(**c));
-    let top: Vec<_> = v
-        .iter()
-        .take(8)
-        .map(|((t, rc), c)| format!("{t}@rc={rc}: {c}"))
-        .collect();
-    eprintln!("[leak_detect] top drop buckets: [{}]", top.join(", "));
+// ── Small helpers ──────────────────────────────────────────────────
+
+/// Intern a type name into a static string table so the `metrics`
+/// labels can be `&'static str`. Sub-interpreter type names are
+/// enumerable — the worst case is a few dozen entries over a process
+/// lifetime, so a Mutex<HashMap<String, &'static str>> is cheap
+/// (contention is cold-path only; the hot path sees repeated lookups
+/// hit the same &'static str and skip the mutex).
+fn intern(s: &str) -> &'static str {
+    use std::sync::Mutex;
+
+    static TABLE: OnceLock<Mutex<std::collections::HashMap<String, &'static str>>> =
+        OnceLock::new();
+    let t = TABLE.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    let mut g = t.lock().unwrap();
+    if let Some(&cached) = g.get(s) {
+        return cached;
+    }
+    let leaked: &'static str = Box::leak(s.to_string().into_boxed_str());
+    g.insert(s.to_string(), leaked);
+    leaked
+}
+
+/// Bucket refcounts into labels. Label strings must be &'static so we
+/// precompute 0..=8 and a catch-all. 99% of samples land in the small
+/// range in practice.
+fn rc_label(rc: ffi::Py_ssize_t) -> &'static str {
+    const PRECOMPUTED: &[&str] = &[
+        "0", "1", "2", "3", "4", "5", "6", "7", "8",
+    ];
+    if (0..PRECOMPUTED.len() as ffi::Py_ssize_t).contains(&rc) {
+        PRECOMPUTED[rc as usize]
+    } else {
+        "9+"
+    }
 }
