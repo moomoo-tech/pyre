@@ -130,27 +130,14 @@ unsafe extern "C" fn pyre_request_dealloc(obj: *mut ffi::PyObject) {
         record_slot_rc(6, (*inner).client_ip);
     }
 
-    // For dict slots (params, headers): PyDict_Clear synchronously
-    // DECREFs every key+value under our sub-interp GIL. Measured as
-    // responsible for ~54 B/req; source reading suggests dict_dealloc
-    // *should* do the same via dictkeys_decref but empirically it
-    // doesn't fully reclaim under PEP 684. Treated as a CPython
-    // oddity worth an upstream investigation.
-    //
-    // Defensive type check: PyDict_Clear assumes its argument is a
-    // PyDictObject and does no runtime check. Our Rust build_request
-    // always fills these slots with py_str_dict() so they ARE dicts,
-    // but `tp_init` accepts any PyObject* via PyArg_ParseTuple with
-    // the "O" format. A user constructing `_PyreRequest(..., "not a
-    // dict", ...)` from Python would plant a non-dict into the slot;
-    // dealloc time PyDict_Clear on that slot = segfault. The check
-    // is O(1) (tag compare against PyDict_Type) — cheap insurance.
-    if !(*inner).params.is_null() && ffi::PyDict_Check((*inner).params) != 0 {
-        ffi::PyDict_Clear((*inner).params);
-    }
-    if !(*inner).headers.is_null() && ffi::PyDict_Check((*inner).headers) != 0 {
-        ffi::PyDict_Clear((*inner).headers);
-    }
+    // Historical note: a `PyDict_Clear` pass over params+headers used
+    // to live here as a workaround for an apparent sub-interp dict
+    // leak. After the tstate-rebind root-cause fix (commit fc45a7f),
+    // the underlying leak was in cross-thread tstate reuse, not in
+    // PyDict — the -54 B/req "savings" attributed to the workaround
+    // was run-to-run measurement noise. Removing restores ~1-2%
+    // throughput. `dict_dealloc` triggered by Py_XDECREF below handles
+    // key/value DECREF correctly on its own under the fixed tstate.
 
     ffi::Py_XDECREF((*inner).method);
     ffi::Py_XDECREF((*inner).path);

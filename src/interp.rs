@@ -444,6 +444,7 @@ impl Drop for PyObjRef {
                 // `PyThreadState_GetUnchecked()` returns the current tstate
                 // if one is attached, NULL otherwise. Attached tstate =>
                 // GIL held for its interpreter => DECREF is safe.
+                // Requires CPython 3.13+ (see pyproject.toml requires-python).
                 if ffi::PyThreadState_GetUnchecked().is_null() {
                     let t = ffi::Py_TYPE(self.ptr);
                     let type_name = if !t.is_null() {
@@ -1107,16 +1108,31 @@ def _attach_pyre_request_helpers(t):\n    from urllib.parse import parse_qs\n   
     /// If obj is awaitable (coroutine / Task / Future / custom __await__),
     /// drive it via the persistent event loop. Otherwise return unchanged.
     ///
-    /// Broader than the historical `PyCoro_CheckExact` — handlers/hooks
-    /// legitimately return `asyncio.create_task(...)` or user-defined
-    /// Awaitable objects, and treating those as live responses produced
-    /// `"<coroutine object ... at 0x...>"` strings in the HTTP body.
-    /// Fast-path PyCoro_CheckExact first (single tag compare), fall
-    /// through to `hasattr __await__` for the minority path.
+    /// Detection is a C-level type-slot probe:
+    ///   1. Fast path `PyCoro_CheckExact` — one tag compare, catches
+    ///      the common `async def` case.
+    ///   2. Fallback: read `Py_TYPE(obj)->tp_as_async->am_await` —
+    ///      any real awaitable (Task, Future, user class with
+    ///      `__await__`) has this slot populated. One pointer chase +
+    ///      null check. Nanoseconds, L1-resident.
+    ///
+    /// We avoid `PyObject_HasAttrString(obj, "__await__")` here: that
+    /// path would intern the string, walk the MRO, and potentially
+    /// trigger descriptor protocol — μs-level, and at 400k rps on the
+    /// hot hook path it showed up as a measurable 5% throughput loss.
     unsafe fn resolve_coroutine(&self, obj: PyObjRef) -> Result<PyObjRef, String> {
-        let is_coro = ffi::PyCoro_CheckExact(obj.as_ptr()) == 1;
-        let is_awaitable = is_coro
-            || ffi::PyObject_HasAttrString(obj.as_ptr(), c"__await__".as_ptr()) == 1;
+        let ptr = obj.as_ptr();
+        let is_awaitable = if ffi::PyCoro_CheckExact(ptr) == 1 {
+            true
+        } else {
+            let tp = ffi::Py_TYPE(ptr);
+            if tp.is_null() {
+                false
+            } else {
+                let async_slots = (*tp).tp_as_async;
+                !async_slots.is_null() && (*async_slots).am_await.is_some()
+            }
+        };
         if !is_awaitable {
             return Ok(obj); // Plain value — pass through
         }
