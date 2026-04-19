@@ -221,6 +221,38 @@ def _hammer(n: int, path: str = "/") -> None:
         urllib.request.urlopen(url, timeout=2).read()
 
 
+def _hammer_concurrent(duration_sec: float, workers: int = 16, path: str = "/") -> int:
+    """Fire requests from `workers` threads for `duration_sec` wall-clock
+    seconds. Returns the total completed request count.
+
+    Used by the tstate-rebind regression test to generate the concurrent
+    attach/detach pattern that exposes the leak (serial load doesn't).
+    """
+    import threading
+    url = f"http://{HOST}:{PORT}{path}"
+    stop_at = time.monotonic() + duration_sec
+    counts = [0] * workers
+
+    def run(idx: int) -> None:
+        c = 0
+        while time.monotonic() < stop_at:
+            try:
+                urllib.request.urlopen(url, timeout=2).read()
+                c += 1
+            except Exception:
+                # Network hiccup; just loop. A regression-sized leak still
+                # shows up in RSS regardless of a few dropped requests.
+                pass
+        counts[idx] = c
+
+    threads = [threading.Thread(target=run, args=(i,), daemon=True) for i in range(workers)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=duration_sec + 10)
+    return sum(counts)
+
+
 # ─────────────────────────────────────────────────────────────────
 # Yesterday's v1.4.5 security / correctness
 # ─────────────────────────────────────────────────────────────────
@@ -408,4 +440,70 @@ def test_rss_growth_per_request_is_bounded(server):
         f"RSS grew {delta_kb} KB over 5000 requests — "
         f"{per_req_bytes:.0f} B/request. Expected < 200 B/req. "
         f"Any increase beyond this is a regression."
+    )
+
+
+def test_sustained_concurrent_load_no_leak(server):
+    """Regression guard for `rebind_tstate_to_current_thread` (commit fc45a7f).
+
+    The v1.4.5 root-cause leak only showed up under *concurrent* attach/
+    detach of a sub-interp tstate from multiple OS threads. A serial
+    hammer (like `test_rss_growth_per_request_is_bounded` above) doesn't
+    exercise the pathway — we need real concurrent clients hitting the
+    sub-interp worker pool at the same time.
+
+    Before the fix: ~130 B/req at ~50k rps → ~6.5 MB/s linear growth.
+    A 12-second soak would leak ~80 MB.
+
+    After the fix: <1 B/req (measured 0.057 B/req at 410k rps sustained
+    production benchmark). A 12-second soak shows <2 MB growth, the
+    noise floor of /proc/self/status VmRSS sampling.
+
+    Threshold: 15 MB. Chosen so that:
+      - A full regression of the tstate fix trips it in a few seconds
+        (80 MB expected growth vs 15 MB threshold).
+      - A 50% regression (half the leak bleeding through) still trips
+        it (~40 MB vs 15 MB).
+      - Normal allocator noise and legit working-set fill stays under.
+
+    If this test fails:
+      - First check `rebind_tstate_to_current_thread` is still called
+        at the top of both worker_thread_loop and worker_thread_loop_async
+        in src/interp.rs.
+      - Then run /tmp/pep684_repro/repro_threadstate_new.c to confirm
+        the pure-C reproducer still shows 0 B/iter on the FRESH variant.
+    """
+    # Warm up so PyMalloc arenas reach working-set size before we sample.
+    # Without warmup, the first few seconds of hammering will legitimately
+    # grow RSS as arenas fill; we'd mistake that for a leak.
+    _hammer_concurrent(duration_sec=3.0, workers=8)
+
+    rss_before = _get("/rss_kb")["rss_kb"]
+
+    # 12 s of concurrent load. On a quiet test machine this drives
+    # 40k-100k rps depending on CPU. Enough to amplify any per-request
+    # leak to a measurable RSS delta.
+    completed = _hammer_concurrent(duration_sec=12.0, workers=16)
+
+    # Let any pending allocations settle.
+    time.sleep(0.5)
+    rss_after = _get("/rss_kb")["rss_kb"]
+
+    delta_kb = rss_after - rss_before
+    delta_mb = delta_kb / 1024.0
+    # Protect against the edge case where load generation failed
+    # entirely — we want a real signal, not a trivially-passing test.
+    assert completed > 1000, (
+        f"load generation too weak — only {completed} requests completed. "
+        f"Check that the test fixture server is healthy."
+    )
+
+    # Fail loud if the leak regresses.
+    assert delta_mb < 15.0, (
+        f"RSS grew {delta_mb:.1f} MB during a 12 s concurrent soak "
+        f"({completed} requests, ~{completed // 12} rps). "
+        f"Expected < 15 MB. This almost certainly means the "
+        f"rebind_tstate_to_current_thread fix has regressed — see "
+        f"src/interp.rs::rebind_tstate_to_current_thread and the test "
+        f"docstring for diagnosis steps."
     )
