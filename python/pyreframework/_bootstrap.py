@@ -48,7 +48,13 @@ class _PyreRustHandler(_logging.Handler):
                 self._worker_id,
             )
         except Exception:
-            pass  # Never crash business logic due to logging
+            # Never crash business logic due to logging. `handleError` is
+            # Python's own "I tried to log and it blew up" hook — it
+            # respects `logging.raiseExceptions` (False in production) and
+            # writes a diagnostic to sys.stderr with the failing record,
+            # which `pass` silently discarded. Upstream handlers on every
+            # stdlib logging class use this exact pattern.
+            self.handleError(record)
 
 _root = _logging.getLogger()
 _root.handlers.clear()

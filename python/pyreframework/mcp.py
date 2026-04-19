@@ -29,13 +29,28 @@ from __future__ import annotations
 
 import inspect
 import json
+import typing
 from typing import Any, Callable, Optional
 
 
 def _extract_schema(fn: Callable) -> dict:
     """Auto-generate JSON schema from function signature."""
     sig = inspect.signature(fn)
-    hints = fn.__annotations__ if hasattr(fn, "__annotations__") else {}
+    # NOTE: cannot use `fn.__annotations__` directly — this module (and any
+    # user module handling mcp.tool) commonly has `from __future__ import
+    # annotations`, which stores annotations as *strings* (`'int'`). A
+    # lookup keyed by the `int` type object then silently misses and every
+    # argument falls back to "string", breaking the tool schema. Use
+    # typing.get_type_hints to evaluate the strings into real type objects.
+    try:
+        hints = typing.get_type_hints(fn)
+    except Exception:
+        # A reference in the annotation may not resolve in the caller's
+        # scope (forward refs to runtime-only types, TYPE_CHECKING imports).
+        # Fall back to raw annotations — the schema degrades to "string"
+        # everywhere, which is the same behaviour as before this fix and
+        # is at least not a hard crash during registration.
+        hints = getattr(fn, "__annotations__", {})
     properties = {}
     required = []
 

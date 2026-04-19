@@ -11,13 +11,22 @@ use bytes::Bytes;
 use pyo3::prelude::*;
 use tokio::sync::mpsc;
 
+/// Upper bound on buffered stream chunks before `send()` rejects.
+///
+/// Previously the channel was unbounded — a slow client plus a fast
+/// producer would buffer forever and OOM the process. Bounded backs
+/// that pressure up to the caller, who can slow down, skip, or bail.
+const STREAM_CHANNEL_CAP: usize = 1024;
+
+type StreamItem = Result<Bytes, std::convert::Infallible>;
+
 /// Python-facing stream object. Handler calls send()/send_event()/close().
 #[pyclass(frozen)]
 pub(crate) struct PyreStream {
     // Wrapped in Option so close() can deterministically drop the Sender,
     // decoupling channel lifetime from Python GC (Haskell bracket pattern).
-    tx: std::sync::Mutex<Option<mpsc::UnboundedSender<Result<Bytes, std::convert::Infallible>>>>,
-    rx: std::sync::Mutex<Option<mpsc::UnboundedReceiver<Result<Bytes, std::convert::Infallible>>>>,
+    tx: std::sync::Mutex<Option<mpsc::Sender<StreamItem>>>,
+    rx: std::sync::Mutex<Option<mpsc::Receiver<StreamItem>>>,
     /// Custom headers to include in the response
     #[pyo3(get)]
     pub(crate) content_type: String,
@@ -37,7 +46,7 @@ impl PyreStream {
         status_code: u16,
         headers: Option<std::collections::HashMap<String, String>>,
     ) -> Self {
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel(STREAM_CHANNEL_CAP);
         PyreStream {
             tx: std::sync::Mutex::new(Some(tx)),
             rx: std::sync::Mutex::new(Some(rx)),
@@ -47,16 +56,25 @@ impl PyreStream {
         }
     }
 
-    /// Send raw data chunk.
+    /// Send raw data chunk. Returns BlockingIOError when the channel is
+    /// full (slow client); the caller should back off before retrying.
+    /// Uses try_send to preserve sync semantics — blocking on a Tokio
+    /// mpsc.send() from the Python handler thread would require async.
     fn send(&self, data: &str) -> PyResult<()> {
         let tx_guard = self.tx.lock().unwrap();
-        if let Some(tx) = tx_guard.as_ref() {
-            tx.send(Ok(Bytes::from(data.to_string())))
-                .map_err(|_| pyo3::exceptions::PyConnectionError::new_err("client disconnected"))
-        } else {
-            Err(pyo3::exceptions::PyConnectionError::new_err(
-                "stream was explicitly closed",
-            ))
+        let tx = tx_guard.as_ref().ok_or_else(|| {
+            pyo3::exceptions::PyConnectionError::new_err("stream was explicitly closed")
+        })?;
+        match tx.try_send(Ok(Bytes::from(data.to_string()))) {
+            Ok(()) => Ok(()),
+            Err(mpsc::error::TrySendError::Full(_)) => Err(
+                pyo3::exceptions::PyBlockingIOError::new_err(
+                    "stream buffer full (client is slow); retry after a brief pause",
+                ),
+            ),
+            Err(mpsc::error::TrySendError::Closed(_)) => Err(
+                pyo3::exceptions::PyConnectionError::new_err("client disconnected"),
+            ),
         }
     }
 
@@ -95,9 +113,7 @@ impl PyreStream {
 
 impl PyreStream {
     /// Take the receiver (called once by Rust handler to start streaming).
-    pub(crate) fn take_rx(
-        &self,
-    ) -> Option<mpsc::UnboundedReceiver<Result<Bytes, std::convert::Infallible>>> {
+    pub(crate) fn take_rx(&self) -> Option<mpsc::Receiver<StreamItem>> {
         self.rx.lock().unwrap().take()
     }
 }

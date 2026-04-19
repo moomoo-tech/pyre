@@ -149,11 +149,17 @@ pub(crate) fn error_response(msg: &str) -> Response<Full<Bytes>> {
         .status(StatusCode::INTERNAL_SERVER_ERROR)
         .header("content-type", "application/json")
         .header("server", SERVER_HEADER)
-        .body(Full::new(Bytes::from(format!(
-            r#"{{"error":"{}"}}"#,
-            msg.replace('"', "\\\"")
-        ))))
+        .body(Full::new(Bytes::from(error_json_body(msg))))
         .unwrap()
+}
+
+/// Serialize a `{"error": msg}` JSON body via serde_json. Hand-rolling the
+/// escape (only handling `"`) would leak backslashes, control chars, and
+/// newlines into the payload — the classic "minimal escape hides a JSON
+/// injection" bug. `serde_json::to_vec` is the only safe source.
+fn error_json_body(msg: &str) -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({ "error": msg }))
+        .unwrap_or_else(|_| br#"{"error":"serialization failed"}"#.to_vec())
 }
 
 #[inline]
@@ -163,10 +169,7 @@ pub(crate) fn overloaded_response(msg: &str) -> Response<Full<Bytes>> {
         .header("content-type", "application/json")
         .header("server", SERVER_HEADER)
         .header("retry-after", "1")
-        .body(Full::new(Bytes::from(format!(
-            r#"{{"error":"{}"}}"#,
-            msg.replace('"', "\\\"")
-        ))))
+        .body(Full::new(Bytes::from(error_json_body(msg))))
         .unwrap()
 }
 
@@ -242,6 +245,16 @@ mod tests {
         let resp = error_response(r#"bad "input""#);
         let body = String::from_utf8(body_bytes(resp)).unwrap();
         assert!(body.contains(r#"bad \"input\""#));
+    }
+
+    #[test]
+    fn error_response_escapes_control_chars_and_backslashes() {
+        // Previously the hand-rolled escape only handled `"`; a backslash
+        // or a newline in `msg` produced invalid JSON. serde_json fixes it.
+        let resp = error_response("back\\slash\nnewline\ttab");
+        let body = String::from_utf8(body_bytes(resp)).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&body).expect("must parse");
+        assert_eq!(parsed["error"], "back\\slash\nnewline\ttab");
     }
 
     #[test]

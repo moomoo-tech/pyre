@@ -99,19 +99,34 @@ impl SharedState {
     }
 
     /// Atomic increment: returns the new value. Creates key with `amount` if missing.
-    fn incr(&self, key: String, amount: i64) -> i64 {
-        let mut entry = self.inner.entry(key).or_insert_with(|| Bytes::from("0"));
-        let current: i64 = std::str::from_utf8(entry.value())
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(0);
-        let new_val = current + amount;
+    ///
+    /// If the existing value is not a valid UTF-8 integer this raises a
+    /// TypeError instead of silently resetting to 0 — overwriting opaque
+    /// bytes (e.g. a JSON blob someone stored with the same key) is a
+    /// trap that can corrupt application state irrecoverably.
+    fn incr(&self, key: String, amount: i64) -> PyResult<i64> {
+        let mut entry = self.inner.entry(key.clone()).or_insert_with(|| Bytes::from("0"));
+        let raw = std::str::from_utf8(entry.value()).map_err(|_| {
+            pyo3::exceptions::PyTypeError::new_err(format!(
+                "incr({key:?}): existing value is not valid UTF-8"
+            ))
+        })?;
+        let current: i64 = raw.parse().map_err(|_| {
+            pyo3::exceptions::PyTypeError::new_err(format!(
+                "incr({key:?}): existing value {raw:?} is not an integer"
+            ))
+        })?;
+        let new_val = current.checked_add(amount).ok_or_else(|| {
+            pyo3::exceptions::PyOverflowError::new_err(format!(
+                "incr({key:?}): i64 overflow"
+            ))
+        })?;
         *entry = Bytes::from(new_val.to_string());
-        new_val
+        Ok(new_val)
     }
 
     /// Atomic decrement: returns the new value.
-    fn decr(&self, key: String, amount: i64) -> i64 {
+    fn decr(&self, key: String, amount: i64) -> PyResult<i64> {
         self.incr(key, -amount)
     }
 

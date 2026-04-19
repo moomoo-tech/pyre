@@ -13,10 +13,24 @@ use std::sync::OnceLock;
 use pyo3::prelude::*;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
-/// Global guard for the non-blocking writer's background I/O thread.
-/// If dropped, the background thread stops and buffered logs are lost.
-/// OnceLock ensures it lives for the entire process lifetime.
-static NB_GUARD: OnceLock<tracing_appender::non_blocking::WorkerGuard> = OnceLock::new();
+/// Global singleton for the non-blocking writer + its WorkerGuard.
+///
+/// The guard MUST outlive the writer — if dropped, the background I/O
+/// thread stops and every subsequent log line is silently lost. Storing
+/// the pair atomically in one `OnceLock` is what makes init safe under
+/// concurrent `init_logger()` calls: the first caller's pair wins, the
+/// loser's pair is dropped together (its guard AND writer, never split).
+///
+/// Previous design stored only the guard in `OnceLock` and created a
+/// fresh `(writer, guard)` tuple on every call; a racing caller could
+/// win `try_init()` with its own writer but lose `NB_GUARD.set()`,
+/// orphaning the writer because its guard was dropped.
+struct LoggerState {
+    nb_writer: tracing_appender::non_blocking::NonBlocking,
+    _guard: tracing_appender::non_blocking::WorkerGuard,
+}
+
+static LOGGER: OnceLock<LoggerState> = OnceLock::new();
 
 /// Initialize the Rust tracing engine. Called once at Pyre startup.
 ///
@@ -37,8 +51,15 @@ pub fn init_logger(level: String, access_log: bool, format: String) -> PyResult<
 
     // Non-blocking writer: all log I/O happens on a dedicated background thread.
     // Tokio workers never block on stdout — they just push into an MPSC channel.
-    let (nb_writer, guard) = tracing_appender::non_blocking(std::io::stderr());
-    let _ = NB_GUARD.set(guard);
+    // get_or_init keeps (writer, guard) atomic: races discard both together,
+    // never split, so `try_init()` below always binds to a live writer.
+    let nb_writer = LOGGER
+        .get_or_init(|| {
+            let (w, guard) = tracing_appender::non_blocking(std::io::stderr());
+            LoggerState { nb_writer: w, _guard: guard }
+        })
+        .nb_writer
+        .clone();
 
     let result = if format.to_lowercase() == "json" {
         tracing_subscriber::registry()

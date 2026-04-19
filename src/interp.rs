@@ -88,63 +88,69 @@ unsafe extern "C" fn pyre_recv_cfunc(
                 return ffi::Py_None();
             }
 
-            // All Python objects built successfully — NOW insert response_tx
+            // Allocate every leaf Python object UP FRONT and NULL-check
+            // before any PyTuple_SetItem call. PyTuple_SetItem steals the
+            // reference it's given — embedding a NULL leaks nothing but
+            // guarantees a hard segfault the next time anything reads
+            // that slot (GC, item access, repr, refcount). Building the
+            // full set first lets us reject atomically: if ANY allocation
+            // fails, DECREF the successful ones and bail.
+            let id_obj = ffi::PyLong_FromUnsignedLongLong(req_id);
+            let idx_obj = ffi::PyLong_FromUnsignedLongLong(req.handler_idx as u64);
+            let method_obj = ffi::PyUnicode_FromStringAndSize(
+                req.method.as_ptr() as *const _,
+                req.method.len() as isize,
+            );
+            let path_obj = ffi::PyUnicode_FromStringAndSize(
+                req.path.as_ptr() as *const _,
+                req.path.len() as isize,
+            );
+            let query_obj = ffi::PyUnicode_FromStringAndSize(
+                req.query.as_ptr() as *const _,
+                req.query.len() as isize,
+            );
+            let body_obj = ffi::PyBytes_FromStringAndSize(
+                req.body.as_ptr() as *const _,
+                req.body.len() as isize,
+            );
+            let ip_obj = ffi::PyUnicode_FromStringAndSize(
+                req.client_ip.as_ptr() as *const _,
+                req.client_ip.len() as isize,
+            );
+
+            let raw_items = [id_obj, idx_obj, method_obj, path_obj, query_obj, body_obj, ip_obj];
+            if raw_items.iter().any(|p| p.is_null()) {
+                for p in &raw_items {
+                    if !p.is_null() {
+                        ffi::Py_DECREF(*p);
+                    }
+                }
+                // py_params / py_headers still owned by PyObjRef — dropped here.
+                ffi::Py_DECREF(tuple);
+                ffi::PyErr_Clear();
+                ffi::Py_INCREF(ffi::Py_None());
+                return ffi::Py_None();
+            }
+
+            // All Python objects built successfully — NOW insert response_tx.
+            // Any earlier bail keeps the sender alive; caller's oneshot will
+            // close, returning a 503 instead of an orphaned response_map entry.
             state
                 .response_map
                 .lock()
                 .unwrap()
                 .insert(req_id, req.response_tx);
 
-            ffi::PyTuple_SetItem(tuple, 0, ffi::PyLong_FromUnsignedLongLong(req_id));
-            ffi::PyTuple_SetItem(
-                tuple,
-                1,
-                ffi::PyLong_FromUnsignedLongLong(req.handler_idx as u64),
-            );
-            ffi::PyTuple_SetItem(
-                tuple,
-                2,
-                ffi::PyUnicode_FromStringAndSize(
-                    req.method.as_ptr() as *const _,
-                    req.method.len() as isize,
-                ),
-            );
-            ffi::PyTuple_SetItem(
-                tuple,
-                3,
-                ffi::PyUnicode_FromStringAndSize(
-                    req.path.as_ptr() as *const _,
-                    req.path.len() as isize,
-                ),
-            );
-            // params as PyDict (was missing before — path params were lost)
+            ffi::PyTuple_SetItem(tuple, 0, id_obj);
+            ffi::PyTuple_SetItem(tuple, 1, idx_obj);
+            ffi::PyTuple_SetItem(tuple, 2, method_obj);
+            ffi::PyTuple_SetItem(tuple, 3, path_obj);
+            // params / headers as PyDict; PyObjRef.into_raw() transfers ownership.
             ffi::PyTuple_SetItem(tuple, 4, py_params.into_raw());
-            ffi::PyTuple_SetItem(
-                tuple,
-                5,
-                ffi::PyUnicode_FromStringAndSize(
-                    req.query.as_ptr() as *const _,
-                    req.query.len() as isize,
-                ),
-            );
-            ffi::PyTuple_SetItem(
-                tuple,
-                6,
-                ffi::PyBytes_FromStringAndSize(
-                    req.body.as_ptr() as *const _,
-                    req.body.len() as isize,
-                ),
-            );
-            // headers as PyDict (was JSON string — avoid serialize+parse overhead)
+            ffi::PyTuple_SetItem(tuple, 5, query_obj);
+            ffi::PyTuple_SetItem(tuple, 6, body_obj);
             ffi::PyTuple_SetItem(tuple, 7, py_headers.into_raw());
-            ffi::PyTuple_SetItem(
-                tuple,
-                8,
-                ffi::PyUnicode_FromStringAndSize(
-                    req.client_ip.as_ptr() as *const _,
-                    req.client_ip.len() as isize,
-                ),
-            );
+            ffi::PyTuple_SetItem(tuple, 8, ip_obj);
             tuple
         }
         None => {
@@ -1149,7 +1155,16 @@ impl SubInterpreterWorker {
                         return self.parse_result(r);
                     }
                     None => {
+                        // Hook raised an exception. We previously logged
+                        // with PyErr_Print and fell through to the main
+                        // handler — a critical bypass for auth / ACL hooks
+                        // that signal denial by raising. Return an error
+                        // so the caller serves 500 instead of the
+                        // unprotected handler output.
                         ffi::PyErr_Print();
+                        return Err(format!(
+                            "before_request hook {hook_name:?} raised an exception"
+                        ));
                     }
                     _ => {}
                 }

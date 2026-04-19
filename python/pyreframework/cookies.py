@@ -20,6 +20,24 @@ Usage::
 from __future__ import annotations
 from typing import Optional
 
+# Characters forbidden in cookie name/value per RFC 6265. CR (\r) and LF
+# (\n) in particular enable HTTP Response Splitting: an attacker crafts a
+# value containing `\r\nSet-Cookie: admin=1` and injects arbitrary headers
+# into the response. NUL is a control-char trap too. We reject rather than
+# silently escape — cookies with these bytes are always the result of
+# unsanitized user input reaching set_cookie(), and silent acceptance
+# (e.g. encoding) would mask the real bug upstream.
+_COOKIE_FORBIDDEN = ("\r", "\n", "\0")
+
+
+def _reject_control_chars(field: str, value: str) -> None:
+    for ch in _COOKIE_FORBIDDEN:
+        if ch in value:
+            raise ValueError(
+                f"cookie {field} contains forbidden control character "
+                f"{ch!r}; refusing to emit (HTTP response splitting risk)"
+            )
+
 
 def get_cookies(req) -> dict[str, str]:
     """Parse cookies from request headers.
@@ -61,6 +79,15 @@ def set_cookie(
     Returns a new PyreResponse with the Set-Cookie header added.
     """
     from pyreframework.engine import PyreResponse
+
+    _reject_control_chars("name", name)
+    _reject_control_chars("value", value)
+    if domain is not None:
+        _reject_control_chars("domain", domain)
+    if path:
+        _reject_control_chars("path", path)
+    if expires is not None:
+        _reject_control_chars("expires", expires)
 
     parts = [f"{name}={value}"]
     if max_age is not None:

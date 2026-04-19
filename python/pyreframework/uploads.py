@@ -15,9 +15,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class UploadFile:
-    """A single uploaded file or form field."""
+    """A single uploaded file or form field.
+
+    Frozen because this is a DTO handed from the framework to user code.
+    A request's parsed `UploadFile` objects share memory with the raw
+    multipart buffer; letting a handler mutate `data` in place would
+    corrupt replay logging, after_request hooks, and any async task
+    still holding a reference. Immutable + slots is free and correct.
+    """
     name: str
     filename: str | None
     content_type: str

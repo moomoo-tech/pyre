@@ -42,7 +42,7 @@ enum HandlerResult {
 }
 
 struct StreamInfo {
-    rx: tokio::sync::mpsc::UnboundedReceiver<Result<Bytes, std::convert::Infallible>>,
+    rx: tokio::sync::mpsc::Receiver<Result<Bytes, std::convert::Infallible>>,
     content_type: String,
     status: u16,
     headers: HashMap<String, String>,
@@ -365,7 +365,21 @@ fn call_handler_with_hooks(
                 })();
                 HandlerResult::Response(resp)
             }
-            Err(e) => HandlerResult::Response(Err(format!("handler error: {e}"))),
+            Err(e) => {
+                // Log the full PyErr (includes traceback via PyErr_Print
+                // routed through the Python logging bridge) server-side.
+                // Previously `{e}` forwarded a one-line repr back to the
+                // client with zero operator-visible traceback AND leaked
+                // internal paths to the caller. Keep the client response
+                // generic; the real diagnostic lives in pyre::server logs.
+                e.display(py);
+                tracing::error!(
+                    target: "pyre::server",
+                    error = %e,
+                    "handler raised an exception",
+                );
+                HandlerResult::Response(Err("handler error".to_string()))
+            }
         };
 
         // Record GIL hold time before releasing GIL
@@ -379,7 +393,7 @@ fn call_handler_with_hooks(
 fn build_stream_response(info: StreamInfo) -> Response<BoxBody> {
     use tokio_stream::StreamExt;
 
-    let stream = tokio_stream::wrappers::UnboundedReceiverStream::new(info.rx)
+    let stream = tokio_stream::wrappers::ReceiverStream::new(info.rx)
         .map(|result| result.map(Frame::data));
 
     let body = StreamBody::new(stream);
@@ -532,7 +546,7 @@ pub(crate) async fn handle_request_subinterp(
         }
     };
 
-    let http_resp = match result {
+    let mut http_resp = match result {
         Ok(resp) => {
             let ct = resp.content_type.as_deref().unwrap_or_else(|| {
                 if resp.is_json || resp.body.starts_with(b"{") || resp.body.starts_with(b"[") {
@@ -549,19 +563,6 @@ pub(crate) async fn handle_request_subinterp(
             for (k, v) in &resp.headers {
                 builder = builder.header(k.as_str(), v.as_str());
             }
-            // Add CORS headers if enabled (per-instance config).
-            // Includes allow_credentials + expose_headers per W3C CORS spec.
-            if let Some(cfg) = pool.cors_config.as_ref() {
-                builder = builder.header("access-control-allow-origin", cfg.origin.as_str());
-                builder = builder.header("access-control-allow-methods", cfg.methods.as_str());
-                builder = builder.header("access-control-allow-headers", cfg.headers.as_str());
-                if cfg.allow_credentials {
-                    builder = builder.header("access-control-allow-credentials", "true");
-                }
-                if let Some(expose) = cfg.expose_headers.as_ref() {
-                    builder = builder.header("access-control-expose-headers", expose.as_str());
-                }
-            }
             match builder.body(Full::new(Bytes::from(resp.body))) {
                 Ok(r) => full_body(r),
                 Err(_) => full_body(error_response("invalid response headers")),
@@ -569,6 +570,11 @@ pub(crate) async fn handle_request_subinterp(
         }
         Err(e) => full_body(error_response(&e)),
     };
+    // Apply CORS uniformly to both Ok and Err paths. Previously the Err
+    // path returned a bare 500 with no CORS headers, so a browser would
+    // surface the real error as an opaque CORS failure — a classic
+    // debugging trap where the server error is invisible client-side.
+    apply_cors(&mut http_resp, pool.cors_config.as_ref());
     let latency_us = start.elapsed().as_micros() as u64;
     let status = http_resp.status().as_u16();
     if routes.request_logging {

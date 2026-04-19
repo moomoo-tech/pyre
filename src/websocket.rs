@@ -27,7 +27,7 @@ enum WsMsg {
 #[pyclass]
 pub(crate) struct PyreWebSocket {
     incoming_rx: std::sync::Mutex<std::sync::mpsc::Receiver<WsMsg>>,
-    outgoing_tx: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedSender<WsMsg>>>,
+    outgoing_tx: std::sync::Mutex<Option<tokio::sync::mpsc::Sender<WsMsg>>>,
 }
 
 #[pymethods]
@@ -87,35 +87,43 @@ impl PyreWebSocket {
     }
 
     /// Send a text message to the client.
+    ///
+    /// Uses try_send to stay sync — the outgoing channel is bounded, so a
+    /// slow or disconnected client surfaces as BlockingIOError (buffer
+    /// full) or ConnectionError (channel closed). Callers typically either
+    /// pause / drop events or abort the connection.
     fn send(&self, msg: &str) -> PyResult<()> {
-        let tx = self.outgoing_tx.lock().unwrap();
-        match tx.as_ref() {
-            Some(tx) => tx
-                .send(WsMsg::Text(msg.to_string()))
-                .map_err(|_| pyo3::exceptions::PyConnectionError::new_err("WebSocket closed")),
-            None => Err(pyo3::exceptions::PyConnectionError::new_err(
-                "WebSocket closed",
-            )),
-        }
+        self.try_send_outgoing(WsMsg::Text(msg.to_string()))
     }
 
-    /// Send a binary message to the client.
+    /// Send a binary message to the client. See `send` for semantics.
     fn send_bytes(&self, data: Vec<u8>) -> PyResult<()> {
-        let tx = self.outgoing_tx.lock().unwrap();
-        match tx.as_ref() {
-            Some(tx) => tx
-                .send(WsMsg::Binary(data))
-                .map_err(|_| pyo3::exceptions::PyConnectionError::new_err("WebSocket closed")),
-            None => Err(pyo3::exceptions::PyConnectionError::new_err(
-                "WebSocket closed",
-            )),
-        }
+        self.try_send_outgoing(WsMsg::Binary(data))
     }
 
     /// Close the WebSocket connection.
     fn close(&self) {
         let mut tx = self.outgoing_tx.lock().unwrap();
         *tx = None;
+    }
+}
+
+impl PyreWebSocket {
+    fn try_send_outgoing(&self, msg: WsMsg) -> PyResult<()> {
+        use tokio::sync::mpsc::error::TrySendError;
+        let guard = self.outgoing_tx.lock().unwrap();
+        let tx = guard.as_ref().ok_or_else(|| {
+            pyo3::exceptions::PyConnectionError::new_err("WebSocket closed")
+        })?;
+        match tx.try_send(msg) {
+            Ok(()) => Ok(()),
+            Err(TrySendError::Full(_)) => Err(pyo3::exceptions::PyBlockingIOError::new_err(
+                "WebSocket send buffer full (client is slow); retry after a brief pause",
+            )),
+            Err(TrySendError::Closed(_)) => Err(
+                pyo3::exceptions::PyConnectionError::new_err("WebSocket closed"),
+            ),
+        }
     }
 }
 
@@ -215,7 +223,13 @@ where
     let (mut ws_sink, mut ws_source) = ws_stream.split();
 
     let (incoming_tx, incoming_rx) = std::sync::mpsc::channel::<WsMsg>();
-    let (outgoing_tx, mut outgoing_rx) = tokio::sync::mpsc::unbounded_channel::<WsMsg>();
+    // Bounded outgoing: if the Python handler produces faster than the
+    // client reads (TCP backpressure builds in ws_sink), we must stop
+    // accepting new messages rather than buffer to OOM. `try_send` on
+    // full raises ConnectionError to the Python sender, which can back
+    // off or abort. 1024 matches the SSE stream default.
+    const OUTGOING_CAP: usize = 1024;
+    let (outgoing_tx, mut outgoing_rx) = tokio::sync::mpsc::channel::<WsMsg>(OUTGOING_CAP);
 
     let sky_ws = PyreWebSocket {
         incoming_rx: std::sync::Mutex::new(incoming_rx),

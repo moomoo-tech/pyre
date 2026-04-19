@@ -1,5 +1,66 @@
 # Changelog
 
+## v1.4.5 (2026-04-19)
+
+Security + correctness hardening from an adversarial review pass. 23 fixes
+(6 critical + 17 error). Throughput unchanged (343k req/s on the hybrid
+hello benchmark vs 220k historical baseline — no regression).
+
+### Critical (already shipped in hotfix)
+- `accept()` loop classifies errno (EMFILE / ENFILE / ENOBUFS / ENOMEM)
+  and backs off — was 100% CPU spin on FD exhaustion
+- Sub-interpreter RAII: `SubInterpreterWorker::new` no longer leaks the
+  sub-interp on any of 5+ fallible init steps
+- WebSocket: `py_handle.join()` moved off the Tokio worker pool;
+  `recv/recv_bytes/recv_message` release the GIL via `py.detach()`
+- MCP: reject non-object JSON-RPC payloads with -32600 instead of
+  crashing through `AttributeError`
+
+### Security
+- Cookies: reject CRLF / NUL in name / value / domain / path / expires
+  (HTTP Response Splitting)
+- Error responses: `serde_json` for `{"error": msg}` — hand-rolled
+  escape handled only `"`, leaving backslash / control-char injection
+  open
+- Static files: open-once design removes a TOCTOU where a rename
+  between `metadata()` and `read()` bypassed the `MAX_STATIC_FILE_BYTES`
+  cap; `.take(cap)` adds belt-and-braces
+- `before_request` hook that raises now fails the request with 500
+  — previously fell through to the unprotected main handler, a
+  critical auth-bypass for deny-via-raise auth hooks
+- Sub-interp path: CORS now applied on the `Err` branch so browsers
+  show the real 5xx instead of an opaque CORS error
+- Interp FFI: `PyTuple_SetItem` never embeds a NULL — every leaf
+  allocation NULL-checked up front, partial failures cleaned up
+  atomically (was a latent segfault on OOM)
+
+### Correctness
+- `logging::init_logger`: `(writer, guard)` stored atomically in
+  `OnceLock<LoggerState>` — previous design could drop the guard of
+  whichever caller won `try_init()`, silently killing the log thread
+- `router::lookup` uppercases the method to match `insert` — HTTP is
+  case-insensitive per RFC 9110 §9.1, lowercase / `Get` was silently
+  missing routes
+- `SharedState::incr` raises `TypeError` / `OverflowError` instead of
+  silently resetting non-numeric values to 0
+- Bounded channels: `PyreStream` (1024) + WebSocket outgoing (1024)
+  with `try_send` — unbounded was an OOM DoS under slow-client
+  backpressure
+- `handlers::handle_request` error path: full PyErr logged server-side
+  (`e.display(py)` + `tracing::error!`); client gets a generic "handler
+  error" instead of a leaked one-line repr
+
+### Python
+- `rpc.py` / `_async_engine.py`: `log.exception` before the error
+  envelope so server-side stack traces survive RPC / async failures
+- `_bootstrap.py` `PyreRustHandler.emit`: `self.handleError(record)`
+  instead of `pass` — stdlib logging's standard "I failed to log" hook
+- `mcp._extract_schema`: `typing.get_type_hints(fn)` so tools defined
+  in modules with `from __future__ import annotations` don't silently
+  regress to "string" for every argument
+- `UploadFile`: `@dataclass(frozen=True, slots=True)` — shares memory
+  with the raw multipart buffer, mutation would corrupt replay
+
 ## v1.4.0 (2026-04-01)
 
 ### Performance — Linux 42万 QPS

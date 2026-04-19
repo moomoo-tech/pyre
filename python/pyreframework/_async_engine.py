@@ -10,7 +10,10 @@ Template variables (replaced by Rust before exec):
 """
 
 import asyncio
+import logging
 import threading
+
+_log = logging.getLogger("pyreframework.async")
 
 # Prefer orjson for fast JSON serialization (same strategy as Rust side)
 try:
@@ -85,6 +88,11 @@ async def _process_request(req_id, handler_idx, method, path, params, query, bod
         # Don't send response; the oneshot receiver is already gone.
         pass
     except Exception as e:
+        # Log BEFORE sending so the server-side record survives even if
+        # _pyre_send itself fails. Returning only `str(e)` to the client
+        # was masking real handler bugs — the exception type + traceback
+        # are what operators need at 3am, not the reply envelope.
+        _log.exception("async handler req_id=%s path=%s raised", req_id, path)
         _pyre_send(WORKER_ID, req_id, 500, "text/plain", str(e).encode("utf-8"))
 
 

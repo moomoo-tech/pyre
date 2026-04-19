@@ -80,7 +80,10 @@ impl RouteTable {
         method: &str,
         path: &str,
     ) -> Option<(usize, Vec<(String, String)>)> {
-        let router = self.routers.get(method)?;
+        // `insert` stores methods uppercased; lookup must do the same or
+        // a client sending `get` / `Get` will silently miss routes even
+        // though HTTP methods are case-insensitive per RFC 9110 §9.1.
+        let router = self.routers.get(&method.to_uppercase())?;
         let matched = router.at(path).ok()?;
         let params: Vec<(String, String)> = matched
             .params

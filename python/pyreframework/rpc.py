@@ -7,8 +7,11 @@ Client: PyreRPCClient with __getattr__ magic for local-like calls.
 from __future__ import annotations
 
 import json
+import logging
 import inspect
 from typing import Callable
+
+_log = logging.getLogger("pyreframework.rpc")
 
 try:
     import msgpack
@@ -111,12 +114,20 @@ def rpc_decorator(app, path: str, proto_model=None):
         sig = inspect.signature(fn)
         takes_data = len(sig.parameters) >= 2
 
+        # Any uncaught exception in an RPC handler becomes a structured
+        # {ok: false, error: ...} envelope so clients don't see a raw 500.
+        # The envelope alone is opaque server-side — the stack trace is
+        # discarded — so we ALSO log.exception here to preserve the
+        # traceback in operator logs. Without that, recurring handler
+        # crashes would be invisible on the server.
+
         def sync_wrapper(req):
             try:
                 data = _decode_request(req)
                 result = fn(req, data) if takes_data else fn(data)
                 return _encode_response(result, req)
             except Exception as e:
+                _log.exception("RPC handler %s raised", fn.__qualname__)
                 return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
         async def async_wrapper(req):
@@ -125,6 +136,7 @@ def rpc_decorator(app, path: str, proto_model=None):
                 result = await (fn(req, data) if takes_data else fn(data))
                 return _encode_response(result, req)
             except Exception as e:
+                _log.exception("RPC handler %s raised", fn.__qualname__)
                 return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
         handler = async_wrapper if is_async else sync_wrapper

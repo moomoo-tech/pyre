@@ -1,6 +1,7 @@
 use bytes::Bytes;
 use http_body_util::Full;
 use hyper::{Response, StatusCode};
+use tokio::io::AsyncReadExt;
 
 /// Maximum size (in bytes) of a static file served out of memory.
 /// Files larger than this are refused with 413 to avoid OOM on pathological
@@ -74,10 +75,18 @@ pub(crate) async fn try_static_file(
             return Some(forbidden_response());
         }
 
-        // Refuse directories, sockets, and other non-regular files.
-        // Also refuse files larger than our in-memory serving budget —
-        // anything bigger needs a real streaming static server.
-        let metadata = match tokio::fs::metadata(&file_canonical).await {
+        // Open once and derive metadata from the fd. Previously we called
+        // tokio::fs::metadata(path) and then tokio::fs::read(path) in two
+        // separate syscalls — a TOCTOU race where an attacker swapping
+        // the file between the two calls could bypass the size limit. By
+        // opening first and calling metadata() on the File, both checks
+        // operate on the same inode; symlink or rename swaps after open
+        // cannot change which bytes we read.
+        let file = match tokio::fs::File::open(&file_canonical).await {
+            Ok(f) => f,
+            Err(_) => continue,
+        };
+        let metadata = match file.metadata().await {
             Ok(m) => m,
             Err(_) => continue,
         };
@@ -88,14 +97,24 @@ pub(crate) async fn try_static_file(
             return Some(payload_too_large_response());
         }
 
-        if let Ok(contents) = tokio::fs::read(&file_canonical).await {
-            let ext = file_canonical
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("");
-            let ct = mime_from_ext(ext);
-            return Some(ok_response(ct, contents));
+        // Belt + braces: even if the metadata-reported size was stale for
+        // any reason, `take()` enforces the byte cap on the read itself.
+        let cap = metadata.len().min(MAX_STATIC_FILE_BYTES);
+        let mut contents = Vec::with_capacity(cap as usize);
+        if file
+            .take(MAX_STATIC_FILE_BYTES)
+            .read_to_end(&mut contents)
+            .await
+            .is_err()
+        {
+            continue;
         }
+        let ext = file_canonical
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("");
+        let ct = mime_from_ext(ext);
+        return Some(ok_response(ct, contents));
     }
     None
 }
