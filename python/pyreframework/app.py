@@ -313,7 +313,15 @@ class Pyre:
 
         # CORS response headers are applied in Rust layer only (handlers.rs)
         # to avoid duplicate headers which violate W3C CORS spec.
-        self._engine.set_cors_origin(allow_origins)
+        # Pass full config so allow_credentials + expose_headers appear on
+        # every response (GET/POST/etc.), not just OPTIONS preflight.
+        self._engine.set_cors_config(
+            allow_origins,
+            allow_methods,
+            allow_headers,
+            expose_headers or None,
+            allow_credentials,
+        )
 
     # ------------------------------------------------------------------
 

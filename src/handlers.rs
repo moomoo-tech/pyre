@@ -118,18 +118,33 @@ fn resolve_coroutine(py: Python<'_>, obj: Py<PyAny>) -> Result<Py<PyAny>, String
 pub(crate) type BoxBody = http_body_util::combinators::BoxBody<Bytes, hyper::Error>;
 
 /// Inject CORS headers into any response (normal or error).
-fn apply_cors(resp: &mut Response<BoxBody>, cors_origin: Option<&str>) {
-    if let Some(origin) = cors_origin {
-        let headers = resp.headers_mut();
-        // Use insert (not append) to avoid duplicates
-        if let Ok(v) = origin.parse() {
-            headers.insert("access-control-allow-origin", v);
-        }
+///
+/// Per W3C CORS spec, Access-Control-Allow-Credentials and
+/// Access-Control-Expose-Headers must be present on actual responses
+/// (GET/POST/etc.), not only OPTIONS preflight.
+fn apply_cors(resp: &mut Response<BoxBody>, cors: Option<&crate::router::CorsConfig>) {
+    let Some(cfg) = cors else { return };
+    let headers = resp.headers_mut();
+    // insert (not append) to avoid duplicates
+    if let Ok(v) = cfg.origin.parse() {
+        headers.insert("access-control-allow-origin", v);
+    }
+    if let Ok(v) = cfg.methods.parse() {
+        headers.insert("access-control-allow-methods", v);
+    }
+    if let Ok(v) = cfg.headers.parse() {
+        headers.insert("access-control-allow-headers", v);
+    }
+    if cfg.allow_credentials {
         headers.insert(
-            "access-control-allow-methods",
-            "GET, POST, PUT, DELETE, PATCH, OPTIONS".parse().unwrap(),
+            "access-control-allow-credentials",
+            "true".parse().unwrap(),
         );
-        headers.insert("access-control-allow-headers", "*".parse().unwrap());
+    }
+    if let Some(expose) = cfg.expose_headers.as_ref() {
+        if let Ok(v) = expose.parse() {
+            headers.insert("access-control-expose-headers", v);
+        }
     }
 }
 
@@ -159,12 +174,12 @@ pub(crate) async fn handle_request(
             Ok(Ok(c)) => c.to_bytes(),
             Ok(Err(_)) => {
                 let mut r = full_body(payload_too_large_response());
-                apply_cors(&mut r, routes.cors_origin.as_deref());
+                apply_cors(&mut r, routes.cors_config.as_ref());
                 return Ok(r);
             }
             Err(_) => {
                 let mut r = full_body(crate::response::gateway_timeout_response());
-                apply_cors(&mut r, routes.cors_origin.as_deref());
+                apply_cors(&mut r, routes.cors_config.as_ref());
                 return Ok(r);
             }
         };
@@ -210,7 +225,7 @@ pub(crate) async fn handle_request(
         HandlerResult::Stream(info) => build_stream_response(info),
     };
 
-    apply_cors(&mut resp, routes.cors_origin.as_deref());
+    apply_cors(&mut resp, routes.cors_config.as_ref());
     let latency_us = start.elapsed().as_micros() as u64;
     let status = resp.status().as_u16();
     if routes.request_logging {
@@ -411,12 +426,12 @@ pub(crate) async fn handle_request_subinterp(
             Ok(Ok(c)) => c.to_bytes(),
             Ok(Err(_)) => {
                 let mut r = full_body(payload_too_large_response());
-                apply_cors(&mut r, pool.cors_origin.as_deref());
+                apply_cors(&mut r, pool.cors_config.as_ref());
                 return Ok(r);
             }
             Err(_) => {
                 let mut r = full_body(crate::response::gateway_timeout_response());
-                apply_cors(&mut r, pool.cors_origin.as_deref());
+                apply_cors(&mut r, pool.cors_config.as_ref());
                 return Ok(r);
             }
         };
@@ -465,7 +480,7 @@ pub(crate) async fn handle_request_subinterp(
             HandlerResult::Response(result) => full_body(build_response(result)?),
             HandlerResult::Stream(info) => build_stream_response(info),
         };
-        apply_cors(&mut resp, routes.cors_origin.as_deref());
+        apply_cors(&mut resp, routes.cors_config.as_ref());
         let latency_us = start.elapsed().as_micros() as u64;
         let status = resp.status().as_u16();
         if routes.request_logging {
@@ -502,7 +517,7 @@ pub(crate) async fn handle_request_subinterp(
     }) {
         crate::monitor::DROPPED_REQUESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut r = full_body(overloaded_response(&e));
-        apply_cors(&mut r, pool.cors_origin.as_deref());
+        apply_cors(&mut r, pool.cors_config.as_ref());
         return Ok(r);
     }
 
@@ -512,7 +527,7 @@ pub(crate) async fn handle_request_subinterp(
         Err(_) => {
             crate::monitor::DROPPED_REQUESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let mut r = full_body(gateway_timeout_response());
-            apply_cors(&mut r, pool.cors_origin.as_deref());
+            apply_cors(&mut r, pool.cors_config.as_ref());
             return Ok(r);
         }
     };
@@ -534,14 +549,18 @@ pub(crate) async fn handle_request_subinterp(
             for (k, v) in &resp.headers {
                 builder = builder.header(k.as_str(), v.as_str());
             }
-            // Add CORS headers if enabled (per-instance config)
-            if let Some(origin) = pool.cors_origin.as_ref() {
-                builder = builder.header("access-control-allow-origin", origin.as_str());
-                builder = builder.header(
-                    "access-control-allow-methods",
-                    "GET, POST, PUT, DELETE, PATCH, OPTIONS",
-                );
-                builder = builder.header("access-control-allow-headers", "*");
+            // Add CORS headers if enabled (per-instance config).
+            // Includes allow_credentials + expose_headers per W3C CORS spec.
+            if let Some(cfg) = pool.cors_config.as_ref() {
+                builder = builder.header("access-control-allow-origin", cfg.origin.as_str());
+                builder = builder.header("access-control-allow-methods", cfg.methods.as_str());
+                builder = builder.header("access-control-allow-headers", cfg.headers.as_str());
+                if cfg.allow_credentials {
+                    builder = builder.header("access-control-allow-credentials", "true");
+                }
+                if let Some(expose) = cfg.expose_headers.as_ref() {
+                    builder = builder.header("access-control-expose-headers", expose.as_str());
+                }
             }
             match builder.body(Full::new(Bytes::from(resp.body))) {
                 Ok(r) => full_body(r),

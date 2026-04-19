@@ -82,8 +82,8 @@ pub(crate) struct PyreApp {
     routes: MutableRoutes,
     script_path: Option<String>,
     shared_state: Arc<dashmap::DashMap<String, bytes::Bytes>>,
-    /// Per-instance CORS origin (None = disabled).
-    cors_origin: Option<String>,
+    /// Per-instance CORS configuration (None = disabled).
+    cors_config: Option<crate::router::CorsConfig>,
     /// Per-instance request logging flag.
     request_logging: bool,
 }
@@ -96,14 +96,42 @@ impl PyreApp {
             routes: Arc::new(parking_lot::RwLock::new(RouteTable::new())),
             script_path: None,
             shared_state: Arc::new(dashmap::DashMap::new()),
-            cors_origin: None,
+            cors_config: None,
             request_logging: false,
         }
     }
 
-    /// Set per-instance CORS origin.
+    /// Set per-instance CORS origin (legacy setter — disables advanced CORS
+    /// features. Prefer `set_cors_config` which propagates credentials and
+    /// expose-headers to every response per W3C CORS spec.)
     fn set_cors_origin(&mut self, origin: String) {
-        self.cors_origin = Some(origin);
+        self.cors_config = Some(crate::router::CorsConfig {
+            origin,
+            methods: "GET, POST, PUT, DELETE, PATCH, OPTIONS".to_string(),
+            headers: "*".to_string(),
+            expose_headers: None,
+            allow_credentials: false,
+        });
+    }
+
+    /// Set full per-instance CORS configuration. All fields are applied to
+    /// every response (GET/POST/etc.), not just OPTIONS preflight.
+    #[pyo3(signature = (origin, methods, headers, expose_headers=None, allow_credentials=false))]
+    fn set_cors_config(
+        &mut self,
+        origin: String,
+        methods: String,
+        headers: String,
+        expose_headers: Option<String>,
+        allow_credentials: bool,
+    ) {
+        self.cors_config = Some(crate::router::CorsConfig {
+            origin,
+            methods,
+            headers,
+            expose_headers: expose_headers.filter(|s| !s.is_empty()),
+            allow_credentials,
+        });
     }
 
     /// Enable/disable per-instance request logging.
@@ -278,7 +306,7 @@ impl PyreApp {
                 fallback_handler: table.fallback_handler.as_ref().map(|h| h.clone_ref(py)),
                 fallback_handler_name: table.fallback_handler_name.clone(),
                 static_dirs: table.static_dirs.clone(),
-                cors_origin: self.cors_origin.clone(),
+                cors_config: self.cors_config.clone(),
                 request_logging: self.request_logging,
             })
         };
@@ -508,7 +536,7 @@ impl PyreApp {
                 static_dirs,
                 requires_gil,
                 routes.is_async.clone(),
-                self.cors_origin.clone(),
+                self.cors_config.clone(),
                 self.request_logging,
             )
             .map_err(|e| {

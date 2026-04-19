@@ -1218,8 +1218,8 @@ pub(crate) struct InterpreterPool {
     pub(crate) is_async_handler: Vec<bool>,
     pub(crate) static_dirs: Vec<(String, String)>,
     has_async_workers: bool,
-    /// Per-instance CORS origin (None = disabled).
-    pub(crate) cors_origin: Option<String>,
+    /// Per-instance CORS configuration (None = disabled).
+    pub(crate) cors_config: Option<crate::router::CorsConfig>,
     /// Per-instance request logging flag, shared with worker threads.
     /// Read via Arc clone in worker_thread_loop, not directly from the struct.
     _request_logging: Arc<AtomicBool>,
@@ -1262,7 +1262,7 @@ impl InterpreterPool {
         static_dirs: Vec<(String, String)>,
         requires_gil: Vec<bool>,
         is_async_handler: Vec<bool>,
-        cors_origin: Option<String>,
+        cors_config: Option<crate::router::CorsConfig>,
         request_logging: bool,
     ) -> Result<Self, String> {
         let has_any_async = is_async_handler.iter().any(|&a| a);
@@ -1372,7 +1372,7 @@ impl InterpreterPool {
             is_async_handler: is_async_handler.clone(),
             static_dirs,
             has_async_workers: has_any_async,
-            cors_origin,
+            cors_config,
             _request_logging: logging_flag,
         })
     }

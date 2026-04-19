@@ -5,6 +5,18 @@ use matchit::Router;
 use parking_lot::RwLock;
 use pyo3::prelude::*;
 
+/// Full CORS configuration. When present, applied to every response —
+/// not just OPTIONS preflight — per W3C CORS spec requirements for
+/// Access-Control-Allow-Credentials and Access-Control-Expose-Headers.
+#[derive(Clone, Default)]
+pub(crate) struct CorsConfig {
+    pub(crate) origin: String,
+    pub(crate) methods: String,
+    pub(crate) headers: String,
+    pub(crate) expose_headers: Option<String>,
+    pub(crate) allow_credentials: bool,
+}
+
 pub(crate) struct RouteTable {
     pub(crate) handlers: Vec<Py<PyAny>>,
     pub(crate) handler_names: Vec<String>,
@@ -19,7 +31,7 @@ pub(crate) struct RouteTable {
     pub(crate) fallback_handler: Option<Py<PyAny>>,
     pub(crate) fallback_handler_name: Option<String>,
     pub(crate) static_dirs: Vec<(String, String)>,
-    pub(crate) cors_origin: Option<String>,
+    pub(crate) cors_config: Option<CorsConfig>,
     pub(crate) request_logging: bool,
 }
 
@@ -39,7 +51,7 @@ impl RouteTable {
             fallback_handler: None,
             fallback_handler_name: None,
             static_dirs: Vec::new(),
-            cors_origin: None,
+            cors_config: None,
             request_logging: false,
         }
     }
