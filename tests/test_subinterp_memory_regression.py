@@ -97,6 +97,26 @@ def dicts_alive(req):
     )
     return {"alive": n}
 
+@app.get("/slot_attack")
+def slot_attack(req):
+    # Attempt to smuggle a user attribute past the Rust SlotClearer.
+    # Strict __slots__ must reject this at runtime — otherwise the
+    # attribute would leak past the sub-interp dealloc bug.
+    from pyreframework.engine import PyreResponse
+    results = {}
+    try:
+        req.arbitrary_user_attr = "would leak"
+        results["request_accepts_arbitrary_attr"] = True
+    except AttributeError:
+        results["request_accepts_arbitrary_attr"] = False
+    resp = PyreResponse(body="ok")
+    try:
+        resp.arbitrary_user_attr = "would leak"
+        results["response_accepts_arbitrary_attr"] = True
+    except AttributeError:
+        results["response_accepts_arbitrary_attr"] = False
+    return results
+
 @app.get("/probe_stats")
 def probe_stats(req):
     # Does __del__ fire in a sub-interp? Create + throw away N instances,
@@ -246,6 +266,31 @@ def test_router_case_insensitive_for_lowercase_method(server):
 # ─────────────────────────────────────────────────────────────────
 # Today's fix: _PyreRequest does not leak per-request
 # ─────────────────────────────────────────────────────────────────
+
+
+def test_request_response_lock_out_dynamic_attrs(server):
+    """Defence in depth: the Rust SlotClearer hardcodes the seven
+    __slots__ names it clears. If a user handler could do
+    `request.my_thing = payload`, that attribute would bypass every
+    cleanup path and leak past the sub-interp dealloc bug. Strict
+    __slots__ (no __dict__) on both `_PyreRequest` and `_PyreResponse`
+    physically prevents that by raising AttributeError at runtime.
+
+    This test asserts the closed-world invariant: both classes MUST
+    reject arbitrary attribute assignment. A regression here reopens
+    the leak surface for user code, even though the plumbing would
+    still pass the other tests.
+    """
+    r = _get("/slot_attack")
+    assert r["request_accepts_arbitrary_attr"] is False, (
+        "_PyreRequest lost its __slots__ discipline — user handlers "
+        "can now stash arbitrary attributes on the request, and those "
+        "will leak past the Rust SlotClearer."
+    )
+    assert r["response_accepts_arbitrary_attr"] is False, (
+        "_PyreResponse lost its __slots__ discipline — same failure "
+        "mode as the request case."
+    )
 
 
 def test_pyrerequest_does_not_accumulate(server):

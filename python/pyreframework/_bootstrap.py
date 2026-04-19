@@ -98,6 +98,13 @@ class _PyreRequest:
         return json.loads(self.text())
 
 class _PyreResponse:
+    # Strict __slots__: no __dict__, no dynamic attributes. Paired with
+    # Rust's SlotClearer, this makes the per-request cleanup exhaustive —
+    # user code cannot stash an object on the response and leak it past
+    # the sub-interpreter dealloc bug. If someone writes
+    # `response.my_thing = x`, Python raises AttributeError at runtime
+    # rather than silently hiding the ref from the Rust-side cleaner.
+    __slots__ = ("body", "status_code", "content_type", "headers")
     def __init__(self, body="", status_code=200, content_type=None, headers=None):
         self.body = body
         self.status_code = status_code
