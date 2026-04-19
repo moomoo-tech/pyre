@@ -371,17 +371,6 @@ def test_headers_dicts_do_not_accumulate(server):
 # ─────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.xfail(
-    reason=(
-        "After fixing _PyreRequest accumulation (Vectorcall) and dict "
-        "accumulation (slot DelAttr workaround), RSS still grows "
-        "~500-1000 B/request under serial load — no gc-visible object "
-        "leaks, but something (mimalloc arena retention, PyMalloc "
-        "fragmentation, or a Rust-side container that doesn't reuse) "
-        "still climbs linearly. Tracked for v1.4.6."
-    ),
-    strict=False,
-)
 def test_rss_growth_per_request_is_bounded(server):
     """End-to-end regression: RSS should not grow by more than ~0.5 KB per
     request.
