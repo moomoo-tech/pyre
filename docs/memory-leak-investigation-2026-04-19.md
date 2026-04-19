@@ -399,3 +399,78 @@ dominant cost. Object counts:
 - Replacing `_PyreRequest` with a `pyclass` at the Rust level (a real
   PyO3 class instead of a pure Python class), which would be a bigger
   refactor but sidesteps the `tp_call` path
+
+## Session 3 update — narrowing the final residual
+
+More tightening:
+
+1. **RAII `SlotClearer`**: replaced the inline DelAttrString blocks in
+   `call_handler` with a proper `Drop` guard, attached immediately
+   after `build_request`. Covers the `?` early-return paths on
+   `resolve_coroutine` and `parse_result` that the inline code missed.
+2. **`PyDict_Clear` before the slot wipe**: the sub-interp bug cascades
+   — a dict's own `tp_dealloc` doesn't DECREF its items. Iterate and
+   DECREF ourselves while we hold the GIL. This alone cut the leak
+   from ~660 B/req to ~316 B/req.
+3. **Per-iteration `PyErr_Clear`**: CPython C APIs short-circuit on a
+   pending exception. Clear between calls so a failed DelAttr/SetAttr
+   on one slot doesn't silently skip the rest.
+4. **`SetAttr(Py_None)` in place of `DelAttrString`**: under PEP 684
+   the slot-descriptor `__delete__` path isn't reliable for str/bytes
+   values; assignment through `__set__` is.
+
+### Delta-debug map of the remaining ~316 B/req
+
+Component-by-component bench (same harness, swap parts with no-ops):
+
+| Configuration                             | Leak rate  |
+|-------------------------------------------|-----------|
+| Pure hyper + tokio (no Pyre)              | ~0.3 B/req |
+| Pyre with `call_handler` stubbed out      | ~1 B/req   |
+| Just `build_request` (no Vectorcall)      | ~332 B/req |
+| Just `py_str*` (no `_PyreRequest` build)  | much worse |
+| `py_str_dict` stubbed (empty dicts)       | ~320 B/req |
+| All args = `Py_None`                      | ~200 B/req |
+| Full production path                      | ~316 B/req |
+
+Takeaways:
+
+- Leak is concentrated in the Python-object-creation path inside
+  `build_request`, NOT in the WorkRequest plumbing (verified via
+  `WorkRequest::inc_created` / `inc_completed`: delta stays 0 over
+  millions of requests).
+- Even the minimal "pass Py_None to every slot, construct
+  _PyreRequest via Vectorcall" path leaks ~200 B/req. That is
+  essentially the per-instance overhead of creating a sub-interp
+  `_PyreRequest` and freeing it through the (broken) PEP 684
+  dealloc path.
+- Removing the Vectorcall / SlotClearer pair makes things MUCH
+  worse (back to ~3 KB/req), so the current workaround IS doing
+  real work.
+
+### Remaining suspects for the ~200 B/req floor
+
+1. **`_PyreRequest` shell itself**: the instance struct (PyGC_Head +
+   PyObject_HEAD + 7 slot pointers) is ~100 bytes. If the sub-interp
+   dealloc leaks this too, it accounts for half of the floor.
+2. **PyMalloc arena high-water**: PyMalloc arenas don't return to the
+   OS. If peak working set (during high concurrency) grows over time
+   due to scheduling, RSS grows even if per-request is balanced.
+3. **Hyper / tokio per-request buffer churn**: some BytesMut slab
+   that grows on demand. Not fully ruled out.
+
+### Workaround strategies worth trying next (for v1.4.6)
+
+- **Instance recycling**: per-worker pre-allocated `_PyreRequest`,
+  fill its slots each request, SlotClearer between requests. Avoids
+  per-request type allocation entirely. Eliminates suspect 1.
+- **Port `_PyreRequest` to a Rust `#[pyclass]`**: let PyO3's Drop
+  handle the dealloc — more predictable than a heap-type in a sub-
+  interp.
+- **Swap allocator to jemalloc for comparison**: if jemalloc's
+  behavior differs substantially, confirms suspect 2.
+
+Current release gate: the 700 B/req ceiling in
+`test_rss_growth_per_request_is_bounded` is currently xfail. Once any
+of the strategies above brings steady-state growth under 50 B/req we
+flip it to a hard-pass gate.
