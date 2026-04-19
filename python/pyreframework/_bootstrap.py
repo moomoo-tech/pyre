@@ -75,6 +75,7 @@ _root.setLevel(_PYRE_LEVEL_MAP.get(
 # -- Request / Response stubs ------------------------------------------------
 
 class _PyreRequest:
+    __slots__ = ("method", "path", "params", "query", "body_bytes", "headers", "client_ip")
     def __init__(self, method, path, params, query, body_bytes, headers, client_ip=""):
         self.method = method
         self.path = path
