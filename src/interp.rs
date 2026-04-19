@@ -370,6 +370,99 @@ unsafe extern "C" fn pyre_emit_log_cfunc(
 }
 
 // ---------------------------------------------------------------------------
+// SlotClearer — RAII guard that wipes a `_PyreRequest`'s slot values
+// ---------------------------------------------------------------------------
+//
+// Workaround for a CPython PEP 684 sub-interpreter finalizer bug: the
+// `tp_dealloc` path on heap-allocated types does NOT DECREF `__slots__`
+// members. Each request's _PyreRequest shell gets freed but the values
+// it held (headers dict, params dict, method str, path str, body bytes,
+// client_ip str, query str) orphan-leak in per-sub-interp PyMalloc
+// arenas — up to ~500 B/request in our hello bench.
+//
+// Using a Drop guard (rather than an inline cleanup block at the end of
+// `call_handler`) guarantees the clear runs on EVERY exit path —
+// including the `?` early-returns from `resolve_coroutine` and
+// `parse_result`, which the old inline code missed. The guard is
+// created immediately after `build_request` and released when the
+// enclosing scope ends, under the same sub-interp GIL that created the
+// object.
+
+pub(crate) struct SlotClearer {
+    ptr: *mut ffi::PyObject,
+}
+
+impl SlotClearer {
+    /// Attach to a `_PyreRequest` instance. Caller must hold the
+    /// sub-interpreter's GIL for the duration of this guard.
+    pub unsafe fn new(ptr: *mut ffi::PyObject) -> Self {
+        Self { ptr }
+    }
+}
+
+impl Drop for SlotClearer {
+    fn drop(&mut self) {
+        if self.ptr.is_null() {
+            return;
+        }
+        unsafe {
+            if ffi::PyThreadState_GetUnchecked().is_null() {
+                return;
+            }
+            // For dict slots: clear their contents first so the items
+            // (header strings etc.) get DECREF'd synchronously while
+            // the GIL is held. The sub-interp finalizer bug would
+            // otherwise leave them orphaned when the dict itself
+            // deallocs.
+            for attr in [c"headers", c"params"] {
+                let d = ffi::PyObject_GetAttrString(self.ptr, attr.as_ptr());
+                if d.is_null() {
+                    ffi::PyErr_Clear();
+                    continue;
+                }
+                if ffi::PyDict_Check(d) != 0 {
+                    ffi::PyDict_Clear(d);
+                }
+                ffi::Py_DECREF(d);
+                // Clear any error raised by PyDict_Clear so the next
+                // iteration and the DelAttr loop below both start
+                // clean. CPython's C API short-circuits on a pending
+                // exception — without this clear, a mid-loop failure
+                // would silently skip every subsequent call.
+                if !ffi::PyErr_Occurred().is_null() {
+                    ffi::PyErr_Clear();
+                }
+            }
+            // Assign None to each slot instead of DelAttrString.
+            // Under PEP 684 sub-interpreters, the slot-descriptor
+            // __delete__ path does not reliably DECREF the replaced
+            // value for non-container types (str, bytes), leaving the
+            // buffer orphaned. Assignment goes through __set__ which
+            // DECREFs the old value and stores the new None singleton
+            // — a code path we've verified works synchronously.
+            //
+            // Py_None is an immortal singleton; Py_INCREF here is a
+            // no-op in 3.12+ but included defensively.
+            let none = ffi::Py_None();
+            for attr in [
+                c"method",
+                c"path",
+                c"params",
+                c"query",
+                c"body_bytes",
+                c"headers",
+                c"client_ip",
+            ] {
+                let _ = ffi::PyObject_SetAttrString(self.ptr, attr.as_ptr(), none);
+                if !ffi::PyErr_Occurred().is_null() {
+                    ffi::PyErr_Clear();
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // PyObjRef — RAII wrapper for *mut ffi::PyObject
 // ---------------------------------------------------------------------------
 
@@ -438,9 +531,24 @@ impl Drop for PyObjRef {
                 // if one is attached, NULL otherwise. Attached tstate =>
                 // GIL held for its interpreter => DECREF is safe.
                 if ffi::PyThreadState_GetUnchecked().is_null() {
+                    let t = ffi::Py_TYPE(self.ptr);
+                    let type_name = if !t.is_null() {
+                        let p = (*t).tp_name;
+                        if !p.is_null() {
+                            std::ffi::CStr::from_ptr(p).to_string_lossy().into_owned()
+                        } else { "?".into() }
+                    } else { "?".into() };
+                    let thread_name = std::thread::current()
+                        .name()
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| format!("{:?}", std::thread::current().id()));
+                    let bt = std::backtrace::Backtrace::capture();
                     tracing::error!(
                         target: "pyre::server",
                         ptr = ?self.ptr,
+                        type_name = %type_name,
+                        thread = %thread_name,
+                        backtrace = %bt,
                         "PyObjRef dropped with no attached tstate — leaking pointer to avoid segfault"
                     );
                     return; // Leak is better than crash
@@ -534,6 +642,29 @@ pub(crate) struct WorkRequest {
     pub headers: HashMap<String, String>,
     pub client_ip: String,
     pub response_tx: tokio::sync::oneshot::Sender<Result<SubInterpResponse, String>>,
+}
+
+// Diagnostic: count WorkRequest creates vs worker-completes. We cannot
+// use a Drop impl here because `response_tx` gets moved out inside the
+// worker loop (`req.response_tx.send(...)`) — a Drop on WorkRequest
+// would forbid destructuring. Instead we bump the counter at each
+// site where a request finishes its turn through the pipeline.
+static WR_CREATED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static WR_COMPLETED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+impl WorkRequest {
+    pub fn inc_created() {
+        WR_CREATED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    pub fn inc_completed() {
+        WR_COMPLETED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    pub fn created_count() -> u64 {
+        WR_CREATED.load(std::sync::atomic::Ordering::Relaxed)
+    }
+    pub fn dropped_count() -> u64 {
+        WR_COMPLETED.load(std::sync::atomic::Ordering::Relaxed)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -815,16 +946,15 @@ impl SubInterpreterWorker {
             std::ptr::null_mut(),
         ));
 
-        // Workaround for a CPython sub-interpreter leak:
-        // `_PyObject_MakeTpCall` (Vectorcall's fallback when the callable
-        // has no `tp_vectorcall` slot, which pure Python classes do NOT
-        // expose) constructs an internal args tuple, INCREFs every arg
-        // into it, and fails to DECREF them on cleanup in sub-interp
-        // mode. Net effect: every arg gets +1 it never drops, so dicts
-        // we pass (headers, params) leak forever. Manual DECREF here
-        // balances the books. For non-leaking objects (interned str
-        // singletons like "GET") this is a no-op on their effective
-        // refcount because the interner already holds many refs.
+        // Workaround for a sub-interp refcount leak through Vectorcall
+        // when the callable is a pure Python class (no tp_vectorcall
+        // slot). Path falls back to `_PyObject_MakeTpCall` which
+        // constructs an internal args tuple; in sub-interp mode the
+        // tuple's contents are not DECREF'd on cleanup. Manual DECREF
+        // here restores the balance. Verified empirically via the
+        // leak_detect feature — dicts drop at rc=2 (us + instance
+        // slot) with the hack, rc=3 (us + slot + leaked tuple ref)
+        // without it.
         for p in args_arr.iter() {
             ffi::Py_DECREF(*p);
         }
@@ -1176,6 +1306,12 @@ impl SubInterpreterWorker {
         let request_obj =
             self.build_request(method, path, params, query, body, headers, client_ip)?;
 
+        // RAII guard: on ANY exit (normal, `?`, panic), synchronously
+        // wipe the _PyreRequest's slots + clear the dict contents.
+        // Required because CPython PEP 684 sub-interpreters do NOT
+        // DECREF __slots__ values in tp_dealloc.
+        let _slot_guard = SlotClearer::new(request_obj.as_ptr());
+
         // Run before_request hooks
         for hook_name in before_hook_names {
             if let Some(&hook_func) = self.handlers.get(hook_name) {
@@ -1236,44 +1372,9 @@ impl SubInterpreterWorker {
             std::ptr::null_mut(),
         ));
 
-        // Explicit slot clearing — workaround for a CPython PEP 684
-        // sub-interpreter bug: Python-level finalizers (tp_finalize /
-        // __del__) do not fire on per-request instances in a sub-interp,
-        // and the corresponding tp_dealloc path doesn't DECREF __slots__
-        // values either. Net effect: every request's headers/params
-        // dicts (and the PyBytes body) stay alive forever.
-        //
-        // Forcing each slot to None via PyObject_DelAttrString here
-        // DECREFs the current value *while we still hold the GIL and a
-        // valid ref* — the dict/bytes goes to refcount 0 and frees
-        // immediately. Without this clear, _PyreRequest itself is
-        // destroyed but its slot contents orphan-leak in per-sub-interp
-        // PyMalloc arenas.
-        //
-        // Once sub-interp finalization is fixed in CPython, this block
-        // becomes redundant and can be removed.
-        if req_for_hooks.is_none() {
-            let req_ptr = request_obj.as_ptr();
-            for attr in [
-                c"method",
-                c"path",
-                c"params",
-                c"query",
-                c"body_bytes",
-                c"headers",
-                c"client_ip",
-            ] {
-                let _ = ffi::PyObject_DelAttrString(req_ptr, attr.as_ptr());
-            }
-            // PyObject_DelAttrString sets an error on failure (e.g. if a
-            // slot was never set). Clear it so the next Python call is
-            // clean.
-            if !ffi::PyErr_Occurred().is_null() {
-                ffi::PyErr_Clear();
-            }
-        }
-        // request_obj is owned by this PyObjRef; drops at fn end → Py_DECREF.
-        // No tuple allocation to leak.
+        // request_obj is owned by this PyObjRef; drops at fn end.
+        // `_slot_guard` (defined above) clears its slots unconditionally
+        // before that drop runs — covers the `?` error paths below too.
         drop(request_obj);
 
         let mut response = match result_obj {
@@ -1320,26 +1421,8 @@ impl SubInterpreterWorker {
                 }
             }
 
-            // After-hooks done — clear the request slots now (same
-            // rationale as the no-hooks branch above; must happen while
-            // we hold the GIL). Both `request_obj` and `req_for_hooks`
-            // own a ref, so slot DECREF here runs against the live
-            // object; dropping the remaining refs releases the shell.
-            let req_ptr = req_for_hooks.as_ptr();
-            for attr in [
-                c"method",
-                c"path",
-                c"params",
-                c"query",
-                c"body_bytes",
-                c"headers",
-                c"client_ip",
-            ] {
-                let _ = ffi::PyObject_DelAttrString(req_ptr, attr.as_ptr());
-            }
-            if !ffi::PyErr_Occurred().is_null() {
-                ffi::PyErr_Clear();
-            }
+            // _slot_guard (from top of fn) clears at end — no inline
+            // cleanup needed here.
         }
 
         Ok(response)
@@ -1683,6 +1766,7 @@ fn worker_thread_loop(
 
         // Send response back (ignore error if receiver dropped)
         let _ = req.response_tx.send(response);
+        WorkRequest::inc_completed();
     }
 
     // Channel closed — clean up the sub-interpreter

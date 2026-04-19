@@ -25,6 +25,11 @@ fn leak_detect_dump() {
     leak_detect::dump_to_stderr();
 }
 
+#[pyo3::pyfunction]
+fn workrequest_counts() -> (u64, u64) {
+    (interp::WorkRequest::created_count(), interp::WorkRequest::dropped_count())
+}
+
 #[pymodule]
 fn engine(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<app::PyreApp>()?;
@@ -36,6 +41,7 @@ fn engine(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(pyo3::wrap_pyfunction!(monitor::get_gil_metrics, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(logging::init_logger, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(logging::emit_python_log, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(workrequest_counts, m)?)?;
     #[cfg(feature = "leak_detect")]
     m.add_function(pyo3::wrap_pyfunction!(leak_detect_dump, m)?)?;
     Ok(())

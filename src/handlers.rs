@@ -518,6 +518,7 @@ pub(crate) async fn handle_request_subinterp(
     let path_log = Arc::clone(&path);
     let (response_tx, response_rx) = tokio::sync::oneshot::channel();
 
+    interp::WorkRequest::inc_created();
     if let Err(e) = pool.submit(interp::WorkRequest {
         handler_idx,
         method: method.to_string(),
