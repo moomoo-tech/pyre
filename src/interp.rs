@@ -489,23 +489,60 @@ pub(crate) unsafe fn py_bytes(data: &[u8]) -> Option<PyObjRef> {
 }
 
 /// Create a new Python dict from a HashMap<String, String>. Returns owned `PyObjRef`.
+///
+/// On any failure (str alloc OOM or PyDict_SetItem failure), clears the
+/// pending Python exception before returning None. Callers must not
+/// pass a non-NULL PyObject back to Python with a set exception state
+/// (CPython raises SystemError in that case).
 pub(crate) unsafe fn py_str_dict(map: &HashMap<String, String>) -> Option<PyObjRef> {
     let dict = PyObjRef::from_owned(ffi::PyDict_New())?;
     for (k, v) in map {
-        let pk = py_str(k)?;
-        let pv = py_str(v)?;
-        ffi::PyDict_SetItem(dict.as_ptr(), pk.as_ptr(), pv.as_ptr());
+        let pk = match py_str(k) {
+            Some(p) => p,
+            None => {
+                ffi::PyErr_Clear();
+                return None;
+            }
+        };
+        let pv = match py_str(v) {
+            Some(p) => p,
+            None => {
+                ffi::PyErr_Clear();
+                return None;
+            }
+        };
+        if ffi::PyDict_SetItem(dict.as_ptr(), pk.as_ptr(), pv.as_ptr()) < 0 {
+            ffi::PyErr_Clear();
+            return None;
+        }
     }
     Some(dict)
 }
 
 /// Same as `py_str_dict` but from a Vec of key-value pairs (for path params).
+///
+/// Same exception-clearing discipline as `py_str_dict` — see doc there.
 pub(crate) unsafe fn py_str_dict_from_vec(pairs: &[(String, String)]) -> Option<PyObjRef> {
     let dict = PyObjRef::from_owned(ffi::PyDict_New())?;
     for (k, v) in pairs {
-        let pk = py_str(k)?;
-        let pv = py_str(v)?;
-        ffi::PyDict_SetItem(dict.as_ptr(), pk.as_ptr(), pv.as_ptr());
+        let pk = match py_str(k) {
+            Some(p) => p,
+            None => {
+                ffi::PyErr_Clear();
+                return None;
+            }
+        };
+        let pv = match py_str(v) {
+            Some(p) => p,
+            None => {
+                ffi::PyErr_Clear();
+                return None;
+            }
+        };
+        if ffi::PyDict_SetItem(dict.as_ptr(), pk.as_ptr(), pv.as_ptr()) < 0 {
+            ffi::PyErr_Clear();
+            return None;
+        }
     }
     Some(dict)
 }
@@ -935,15 +972,34 @@ def _attach_pyre_request_helpers(t):\n    from urllib.parse import parse_qs\n   
         let ptr = result_obj.as_ptr();
 
         // Check if it's a _PyreResponse or any response-like object
-        // (duck typing: has status_code + body attributes)
+        // (duck typing: has status_code + body attributes).
+        //
+        // PyObject_IsInstance returns 1 (true), 0 (false), or -1 (error
+        // with exception set). Treating -1 as false without clearing
+        // the exception is a SystemError latent bomb — the next C-API
+        // call short-circuits on the pending exception.
         let resp_cls = self.sky_response_cls;
-        let is_response = if !resp_cls.is_null() && ffi::PyObject_IsInstance(ptr, resp_cls) == 1 {
-            true
+        let is_response = if resp_cls.is_null() {
+            false
         } else {
-            // Duck-type check: has status_code attribute?
-            let has_status = ffi::PyObject_HasAttrString(ptr, c"status_code".as_ptr()) == 1;
-            let has_body = ffi::PyObject_HasAttrString(ptr, c"body".as_ptr()) == 1;
-            has_status && has_body
+            match ffi::PyObject_IsInstance(ptr, resp_cls) {
+                1 => true,
+                -1 => {
+                    ffi::PyErr_Clear();
+                    // Fall through to duck-type check.
+                    let has_status =
+                        ffi::PyObject_HasAttrString(ptr, c"status_code".as_ptr()) == 1;
+                    let has_body = ffi::PyObject_HasAttrString(ptr, c"body".as_ptr()) == 1;
+                    has_status && has_body
+                }
+                _ => {
+                    // 0 (not an instance) — try duck-typing.
+                    let has_status =
+                        ffi::PyObject_HasAttrString(ptr, c"status_code".as_ptr()) == 1;
+                    let has_body = ffi::PyObject_HasAttrString(ptr, c"body".as_ptr()) == 1;
+                    has_status && has_body
+                }
+            }
         };
         if is_response {
             return self.parse_sky_response(result_obj);
@@ -1133,18 +1189,35 @@ def _attach_pyre_request_helpers(t):\n    from urllib.parse import parse_qs\n   
         };
 
         // headers
+        //
+        // CRITICAL: PyDict_Next forbids dict mutation during iteration.
+        // PyObject_Str may invoke user __str__ which could mutate the
+        // dict → undefined behaviour / segfault. We collect borrowed
+        // key/value refs first, INCREF them, then release the iteration
+        // scope before calling any method that may re-enter Python.
         let mut resp_headers = HashMap::new();
         {
             let attr = PyObjRef::from_owned(ffi::PyObject_GetAttrString(ptr, c"headers".as_ptr()));
             if let Some(a) = &attr {
                 if ffi::PyDict_Check(a.as_ptr()) != 0 {
+                    // Phase 1: snapshot (no user code runs).
+                    let mut snapshot: Vec<(PyObjRef, PyObjRef)> = Vec::new();
                     let mut pos: isize = 0;
                     let mut key: *mut ffi::PyObject = std::ptr::null_mut();
                     let mut val: *mut ffi::PyObject = std::ptr::null_mut();
                     while ffi::PyDict_Next(a.as_ptr(), &mut pos, &mut key, &mut val) != 0 {
-                        // Coerce both key and value to str via PyObject_Str
-                        let str_key = PyObjRef::from_owned(ffi::PyObject_Str(key));
-                        let str_val = PyObjRef::from_owned(ffi::PyObject_Str(val));
+                        // PyDict_Next returns borrowed refs — INCREF to own them.
+                        if let (Some(k), Some(v)) = (
+                            PyObjRef::from_borrowed(key),
+                            PyObjRef::from_borrowed(val),
+                        ) {
+                            snapshot.push((k, v));
+                        }
+                    }
+                    // Phase 2: convert — safe to invoke __str__ now.
+                    for (k_obj, v_obj) in snapshot {
+                        let str_key = PyObjRef::from_owned(ffi::PyObject_Str(k_obj.as_ptr()));
+                        let str_val = PyObjRef::from_owned(ffi::PyObject_Str(v_obj.as_ptr()));
                         if let (Some(sk), Some(sv)) = (str_key, str_val) {
                             if let (Ok(k), Ok(v)) =
                                 (pyobj_to_string(sk.as_ptr()), pyobj_to_string(sv.as_ptr()))
@@ -1152,8 +1225,6 @@ def _attach_pyre_request_helpers(t):\n    from urllib.parse import parse_qs\n   
                                 resp_headers.insert(k, v);
                             }
                         } else {
-                            // Clear exception immediately — CPython requires clean
-                            // error state before calling any further C-API functions
                             ffi::PyErr_Clear();
                         }
                     }

@@ -236,13 +236,62 @@ where
         outgoing_tx: std::sync::Mutex::new(Some(outgoing_tx)),
     };
 
-    // Spawn a thread for the Python handler (blocks on ws.recv())
+    // Spawn a thread for the Python handler (blocks on ws.recv()).
+    //
+    // Contract: WebSocket handlers live in the main interpreter (they
+    // are registered via `@app.websocket(...)` at import time, which
+    // runs in the main interp). `Python::attach` on a fresh OS thread
+    // binds to the main interp's tstate, which matches. This is NOT a
+    // PEP 684 cross-interp boundary — sub-interpreters aren't involved
+    // for WS handlers in the current design.
     let py_handle = std::thread::spawn(move || {
         Python::attach(|py| {
-            let ws_obj = Py::new(py, sky_ws).unwrap();
-            if let Err(e) = handler.call1(py, (ws_obj,)) {
-                tracing::error!(target: "pyre::server", error = %e, "WebSocket handler error");
+            let ws_obj = match Py::new(py, sky_ws) {
+                Ok(o) => o,
+                Err(e) => {
+                    tracing::error!(target: "pyre::server", error = %e, "PyreWebSocket alloc failed");
+                    // Drop handler under GIL before returning.
+                    drop(handler);
+                    return;
+                }
+            };
+            match handler.call1(py, (ws_obj,)) {
+                Ok(result) => {
+                    // If the handler is `async def`, call1 returns a
+                    // coroutine that must be driven. Detect via
+                    // `asyncio.iscoroutine`; if so, run it on a fresh
+                    // event loop. Otherwise drop the result.
+                    let is_coro = py
+                        .import("asyncio")
+                        .and_then(|m| m.getattr("iscoroutine"))
+                        .and_then(|f| f.call1((&result,)))
+                        .and_then(|r| r.extract::<bool>())
+                        .unwrap_or(false);
+                    if is_coro {
+                        if let Err(e) = py
+                            .import("asyncio")
+                            .and_then(|m| m.getattr("run"))
+                            .and_then(|f| f.call1((&result,)))
+                        {
+                            tracing::error!(
+                                target: "pyre::server",
+                                error = %e,
+                                "WebSocket async handler error",
+                            );
+                        }
+                    }
+                    // `result` drops here under GIL — safe.
+                    drop(result);
+                }
+                Err(e) => {
+                    tracing::error!(target: "pyre::server", error = %e, "WebSocket handler error");
+                }
             }
+            // Drop handler explicitly under GIL. Without this, the
+            // Py<PyAny> would be dropped after the `attach` scope
+            // closes, triggering PyO3's GIL-less pending-drop path —
+            // harmless for ref counting but avoids the indirection.
+            drop(handler);
         });
     });
 
