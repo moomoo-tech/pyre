@@ -1,0 +1,374 @@
+//! Async Postgres support via sqlx::PgPool.
+//!
+//! One process, one pool. `PgPool.connect(dsn)` populates a global
+//! `OnceLock<sqlx::PgPool>` + a dedicated tokio runtime that drives the
+//! pool's futures. All handlers (GIL or sub-interpreter) share the same
+//! connection pool — no per-interp duplication.
+//!
+//! v1 scope:
+//!   * sync API only (`pool.fetch_one(sql, *params)` blocks the worker
+//!     until the future completes). v2 adds async-awaitable wrappers.
+//!   * supported param types: int, float, str, bool, bytes, None, dict
+//!     (JSON), list (JSON). datetime / uuid / decimal → v2.
+//!   * supported row types: same set, read back via PgValueRef type OIDs.
+//!
+//! Architecture notes:
+//!   * Using a dedicated tokio runtime rather than the hyper server's
+//!     runtime avoids cross-runtime coupling and keeps DB I/O off the
+//!     accept loop. Worker threads (spawn_blocking in the GIL path or
+//!     sub-interp pool threads) block on `rt.block_on(future)`; the
+//!     pool-runtime drives the future to completion while the blocking
+//!     thread waits.
+//!   * `py.detach()` around block_on so the GIL is released during DB I/O.
+//!     That's the whole point — other Python threads make progress while
+//!     this one waits on the wire.
+//!   * sqlx::PgPool is `Clone`-via-`Arc` internally, so the static
+//!     reference works fine from arbitrary threads and sub-interpreters.
+
+use std::sync::OnceLock;
+
+use pyo3::exceptions::{PyConnectionError, PyRuntimeError, PyValueError};
+use pyo3::prelude::*;
+use pyo3::types::{PyBool, PyBytes, PyDict, PyFloat, PyInt, PyList, PyString};
+use pyo3::BoundObject;
+use sqlx::postgres::{PgPoolOptions, PgRow, PgValueRef};
+use sqlx::{Column, Row, TypeInfo, ValueRef};
+use tokio::runtime::Runtime;
+
+static PG_POOL: OnceLock<sqlx::PgPool> = OnceLock::new();
+static PG_RUNTIME: OnceLock<Runtime> = OnceLock::new();
+
+fn runtime() -> &'static Runtime {
+    PG_RUNTIME.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .thread_name("pyre-db")
+            .enable_all()
+            .build()
+            .expect("failed to build pg runtime")
+    })
+}
+
+fn pool_ref() -> PyResult<&'static sqlx::PgPool> {
+    PG_POOL.get().ok_or_else(|| {
+        PyRuntimeError::new_err("PgPool not initialized — call PgPool.connect() first")
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Python value → sqlx param
+// ---------------------------------------------------------------------------
+
+/// A single bound parameter extracted from Python, normalized into the
+/// concrete Rust type sqlx expects. This sidesteps the need for trait-object
+/// parameter binding (which sqlx doesn't directly support) — we build a
+/// `sqlx::query::Query` and call the matching `bind::<T>()` per param.
+enum BoundParam {
+    Null,
+    Bool(bool),
+    Int(i64),
+    Float(f64),
+    Text(String),
+    Bytes(Vec<u8>),
+    /// Dict or list → JSON-encoded value, bound as jsonb.
+    Json(serde_json::Value),
+}
+
+fn extract_param(obj: &Bound<'_, PyAny>) -> PyResult<BoundParam> {
+    if obj.is_none() {
+        return Ok(BoundParam::Null);
+    }
+    // Order matters: PyBool is a subclass of PyInt; check bool first.
+    if let Ok(b) = obj.cast::<PyBool>() {
+        return Ok(BoundParam::Bool(b.is_true()));
+    }
+    if let Ok(i) = obj.cast::<PyInt>() {
+        return Ok(BoundParam::Int(i.extract::<i64>()?));
+    }
+    if let Ok(f) = obj.cast::<PyFloat>() {
+        return Ok(BoundParam::Float(f.extract::<f64>()?));
+    }
+    if let Ok(s) = obj.cast::<PyString>() {
+        return Ok(BoundParam::Text(s.to_string()));
+    }
+    if let Ok(b) = obj.cast::<PyBytes>() {
+        return Ok(BoundParam::Bytes(b.as_bytes().to_vec()));
+    }
+    // dict / list → JSON. Goes through pythonize → serde_json::Value,
+    // bound as jsonb on the Postgres side.
+    if obj.is_instance_of::<PyDict>() || obj.is_instance_of::<PyList>() {
+        let val: serde_json::Value = pythonize::depythonize(obj).map_err(|e| {
+            PyValueError::new_err(format!("JSON convert error on dict/list param: {e}"))
+        })?;
+        return Ok(BoundParam::Json(val));
+    }
+    Err(PyValueError::new_err(format!(
+        "unsupported parameter type: {} (supported: int, float, str, bool, bytes, None, dict, list)",
+        obj.get_type().name()?
+    )))
+}
+
+fn bind_params_raw<'q>(
+    mut query: sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>,
+    params: &'q [BoundParam],
+) -> sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments> {
+    for p in params {
+        query = match p {
+            BoundParam::Null => query.bind(None::<i64>),
+            BoundParam::Bool(v) => query.bind(*v),
+            BoundParam::Int(v) => query.bind(*v),
+            BoundParam::Float(v) => query.bind(*v),
+            BoundParam::Text(v) => query.bind(v.as_str()),
+            BoundParam::Bytes(v) => query.bind(v.as_slice()),
+            BoundParam::Json(v) => query.bind(sqlx::types::Json(v)),
+        };
+    }
+    query
+}
+
+// ---------------------------------------------------------------------------
+// sqlx row → Python dict
+// ---------------------------------------------------------------------------
+
+/// Convert a single column cell into a Python object. Dispatches on the
+/// Postgres type OID name (sqlx exposes it via `TypeInfo::name()`).
+fn column_to_py(py: Python<'_>, value: PgValueRef<'_>) -> PyResult<Py<PyAny>> {
+    if value.is_null() {
+        return Ok(py.None());
+    }
+
+    // sqlx's `Type` trait info name returns strings like "INT4", "TEXT", "JSONB".
+    // Decode each cell into our supported set, falling back to text for
+    // unknown types.
+    let type_name = value.type_info().name().to_ascii_uppercase();
+
+    // Clone-decode: sqlx wants owned values for Decode. Decode always
+    // consumes the value, so we build back by name.
+    match type_name.as_str() {
+        // Integers — Postgres int2/int4/int8.
+        "INT2" => decode_scalar::<i16>(py, value),
+        "INT4" | "INT" => decode_scalar::<i32>(py, value),
+        "INT8" | "BIGINT" => decode_scalar::<i64>(py, value),
+        // Floats — float4/float8 / numeric (numeric we'd need a decimal crate).
+        "FLOAT4" => decode_scalar::<f32>(py, value),
+        "FLOAT8" | "DOUBLE PRECISION" => decode_scalar::<f64>(py, value),
+        // Bool.
+        "BOOL" | "BOOLEAN" => decode_scalar::<bool>(py, value),
+        // Text-like.
+        "TEXT" | "VARCHAR" | "CHAR" | "BPCHAR" | "NAME" | "CITEXT" => {
+            decode_scalar::<String>(py, value)
+        }
+        // Bytes.
+        "BYTEA" => {
+            let v: Vec<u8> = <Vec<u8> as sqlx::Decode<sqlx::Postgres>>::decode(value)
+                .map_err(|e| PyRuntimeError::new_err(format!("decode bytea: {e}")))?;
+            Ok(PyBytes::new(py, &v).into_any().unbind())
+        }
+        // JSON → dict/list via pythonize.
+        "JSON" | "JSONB" => {
+            let v: serde_json::Value = <sqlx::types::Json<serde_json::Value> as sqlx::Decode<
+                sqlx::Postgres,
+            >>::decode(value)
+            .map(|j| j.0)
+            .map_err(|e| PyRuntimeError::new_err(format!("decode json: {e}")))?;
+            pythonize::pythonize(py, &v)
+                .map(|b| b.unbind())
+                .map_err(|e| PyRuntimeError::new_err(format!("pythonize json: {e}")))
+        }
+        // Unknown — return the column's textual representation so the
+        // caller at least gets something readable instead of a silent error.
+        _ => {
+            let s = <String as sqlx::Decode<sqlx::Postgres>>::decode(value)
+                .map_err(|e| PyRuntimeError::new_err(format!("decode {type_name} as text: {e}")))?;
+            Ok(PyString::new(py, &s).into_any().unbind())
+        }
+    }
+}
+
+fn decode_scalar<'r, T>(py: Python<'r>, value: PgValueRef<'r>) -> PyResult<Py<PyAny>>
+where
+    T: sqlx::Decode<'r, sqlx::Postgres> + pyo3::IntoPyObject<'r> + 'r,
+    for<'py> <T as pyo3::IntoPyObject<'py>>::Error: std::fmt::Display,
+{
+    let v: T = <T as sqlx::Decode<sqlx::Postgres>>::decode(value)
+        .map_err(|e| PyRuntimeError::new_err(format!("decode column: {e}")))?;
+    // pyo3 0.28: IntoPyObject is the successor to ToPyObject. Returns Bound.
+    let bound = v
+        .into_pyobject(py)
+        .map_err(|e| PyRuntimeError::new_err(format!("into_pyobject: {e}")))?;
+    // Some IntoPyObject impls return Bound<PyAny>, others return a concrete
+    // Bound type. into_any() normalizes.
+    Ok(bound.into_any().unbind())
+}
+
+fn row_to_dict(py: Python<'_>, row: &PgRow) -> PyResult<Py<PyDict>> {
+    let dict = PyDict::new(py);
+    for col in row.columns() {
+        let name = col.name();
+        let raw_val = row
+            .try_get_raw(col.ordinal())
+            .map_err(|e| PyRuntimeError::new_err(format!("get column {name}: {e}")))?;
+        let py_val = column_to_py(py, raw_val)?;
+        dict.set_item(name, py_val)?;
+    }
+    Ok(dict.unbind())
+}
+
+// ---------------------------------------------------------------------------
+// Python-visible PgPool
+// ---------------------------------------------------------------------------
+
+#[pyclass(frozen)]
+pub(crate) struct PgPool;
+
+#[pymethods]
+impl PgPool {
+    /// Initialize the global pool. Safe to call more than once — subsequent
+    /// calls are no-ops (the first DSN wins). Set `max_connections` to bound
+    /// the worst-case connection count from the process to Postgres.
+    #[classmethod]
+    #[pyo3(signature = (dsn, max_connections = 10, acquire_timeout_secs = 30))]
+    fn connect(
+        _cls: &Bound<'_, pyo3::types::PyType>,
+        py: Python<'_>,
+        dsn: &str,
+        max_connections: u32,
+        acquire_timeout_secs: u64,
+    ) -> PyResult<Self> {
+        if PG_POOL.get().is_some() {
+            // Idempotent: reconnecting with different DSN would surprise the
+            // user; refuse and make them tear down first.
+            return Err(PyRuntimeError::new_err(
+                "PgPool.connect() already called — only one pool per process in v1",
+            ));
+        }
+
+        let rt = runtime();
+        let dsn_owned = dsn.to_string();
+        let pool = py
+            .detach(|| {
+                rt.block_on(async move {
+                    PgPoolOptions::new()
+                        .max_connections(max_connections)
+                        .acquire_timeout(std::time::Duration::from_secs(acquire_timeout_secs))
+                        .connect(&dsn_owned)
+                        .await
+                })
+            })
+            .map_err(|e| PyConnectionError::new_err(format!("PgPool connect: {e}")))?;
+
+        PG_POOL
+            .set(pool)
+            .map_err(|_| PyRuntimeError::new_err("PgPool already initialized (race)"))?;
+        Ok(PgPool)
+    }
+
+    /// Fetch exactly one row or None. Extra rows are ignored (no error).
+    #[pyo3(signature = (sql, *params))]
+    fn fetch_one(
+        &self,
+        py: Python<'_>,
+        sql: &str,
+        params: Vec<Py<PyAny>>,
+    ) -> PyResult<Option<Py<PyDict>>> {
+        let pool = pool_ref()?;
+        let rt = runtime();
+        let bound = params
+            .iter()
+            .map(|p| extract_param(p.bind(py)))
+            .collect::<PyResult<Vec<_>>>()?;
+
+        let row_opt = py
+            .detach(|| {
+                rt.block_on(async {
+                    let q = sqlx::query(sql);
+                    bind_params_raw(q, &bound).fetch_optional(pool).await
+                })
+            })
+            .map_err(|e| PyRuntimeError::new_err(format!("fetch_one: {e}")))?;
+
+        match row_opt {
+            Some(row) => Ok(Some(row_to_dict(py, &row)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Fetch all matching rows into a list of dicts.
+    #[pyo3(signature = (sql, *params))]
+    fn fetch_all(&self, py: Python<'_>, sql: &str, params: Vec<Py<PyAny>>) -> PyResult<Py<PyList>> {
+        let pool = pool_ref()?;
+        let rt = runtime();
+        let bound = params
+            .iter()
+            .map(|p| extract_param(p.bind(py)))
+            .collect::<PyResult<Vec<_>>>()?;
+
+        let rows = py
+            .detach(|| {
+                rt.block_on(async {
+                    let q = sqlx::query(sql);
+                    bind_params_raw(q, &bound).fetch_all(pool).await
+                })
+            })
+            .map_err(|e| PyRuntimeError::new_err(format!("fetch_all: {e}")))?;
+
+        let py_list = PyList::empty(py);
+        for row in &rows {
+            py_list.append(row_to_dict(py, row)?)?;
+        }
+        Ok(py_list.unbind())
+    }
+
+    /// Fetch a single column of a single row. Raises if no rows; returns
+    /// None for SQL NULL. Useful for `SELECT count(*) FROM ...`.
+    #[pyo3(signature = (sql, *params))]
+    fn fetch_scalar(
+        &self,
+        py: Python<'_>,
+        sql: &str,
+        params: Vec<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let pool = pool_ref()?;
+        let rt = runtime();
+        let bound = params
+            .iter()
+            .map(|p| extract_param(p.bind(py)))
+            .collect::<PyResult<Vec<_>>>()?;
+
+        let row = py
+            .detach(|| {
+                rt.block_on(async {
+                    let q = sqlx::query(sql);
+                    bind_params_raw(q, &bound).fetch_one(pool).await
+                })
+            })
+            .map_err(|e| PyRuntimeError::new_err(format!("fetch_scalar: {e}")))?;
+
+        let raw = row
+            .try_get_raw(0)
+            .map_err(|e| PyRuntimeError::new_err(format!("fetch_scalar col 0: {e}")))?;
+        column_to_py(py, raw)
+    }
+
+    /// Execute a statement that doesn't return rows. Returns the number of
+    /// rows affected.
+    #[pyo3(signature = (sql, *params))]
+    fn execute(&self, py: Python<'_>, sql: &str, params: Vec<Py<PyAny>>) -> PyResult<u64> {
+        let pool = pool_ref()?;
+        let rt = runtime();
+        let bound = params
+            .iter()
+            .map(|p| extract_param(p.bind(py)))
+            .collect::<PyResult<Vec<_>>>()?;
+
+        let result = py
+            .detach(|| {
+                rt.block_on(async {
+                    let q = sqlx::query(sql);
+                    bind_params_raw(q, &bound).execute(pool).await
+                })
+            })
+            .map_err(|e| PyRuntimeError::new_err(format!("execute: {e}")))?;
+        Ok(result.rows_affected())
+    }
+}
