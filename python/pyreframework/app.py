@@ -167,6 +167,38 @@ class Pyre:
         """Set max request body size. Example: ``app.max_body_size = 50 * 1024 * 1024``"""
         self._engine.set_max_body_size(size)
 
+    def enable_compression(
+        self,
+        *,
+        min_size: int = 512,
+        gzip: bool = True,
+        brotli: bool = True,
+        gzip_level: int = 6,
+        brotli_quality: int = 4,
+    ) -> None:
+        """Enable gzip / brotli response compression.
+
+        Disabled by default; call once at startup to turn on. The server
+        negotiates with the client's ``Accept-Encoding`` header and prefers
+        brotli when both are enabled. Skips responses under ``min_size``,
+        non-text content types (images, octet-stream), streaming responses
+        (SSE), and responses that set ``Content-Encoding`` explicitly.
+
+        Args:
+            min_size: minimum body size (bytes) to compress. Default 512.
+            gzip: enable gzip (``Content-Encoding: gzip``). Default True.
+            brotli: enable brotli (``Content-Encoding: br``). Default True.
+            gzip_level: 1..=9, default 6 (balanced speed/ratio).
+            brotli_quality: 0..=11, default 4 (production sweet spot).
+        """
+        self._engine.configure_compression(
+            True, min_size, gzip, brotli, gzip_level, brotli_quality
+        )
+
+    def disable_compression(self) -> None:
+        """Disable response compression. No-op if already disabled."""
+        self._engine.configure_compression(False)
+
     @property
     def state(self):
         """Shared state across all sub-interpreters (nanosecond latency).

@@ -184,6 +184,37 @@ impl PyreApp {
         crate::handlers::set_max_body_size(size);
     }
 
+    /// Configure response compression. Disabled by default; opt-in only.
+    ///
+    /// Args:
+    ///   enabled: master switch — when false, compression logic is a
+    ///     single relaxed-atomic load + branch-not-taken.
+    ///   min_size: responses smaller than this (in bytes) are not compressed.
+    ///   gzip / brotli: enable each algorithm. Server prefers brotli when both
+    ///     are enabled and the client accepts it.
+    ///   gzip_level: 1..=9, default 6. Higher = better ratio, more CPU.
+    ///   brotli_quality: 0..=11, default 4. Production sweet spot is 4–6.
+    #[pyo3(signature = (
+        enabled,
+        min_size = crate::compression::DEFAULT_MIN_SIZE,
+        gzip = true,
+        brotli = true,
+        gzip_level = 6,
+        brotli_quality = 4,
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn configure_compression(
+        &self,
+        enabled: bool,
+        min_size: usize,
+        gzip: bool,
+        brotli: bool,
+        gzip_level: u32,
+        brotli_quality: u32,
+    ) {
+        crate::compression::configure(enabled, min_size, gzip, brotli, gzip_level, brotli_quality);
+    }
+
     /// Access the shared state (cross-sub-interpreter, nanosecond latency).
     #[getter]
     fn state(&self) -> SharedState {

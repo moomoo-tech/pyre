@@ -196,6 +196,12 @@ pub(crate) async fn handle_request(
     let query = uri.query().unwrap_or("").to_string();
     // Lazy headers: store raw HeaderMap, convert only if Python accesses req.headers.
     let raw_headers = req.headers().clone();
+    // Capture Accept-Encoding before raw_headers is moved into the PyreRequest.
+    let accept_encoding = raw_headers
+        .get(hyper::header::ACCEPT_ENCODING)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
 
     use http_body_util::Limited;
     let limited = Limited::new(req.into_body(), max_body_size());
@@ -252,7 +258,12 @@ pub(crate) async fn handle_request(
     .unwrap_or_else(|_| HandlerResult::Response(Err("handler thread panicked".to_string())));
 
     let mut resp = match handler_result {
-        HandlerResult::Response(result) => full_body(build_response(result)?),
+        HandlerResult::Response(mut result) => {
+            if let Ok(data) = result.as_mut() {
+                crate::compression::maybe_compress(data, &accept_encoding);
+            }
+            full_body(build_response(result)?)
+        }
         HandlerResult::Stream(info) => build_stream_response(info),
     };
 
@@ -481,6 +492,11 @@ pub(crate) async fn handle_request_subinterp(
     let query = uri.query().unwrap_or("").to_string();
     // Defer header extraction — only convert if needed (sub-interp path).
     let raw_headers = req.headers().clone();
+    let accept_encoding = raw_headers
+        .get(hyper::header::ACCEPT_ENCODING)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
 
     use http_body_util::Limited;
     let limited = Limited::new(req.into_body(), max_body_size());
@@ -540,7 +556,12 @@ pub(crate) async fn handle_request_subinterp(
         .unwrap_or_else(|_| HandlerResult::Response(Err("handler thread panicked".to_string())));
 
         let mut resp = match handler_result {
-            HandlerResult::Response(result) => full_body(build_response(result)?),
+            HandlerResult::Response(mut result) => {
+                if let Ok(data) = result.as_mut() {
+                    crate::compression::maybe_compress(data, &accept_encoding);
+                }
+                full_body(build_response(result)?)
+            }
             HandlerResult::Stream(info) => build_stream_response(info),
         };
         apply_cors(&mut resp, routes.cors_config.as_ref());
@@ -597,18 +618,24 @@ pub(crate) async fn handle_request_subinterp(
     };
 
     let mut http_resp = match result {
-        Ok(resp) => {
-            let ct = resp.content_type.as_deref().unwrap_or_else(|| {
+        Ok(mut resp) => {
+            let ct_owned: String = resp.content_type.clone().unwrap_or_else(|| {
                 if resp.is_json || resp.body.starts_with(b"{") || resp.body.starts_with(b"[") {
-                    "application/json"
+                    "application/json".to_string()
                 } else {
-                    "text/plain; charset=utf-8"
+                    "text/plain; charset=utf-8".to_string()
                 }
             });
+            crate::compression::maybe_compress_subinterp(
+                &mut resp.body,
+                &ct_owned,
+                &mut resp.headers,
+                &accept_encoding,
+            );
             let status = StatusCode::from_u16(resp.status).unwrap_or(StatusCode::OK);
             let mut builder = Response::builder()
                 .status(status)
-                .header("content-type", ct)
+                .header("content-type", &ct_owned)
                 .header("server", crate::response::SERVER_HEADER);
             for (k, v) in &resp.headers {
                 builder = builder.header(k.as_str(), v.as_str());

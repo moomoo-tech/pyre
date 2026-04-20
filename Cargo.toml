@@ -51,6 +51,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 socket2 = { version = "0.5", features = ["all"] }
 libc = "0.2"
 pythonize = "0.28"
+flate2 = "1"
+brotli = "7"
 
 # Optional — pulled in only by the `leak_detect` feature.
 metrics = { version = "0.24", optional = true }

@@ -2,6 +2,7 @@
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 mod app;
+mod compression;
 mod handlers;
 mod interp;
 mod json;
