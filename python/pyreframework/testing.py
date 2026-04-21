@@ -1,36 +1,58 @@
-"""TestClient — test Pyre routes without manually starting a server.
+"""TestClient — exercise a Pyre app without manually managing a server.
 
-Usage::
+Starts the app in a background thread and talks to it over a real TCP
+socket, so every piece of the stack (Rust accept loop, sub-interp
+dispatch, CORS, compression, hooks) is exercised exactly as it would be
+in production. Pure stdlib for HTTP; WebSocket support requires the
+``websockets`` package.
 
-    from pyreframework import Pyre
+Basics::
+
     from pyreframework.testing import TestClient
 
-    app = Pyre()
+    with TestClient(app) as c:
+        r = c.get("/users", params={"limit": 10})
+        assert r.ok
+        assert r.json()["count"] == 10
 
-    @app.get("/")
-    def index(req):
-        return {"hello": "world"}
+Persistent cookies::
 
-    client = TestClient(app)
-    resp = client.get("/")
-    assert resp.status_code == 200
-    assert resp.json()["hello"] == "world"
-    client.close()
+    with TestClient(app) as c:
+        c.post("/login", body={"user": "alice"})
+        # Cookies set by /login are resent automatically on later calls.
+        r = c.get("/me")
+
+WebSocket::
+
+    with TestClient(app) as c, c.websocket_connect("/ws") as ws:
+        ws.send("ping")
+        assert ws.recv() == "pong"
 """
 
 from __future__ import annotations
 
 import json
+import socket as _socket
 import threading
 import time
+import urllib.parse
 import urllib.request
 import urllib.error
 from dataclasses import dataclass, field
+from http.cookiejar import CookieJar
+from typing import Any, Iterator
 
 
 @dataclass
 class TestResponse:
-    """Response from TestClient."""
+    """Response from TestClient.
+
+    Attributes:
+        status_code: HTTP status code.
+        body: raw response body bytes.
+        headers: response headers (case-sensitive dict from urllib).
+    """
+
     status_code: int
     body: bytes
     headers: dict[str, str] = field(default_factory=dict)
@@ -39,31 +61,51 @@ class TestResponse:
     def text(self) -> str:
         return self.body.decode("utf-8", errors="replace")
 
-    def json(self) -> dict:
-        return json.loads(self.body)
+    @property
+    def ok(self) -> bool:
+        """True when the response is a success (2xx/3xx)."""
+        return self.status_code < 400
+
+    def json(self, **loads_kwargs) -> Any:
+        """Decode the body as JSON. Passes kwargs to ``json.loads``."""
+        return json.loads(self.body, **loads_kwargs)
+
+    def raise_for_status(self) -> None:
+        """Raise ``RuntimeError`` if the status code is 4xx or 5xx."""
+        if self.status_code >= 400:
+            raise RuntimeError(
+                f"TestClient: {self.status_code} for {self.headers.get('X-Request-URL', '?')}"
+            )
 
 
 class TestClient:
     """Test client — starts Pyre in a background thread.
 
-    Usage::
-
-        client = TestClient(app)
-        resp = client.get("/")
-        assert resp.status_code == 200
-
-        # Or as context manager:
-        with TestClient(app) as client:
-            resp = client.post("/data", body={"key": "value"})
+    Args:
+        app: Pyre app instance.
+        host: bind address (default ``127.0.0.1``).
+        port: bind port. ``None`` picks an unused port — preferred for
+              new tests so parallel runs don't collide on a hard-coded
+              number.
+        timeout: default per-request timeout in seconds (default 10).
+        follow_redirects: whether to follow 3xx redirects (default True,
+              matching urllib's historical behavior).
     """
 
-    def __init__(self, app, host: str = "127.0.0.1", port: int | None = 19876):
-        # port=None auto-picks an unused port. Prefer this in new tests —
-        # hard-coded ports collide across test files and produce
-        # test-order-dependent flakes (two module fixtures bind the same
-        # port, the second fails or worse, reuses the prior server).
+    # Tell pytest this is not a test class (silences the collection
+    # warning when the client lands in a test module namespace).
+    __test__ = False
+
+    def __init__(
+        self,
+        app,
+        host: str = "127.0.0.1",
+        port: int | None = 19876,
+        *,
+        timeout: float = 10.0,
+        follow_redirects: bool = True,
+    ):
         if port is None:
-            import socket as _socket
             s = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
             s.bind((host, 0))
             port = s.getsockname()[1]
@@ -71,24 +113,33 @@ class TestClient:
         self.host = host
         self.port = port
         self.base_url = f"http://{host}:{port}"
+        self.timeout = timeout
+        self.follow_redirects = follow_redirects
 
-        # Start server in background thread (GIL mode for testing)
+        # Cookie jar — cookies set by the server persist across requests
+        # made through this client, matching httpx.Client / requests.Session.
+        self.cookies: CookieJar = CookieJar()
+        self._opener = urllib.request.build_opener(
+            urllib.request.HTTPCookieProcessor(self.cookies),
+            _NoRedirectHandler() if not follow_redirects else urllib.request.HTTPRedirectHandler(),
+        )
+
         self._thread = threading.Thread(
             target=lambda: app.run(host=host, port=port, mode="default"),
             daemon=True,
         )
         self._thread.start()
 
-        # Wait for server ready. Any HTTP response (including 404) means
-        # the server is accepting connections — only ConnectionError /
-        # timeout means it's still starting.
+        # Readiness probe. Any HTTP response (2xx-5xx) proves the server
+        # is accepting connections; only ConnectionError / timeout means
+        # it's still starting.
         for _ in range(50):
             time.sleep(0.1)
             try:
                 urllib.request.urlopen(f"{self.base_url}/", timeout=1)
                 return
             except urllib.error.HTTPError:
-                return  # server responded with an error — it's up
+                return
             except Exception:
                 pass
 
@@ -104,16 +155,28 @@ class TestClient:
     def __exit__(self, *args):
         self.close()
 
-    def _request(
+    # ------------------------------------------------------------------
+    # HTTP
+    # ------------------------------------------------------------------
+
+    def request(
         self,
         method: str,
         path: str,
+        *,
         body: bytes | str | dict | None = None,
         headers: dict[str, str] | None = None,
+        params: dict[str, Any] | None = None,
+        timeout: float | None = None,
     ) -> TestResponse:
+        """Issue a raw request. Prefer the method-specific helpers."""
         url = f"{self.base_url}{path}"
-        req_headers = headers or {}
+        if params:
+            # Append (don't replace) — path may already carry a query.
+            sep = "&" if "?" in path else "?"
+            url = f"{url}{sep}{urllib.parse.urlencode(params, doseq=True)}"
 
+        req_headers = dict(headers or {})
         if isinstance(body, dict):
             body = json.dumps(body).encode("utf-8")
             req_headers.setdefault("Content-Type", "application/json")
@@ -121,11 +184,12 @@ class TestClient:
             body = body.encode("utf-8")
 
         req = urllib.request.Request(
-            url, data=body, headers=req_headers, method=method
+            url, data=body, headers=req_headers, method=method.upper()
         )
+        eff_timeout = timeout if timeout is not None else self.timeout
 
         try:
-            resp = urllib.request.urlopen(req, timeout=10)
+            resp = self._opener.open(req, timeout=eff_timeout)
             return TestResponse(
                 status_code=resp.status,
                 body=resp.read(),
@@ -139,16 +203,84 @@ class TestClient:
             )
 
     def get(self, path: str, **kwargs) -> TestResponse:
-        return self._request("GET", path, **kwargs)
+        return self.request("GET", path, **kwargs)
 
     def post(self, path: str, **kwargs) -> TestResponse:
-        return self._request("POST", path, **kwargs)
+        return self.request("POST", path, **kwargs)
 
     def put(self, path: str, **kwargs) -> TestResponse:
-        return self._request("PUT", path, **kwargs)
+        return self.request("PUT", path, **kwargs)
 
     def delete(self, path: str, **kwargs) -> TestResponse:
-        return self._request("DELETE", path, **kwargs)
+        return self.request("DELETE", path, **kwargs)
 
     def patch(self, path: str, **kwargs) -> TestResponse:
-        return self._request("PATCH", path, **kwargs)
+        return self.request("PATCH", path, **kwargs)
+
+    def options(self, path: str, **kwargs) -> TestResponse:
+        return self.request("OPTIONS", path, **kwargs)
+
+    def head(self, path: str, **kwargs) -> TestResponse:
+        return self.request("HEAD", path, **kwargs)
+
+    # ------------------------------------------------------------------
+    # WebSocket
+    # ------------------------------------------------------------------
+
+    def websocket_connect(self, path: str, **connect_kwargs) -> "WebSocketSession":
+        """Open a WebSocket to ``path``. Requires the ``websockets`` package.
+
+        Usage::
+
+            with c.websocket_connect("/chat") as ws:
+                ws.send("hello")
+                reply = ws.recv()
+
+        Extra kwargs are forwarded to ``websockets.sync.client.connect``
+        (e.g. ``additional_headers={"Authorization": "Bearer ..."}``).
+        """
+        try:
+            from websockets.sync.client import connect as _ws_connect
+        except ImportError as e:
+            raise ImportError(
+                "TestClient.websocket_connect requires the websockets package. "
+                "Install with: pip install websockets"
+            ) from e
+        uri = f"ws://{self.host}:{self.port}{path}"
+        return WebSocketSession(_ws_connect(uri, **connect_kwargs))
+
+
+class WebSocketSession:
+    """Thin adapter around ``websockets.sync.client.ClientConnection``
+    that supports use as a context manager and exposes ``send``/``recv``
+    directly so tests don't have to learn the underlying library."""
+
+    def __init__(self, conn):
+        self._conn = conn
+
+    def __enter__(self) -> "WebSocketSession":
+        return self
+
+    def __exit__(self, *args):
+        self.close()
+
+    def send(self, msg: str | bytes) -> None:
+        self._conn.send(msg)
+
+    def recv(self, timeout: float | None = None) -> str | bytes:
+        if timeout is not None:
+            return self._conn.recv(timeout=timeout)
+        return self._conn.recv()
+
+    def __iter__(self) -> Iterator[str | bytes]:
+        yield from self._conn
+
+    def close(self) -> None:
+        self._conn.close()
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Suppresses urllib's automatic redirect following."""
+
+    def redirect_request(self, *args, **kwargs):  # noqa: D401
+        return None
