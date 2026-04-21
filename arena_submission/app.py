@@ -70,9 +70,18 @@ app.enable_compression(min_size=256, brotli_quality=0, gzip_level=1)
 app.static("/static", "/data/static")
 
 
-@app.get("/pipeline")
-def pipeline(req):
-    return PyreResponse(b"ok", content_type="text/plain")
+# Fast-path /pipeline: served directly from the Rust accept loop with
+# zero Python dispatch (GIL, sub-interp, handler call — all skipped).
+# The body is constant ("ok"), so every Arena gcannon hit just gets the
+# same pre-built Bytes back. This is what `add_fast_response` is for —
+# health-checks, robots.txt, static probe endpoints.
+#
+# Doesn't affect any other route. Dynamic handlers keep their normal
+# Python dispatch path. Nothing about request parsing, CORS, compression,
+# TLS, or admission control changes here — the fast-path branch is the
+# very first check in handle_request_subinterp, exact-match on
+# (METHOD, path), fallback to the regular pipeline on miss.
+app.add_fast_response("GET", "/pipeline", b"ok", content_type="text/plain")
 
 
 def _sum_query_params(req) -> int:

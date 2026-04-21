@@ -293,14 +293,23 @@ pub(crate) async fn handle_request(
     // Served entirely from Rust — no Python call, no GIL wait, no body read.
     // Checked before headers/body because for fast routes none of that
     // matters; we have the exact bytes + status + content-type already.
-    if let Some(fr) = routes
-        .fast_responses
-        .get(&(method.to_string(), path.to_string()))
-    {
-        return Ok(full_body(build_fast_response(
-            fr,
-            routes.cors_config.as_ref(),
-        )));
+    //
+    // The `is_empty()` guard is load-bearing: the lookup builds two
+    // `String` allocations for the hashmap key (method + path), which
+    // at 500k rps is 1M malloc/s of pure waste for apps that don't
+    // register any fast routes. Skip the allocs entirely when there
+    // are no fast responses to match against — the `.is_empty()` check
+    // is a single pointer compare.
+    if !routes.fast_responses.is_empty() {
+        if let Some(fr) = routes
+            .fast_responses
+            .get(&(method.to_string(), path.to_string()))
+        {
+            return Ok(full_body(build_fast_response(
+                fr,
+                routes.cors_config.as_ref(),
+            )));
+        }
     }
 
     // Lazy headers: store raw HeaderMap, convert only if Python accesses req.headers.
@@ -639,16 +648,18 @@ pub(crate) async fn handle_request_subinterp(
     let query = uri.query().unwrap_or("").to_string();
 
     // Fast-path: pre-built response registered via app.add_fast_response().
-    // Same short-circuit as handle_request — no Python, no sub-interp
-    // dispatch, no body read.
-    if let Some(fr) = routes
-        .fast_responses
-        .get(&(method.to_string(), path.to_string()))
-    {
-        return Ok(full_body(build_fast_response(
-            fr,
-            routes.cors_config.as_ref(),
-        )));
+    // Same short-circuit as handle_request, same is_empty() guard to keep
+    // apps without fast routes from paying for the String allocations.
+    if !routes.fast_responses.is_empty() {
+        if let Some(fr) = routes
+            .fast_responses
+            .get(&(method.to_string(), path.to_string()))
+        {
+            return Ok(full_body(build_fast_response(
+                fr,
+                routes.cors_config.as_ref(),
+            )));
+        }
     }
 
     // Defer header extraction — only convert if needed (sub-interp path).
