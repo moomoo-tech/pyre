@@ -46,6 +46,12 @@ pub(crate) struct PyreRequest {
     /// would break `cargo test` linking for the pure-Rust unit tests.
     pub(crate) body_stream_rx:
         Arc<std::sync::Mutex<Option<tokio::sync::mpsc::Receiver<crate::body_stream::ChunkMsg>>>>,
+    /// Cached parse of the query string. `form_urlencoded::parse + collect`
+    /// costs ~100-200 ns for a two-param query and building a fresh
+    /// Python dict on top is another ~500 ns. OnceLock matches the
+    /// headers_cache pattern: parse once, return ref on subsequent
+    /// accesses.
+    pub(crate) query_cache: OnceLock<HashMap<String, String>>,
 }
 
 /// Manual Clone: OnceLock doesn't impl Clone, so we reset the cache on clone.
@@ -67,6 +73,7 @@ impl Clone for PyreRequest {
             client_ip_addr: self.client_ip_addr,
             body_bytes: self.body_bytes.clone(),
             body_stream_rx: Arc::clone(&self.body_stream_rx),
+            query_cache: OnceLock::new(),
         }
     }
 }
@@ -173,9 +180,16 @@ impl PyreRequest {
 
     #[getter]
     fn query_params(&self) -> HashMap<String, String> {
-        form_urlencoded::parse(self.query.as_bytes())
-            .map(|(k, v)| (k.into_owned(), v.into_owned()))
-            .collect()
+        // Parse once, reuse on subsequent accesses. Handlers that read
+        // `req.query_params.get("a")` and `req.query_params.get("b")`
+        // previously parsed the query string twice.
+        self.query_cache
+            .get_or_init(|| {
+                form_urlencoded::parse(self.query.as_bytes())
+                    .map(|(k, v)| (k.into_owned(), v.into_owned()))
+                    .collect()
+            })
+            .clone()
     }
 }
 
@@ -293,6 +307,7 @@ mod tests {
             client_ip_addr: IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
             body_bytes: Bytes::new(),
             body_stream_rx: Arc::new(std::sync::Mutex::new(None)),
+            query_cache: OnceLock::new(),
         };
         let qp = req.query_params();
         assert_eq!(qp["q"], "hello world");
@@ -312,6 +327,7 @@ mod tests {
             client_ip_addr: IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
             body_bytes: Bytes::new(),
             body_stream_rx: Arc::new(std::sync::Mutex::new(None)),
+            query_cache: OnceLock::new(),
         };
         assert!(req.query_params().is_empty());
     }
@@ -328,6 +344,7 @@ mod tests {
             client_ip_addr: IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
             body_bytes: Bytes::new(),
             body_stream_rx: Arc::new(std::sync::Mutex::new(None)),
+            query_cache: OnceLock::new(),
         };
         assert_eq!(req.query_params()["name"], "中文");
     }

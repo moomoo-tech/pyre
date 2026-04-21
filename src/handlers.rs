@@ -403,6 +403,7 @@ pub(crate) async fn handle_request(
         client_ip_addr,
         body_bytes,
         body_stream_rx,
+        query_cache: std::sync::OnceLock::new(),
     };
 
     // spawn_blocking: prevent GIL acquisition from starving Tokio workers
@@ -829,6 +830,7 @@ pub(crate) async fn handle_request_subinterp(
             client_ip_addr,
             body_bytes: body_bytes_for_req,
             body_stream_rx,
+            query_cache: std::sync::OnceLock::new(),
         };
 
         let routes_ref = Arc::clone(&routes);

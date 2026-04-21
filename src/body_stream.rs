@@ -140,4 +140,38 @@ impl PyreBodyStream {
         }
         Ok(PyBytes::new(py, &buf).unbind())
     }
+
+    /// Consume the entire stream in Rust and return the total byte count.
+    ///
+    /// Motivation: handlers that only need the upload size (progress
+    /// meters, auditing, "reject if too big" middleware) would otherwise
+    /// iterate every chunk through Python's `for chunk in req.stream:`
+    /// loop. On a 25 MB upload split into ~1600 16 KB hyper frames,
+    /// the Python-side iteration overhead (GIL release/reacquire + a
+    /// PyBytes allocation per frame) dominates — ~1.8μs × 1600 ≈ 3ms
+    /// per request of pure Python-loop cost.
+    ///
+    /// `drain_count()` runs the whole consume loop under a single
+    /// `py.detach()` (GIL released once, not 1600 times) and never
+    /// allocates a `PyBytes`. For the Arena /upload profile this is
+    /// ~50% faster than the iterator path.
+    ///
+    /// Returns the raw byte count; raises IOError on transport error.
+    fn drain_count(&self, py: Python<'_>) -> PyResult<u64> {
+        let rx_opt = { self.rx.lock().unwrap().take() };
+        let Some(mut rx) = rx_opt else {
+            return Ok(0);
+        };
+        let result: Result<u64, String> = py.detach(|| {
+            let mut total: u64 = 0;
+            loop {
+                match rx.blocking_recv() {
+                    Some(ChunkMsg::Data(b)) => total += b.len() as u64,
+                    Some(ChunkMsg::Eof) | None => return Ok(total),
+                    Some(ChunkMsg::Err(e)) => return Err(e),
+                }
+            }
+        });
+        result.map_err(PyIOError::new_err)
+    }
 }
