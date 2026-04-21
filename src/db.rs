@@ -223,9 +223,11 @@ pub(crate) struct PgPool;
 
 #[pymethods]
 impl PgPool {
-    /// Initialize the global pool. Safe to call more than once — subsequent
-    /// calls are no-ops (the first DSN wins). Set `max_connections` to bound
-    /// the worst-case connection count from the process to Postgres.
+    /// Initialize the global pool. Idempotent — calling `.connect()` again
+    /// after the pool exists returns a handle to the existing pool without
+    /// re-opening connections. The DSN from the first call wins; subsequent
+    /// calls with different DSNs are silently ignored (document this in
+    /// your app setup).
     #[classmethod]
     #[pyo3(signature = (dsn, max_connections = 10, acquire_timeout_secs = 30))]
     fn connect(
@@ -236,11 +238,7 @@ impl PgPool {
         acquire_timeout_secs: u64,
     ) -> PyResult<Self> {
         if PG_POOL.get().is_some() {
-            // Idempotent: reconnecting with different DSN would surprise the
-            // user; refuse and make them tear down first.
-            return Err(PyRuntimeError::new_err(
-                "PgPool.connect() already called — only one pool per process in v1",
-            ));
+            return Ok(PgPool);
         }
 
         let rt = runtime();
@@ -257,9 +255,7 @@ impl PgPool {
             })
             .map_err(|e| PyConnectionError::new_err(format!("PgPool connect: {e}")))?;
 
-        PG_POOL
-            .set(pool)
-            .map_err(|_| PyRuntimeError::new_err("PgPool already initialized (race)"))?;
+        let _ = PG_POOL.set(pool); // race-safe: first writer wins
         Ok(PgPool)
     }
 

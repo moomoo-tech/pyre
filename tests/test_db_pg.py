@@ -37,16 +37,8 @@ pytestmark = pytest.mark.skipif(
 
 @pytest.fixture(scope="module")
 def pool():
-    # Rust-side PgPool is a process global — can only be initialized once.
-    # Already-connected errors are fine because other tests in this session
-    # may have connected first; just swallow that specific error.
-    try:
-        p = PgPool.connect(PG_DSN, max_connections=4)
-    except RuntimeError as e:
-        if "already called" in str(e):
-            p = PgPool()  # access the global
-        else:
-            raise
+    # Rust-side PgPool is a process global; connect() is idempotent.
+    p = PgPool.connect(PG_DSN, max_connections=4)
     # Fresh schema per test module.
     p.execute("DROP TABLE IF EXISTS pyre_test_rows")
     p.execute("""
@@ -163,12 +155,8 @@ def test_unsupported_param_type_raises(pool):
         pool.fetch_one("SELECT $1::text", object())
 
 
-def test_pool_not_initialized_error(monkeypatch):
-    """PgPool() without connect() raises clearly."""
-    # This test only works in a fresh process (no connect yet). Once the pool
-    # is initialized it stays initialized. Skip if someone already connected.
-    import pyreframework.engine as engine
-    if getattr(engine, "_pg_pool_initialized", False):
-        pytest.skip("pool already connected this process")
-    # We can't easily test this path without tearing down; skip in-session.
-    pytest.skip("pool initialization is process-wide; cannot reset mid-session")
+def test_connect_is_idempotent(pool):
+    """Calling connect() again with same DSN returns a usable handle."""
+    again = PgPool.connect(PG_DSN, max_connections=1)
+    # Uses the same underlying pool.
+    assert again.fetch_scalar("SELECT 1") == 1

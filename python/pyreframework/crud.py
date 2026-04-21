@@ -1,0 +1,223 @@
+"""Lightweight CRUD REST helper built on :class:`pyreframework.db.PgPool`.
+
+Registers five standard REST routes in one call::
+
+    from pyreframework import Pyre
+    from pyreframework.db import PgPool
+    from pyreframework.crud import register_crud
+
+    app = Pyre()
+    pool = PgPool.connect("postgres://...")
+
+    register_crud(
+        app, pool,
+        prefix="/users",
+        table="users",
+        columns=["id", "name", "email"],
+        id_column="id",
+        id_type=int,
+    )
+
+After ``register_crud`` returns the following routes are live:
+
+=======  ==========  ============================================
+Method   Path        Behavior
+=======  ==========  ============================================
+GET      /users      list rows (pagination via ?limit=&offset=)
+GET      /users/{id} fetch one or 404
+POST     /users      insert from JSON body, 201 + created row
+PUT      /users/{id} update from JSON body, 200 + updated row or 404
+DELETE   /users/{id} delete, 204 or 404
+=======  ==========  ============================================
+
+All SQL uses parameterized queries — column and table identifiers are
+validated at registration time (alphanumeric + underscore only) and
+never interpolated from request data. The ``columns`` list is the
+allowlist: unknown keys in the JSON body are silently ignored on
+POST/PUT, so a caller can't sneak in columns the developer didn't
+intend to expose.
+"""
+
+import re
+
+from .app import PyreResponse
+
+__all__ = ["register_crud"]
+
+
+_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _validate_ident(name: str, role: str) -> str:
+    """Reject anything that could break out of an SQL identifier context.
+
+    Postgres will happily quote an identifier with ``"..."`` — even one with
+    nasty chars — but we'd rather fail loudly at registration than ship a
+    surprise later. Caller must whitelist the name themselves.
+    """
+    if not _IDENT_RE.match(name):
+        raise ValueError(
+            f"invalid SQL identifier for {role}: {name!r} "
+            "(must match [A-Za-z_][A-Za-z0-9_]*)"
+        )
+    return name
+
+
+def register_crud(
+    app,
+    pool,
+    *,
+    prefix: str,
+    table: str,
+    columns: list[str],
+    id_column: str = "id",
+    id_type=int,
+    default_limit: int = 100,
+    max_limit: int = 1000,
+) -> None:
+    """Register five REST routes backed by a Postgres table.
+
+    Args:
+        app: the ``Pyre`` instance.
+        pool: a connected ``PgPool``.
+        prefix: URL prefix, e.g. ``"/users"`` (no trailing slash).
+        table: SQL table name. Validated against ``[A-Za-z_][A-Za-z0-9_]*``.
+        columns: list of columns to expose. The primary key should be
+            included. Body keys outside this list are dropped.
+        id_column: primary-key column name. Default ``"id"``.
+        id_type: callable that coerces the raw path string to the right
+            Python type for binding (``int`` by default; use ``str`` for
+            UUID-ish keys).
+        default_limit: rows returned by ``GET /{prefix}`` when ``limit`` is
+            absent.
+        max_limit: upper cap on the ``?limit=`` query param.
+    """
+    if not prefix.startswith("/"):
+        raise ValueError("prefix must start with '/'")
+    if prefix.endswith("/"):
+        raise ValueError("prefix must not end with '/'")
+
+    _validate_ident(table, "table")
+    for c in columns:
+        _validate_ident(c, "column")
+    _validate_ident(id_column, "id_column")
+    if id_column not in columns:
+        raise ValueError(
+            f"id_column {id_column!r} must be included in columns={columns!r}"
+        )
+
+    col_list = ", ".join(columns)
+    non_id_cols = [c for c in columns if c != id_column]
+
+    # --- GET /prefix --------------------------------------------------------
+    list_sql = f"SELECT {col_list} FROM {table} ORDER BY {id_column} LIMIT $1 OFFSET $2"
+
+    @app.get(prefix, gil=True)
+    def list_rows(req):
+        q = req.query_params
+        try:
+            limit = min(int(q.get("limit", default_limit)), max_limit)
+            offset = max(int(q.get("offset", 0)), 0)
+        except (TypeError, ValueError):
+            return PyreResponse(
+                body={"error": "invalid limit/offset"},
+                status_code=400,
+            )
+        rows = pool.fetch_all(list_sql, limit, offset)
+        return rows
+
+    # --- GET /prefix/{id} ---------------------------------------------------
+    get_sql = f"SELECT {col_list} FROM {table} WHERE {id_column} = $1"
+
+    @app.get(f"{prefix}/{{id}}", gil=True)
+    def get_row(req):
+        try:
+            id_val = id_type(req.params["id"])
+        except (TypeError, ValueError):
+            return PyreResponse(body={"error": "invalid id"}, status_code=400)
+        row = pool.fetch_one(get_sql, id_val)
+        if row is None:
+            return PyreResponse(body={"error": "not found"}, status_code=404)
+        return row
+
+    # --- POST /prefix -------------------------------------------------------
+    # Insert with an arbitrary subset of columns from body. We build the
+    # column list dynamically from the intersection of body keys and the
+    # allowlist so the caller can't inject columns.
+    @app.post(prefix, gil=True)
+    def create_row(req):
+        try:
+            body = req.json()
+        except Exception:
+            return PyreResponse(body={"error": "invalid JSON"}, status_code=400)
+        if not isinstance(body, dict):
+            return PyreResponse(body={"error": "body must be a JSON object"}, status_code=400)
+
+        present = [c for c in columns if c in body]
+        if not present:
+            return PyreResponse(
+                body={"error": f"body must include at least one of {columns}"},
+                status_code=422,
+            )
+        placeholders = ", ".join(f"${i + 1}" for i in range(len(present)))
+        col_clause = ", ".join(present)
+        insert_sql = (
+            f"INSERT INTO {table} ({col_clause}) VALUES ({placeholders}) "
+            f"RETURNING {col_list}"
+        )
+        args = [body[c] for c in present]
+        try:
+            row = pool.fetch_one(insert_sql, *args)
+        except RuntimeError as e:
+            return PyreResponse(body={"error": str(e)}, status_code=400)
+        return PyreResponse(body=row, status_code=201)
+
+    # --- PUT /prefix/{id} ---------------------------------------------------
+    @app.put(f"{prefix}/{{id}}", gil=True)
+    def update_row(req):
+        try:
+            id_val = id_type(req.params["id"])
+        except (TypeError, ValueError):
+            return PyreResponse(body={"error": "invalid id"}, status_code=400)
+        try:
+            body = req.json()
+        except Exception:
+            return PyreResponse(body={"error": "invalid JSON"}, status_code=400)
+        if not isinstance(body, dict):
+            return PyreResponse(body={"error": "body must be a JSON object"}, status_code=400)
+
+        # Only update non-PK columns.
+        present = [c for c in non_id_cols if c in body]
+        if not present:
+            return PyreResponse(
+                body={"error": f"body must include at least one of {non_id_cols}"},
+                status_code=422,
+            )
+        set_clause = ", ".join(f"{c} = ${i + 1}" for i, c in enumerate(present))
+        id_placeholder = f"${len(present) + 1}"
+        update_sql = (
+            f"UPDATE {table} SET {set_clause} WHERE {id_column} = {id_placeholder} "
+            f"RETURNING {col_list}"
+        )
+        args = [body[c] for c in present] + [id_val]
+        try:
+            row = pool.fetch_one(update_sql, *args)
+        except RuntimeError as e:
+            return PyreResponse(body={"error": str(e)}, status_code=400)
+        if row is None:
+            return PyreResponse(body={"error": "not found"}, status_code=404)
+        return row
+
+    # --- DELETE /prefix/{id} ------------------------------------------------
+    delete_sql = f"DELETE FROM {table} WHERE {id_column} = $1"
+
+    @app.delete(f"{prefix}/{{id}}", gil=True)
+    def delete_row(req):
+        try:
+            id_val = id_type(req.params["id"])
+        except (TypeError, ValueError):
+            return PyreResponse(body={"error": "invalid id"}, status_code=400)
+        affected = pool.execute(delete_sql, id_val)
+        if affected == 0:
+            return PyreResponse(body={"error": "not found"}, status_code=404)
+        return PyreResponse(body=b"", status_code=204)
