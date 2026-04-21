@@ -160,3 +160,71 @@ def test_connect_is_idempotent(pool):
     again = PgPool.connect(PG_DSN, max_connections=1)
     # Uses the same underlying pool.
     assert again.fetch_scalar("SELECT 1") == 1
+
+
+# ---------------------------------------------------------------------------
+# Async API (v2 — await-ready methods for async def handlers)
+# ---------------------------------------------------------------------------
+
+def test_async_api(pool):
+    """The *_async methods return awaitables that cooperate with asyncio."""
+    import asyncio
+
+    async def run():
+        val = await pool.fetch_scalar_async("SELECT 1")
+        assert val == 1
+
+        one = await pool.fetch_one_async("SELECT $1::int AS x", 42)
+        assert one == {"x": 42}
+
+        # None on no match.
+        none_row = await pool.fetch_one_async(
+            "SELECT id FROM pyre_test_rows WHERE id = $1", 999999
+        )
+        assert none_row is None
+
+        rows = await pool.fetch_all_async(
+            "SELECT 1 AS a UNION SELECT 2 ORDER BY a"
+        )
+        assert [r["a"] for r in rows] == [1, 2]
+
+    asyncio.run(run())
+
+
+def test_async_execute(pool):
+    """execute_async returns the rows-affected count."""
+    import asyncio
+
+    async def run():
+        pool.execute("DELETE FROM pyre_test_rows WHERE name = $1", "async_tmp")
+        n = await pool.execute_async(
+            "INSERT INTO pyre_test_rows (name, value) VALUES ($1, $2)",
+            "async_tmp", 123,
+        )
+        assert n == 1
+        # Clean up.
+        pool.execute("DELETE FROM pyre_test_rows WHERE name = $1", "async_tmp")
+
+    asyncio.run(run())
+
+
+def test_async_concurrent_queries(pool):
+    """Concurrent async queries interleave on the pool's tokio runtime."""
+    import asyncio
+    import time
+
+    async def run():
+        start = time.perf_counter()
+        # pg_sleep(0.1) × 4 concurrent should finish in ~0.1s, not 0.4s,
+        # if the pool actually multiplexes. Uses fetch_scalar_async so
+        # each call round-trips one row.
+        results = await asyncio.gather(*[
+            pool.fetch_scalar_async("SELECT pg_sleep(0.1), 1")
+            for _ in range(4)
+        ])
+        elapsed = time.perf_counter() - start
+        assert len(results) == 4
+        # Allow some slack for startup; if it's > 300ms we're serializing.
+        assert elapsed < 0.3, f"async queries serialized: {elapsed:.2f}s"
+
+    asyncio.run(run())

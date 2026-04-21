@@ -161,6 +161,13 @@ PG_SQL = (
 
 @app.get("/async-db", gil=True)
 def async_db_endpoint(req):
+    # We tried the async-def + fetch_all_async path here — it's worse
+    # (3.9k vs 7.2k rps) on Arena's async-db profile because Pyre's GIL
+    # async dispatch creates a per-thread asyncio event loop via
+    # run_until_complete, so the coroutine gets no concurrency benefit
+    # over blocking fetch. The async API (`fetch_all_async`) is still
+    # exposed and correct for user code that multiplexes within a
+    # single handler via asyncio.gather; it's just not the Arena win.
     if PG_POOL is None:
         return PyreResponse({"items": [], "count": 0}, content_type="application/json")
     q = req.query_params

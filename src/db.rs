@@ -346,6 +346,138 @@ impl PgPool {
         column_to_py(py, raw)
     }
 
+    // ----------------------------------------------------------------
+    // Async variants — return Python awaitables.
+    //
+    // Each `*_async` method kicks off the sqlx future on the pool's
+    // dedicated tokio runtime and hands back a Python awaitable via
+    // `pyo3_async_runtimes::tokio::future_into_py`. From an `async def`
+    // handler the caller writes `await pool.fetch_one_async(sql, ...)`
+    // exactly like any asyncio coroutine.
+    //
+    // Why separate from the sync methods: a single method that magically
+    // does the right thing based on caller context would mean "returns
+    // dict or coroutine depending on where you call it" — confusing and
+    // brittle. Explicit `_async` suffix makes the cost model obvious.
+    //
+    // The tokio runtime that pyo3-async-runtimes uses is globally
+    // configured on first use; we don't pass our `runtime()` handle to
+    // it because that would bind two runtimes together. Instead pool
+    // futures are spawned via sqlx::query which internally drives
+    // itself on the runtime that's `current` at spawn time.
+    // ----------------------------------------------------------------
+
+    #[pyo3(signature = (sql, *params))]
+    fn fetch_one_async<'py>(
+        &self,
+        py: Python<'py>,
+        sql: String,
+        params: Vec<Py<PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let pool = pool_ref()?;
+        let bound = params
+            .iter()
+            .map(|p| extract_param(p.bind(py)))
+            .collect::<PyResult<Vec<_>>>()?;
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let q = sqlx::query(&sql);
+            let row_opt = bind_params_raw(q, &bound)
+                .fetch_optional(pool)
+                .await
+                .map_err(|e| PyRuntimeError::new_err(format!("fetch_one_async: {e}")))?;
+
+            Python::attach(|py| -> PyResult<Py<PyAny>> {
+                match row_opt {
+                    Some(row) => Ok(row_to_dict(py, &row)?.into_any()),
+                    None => Ok(py.None()),
+                }
+            })
+        })
+    }
+
+    #[pyo3(signature = (sql, *params))]
+    fn fetch_all_async<'py>(
+        &self,
+        py: Python<'py>,
+        sql: String,
+        params: Vec<Py<PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let pool = pool_ref()?;
+        let bound = params
+            .iter()
+            .map(|p| extract_param(p.bind(py)))
+            .collect::<PyResult<Vec<_>>>()?;
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let q = sqlx::query(&sql);
+            let rows = bind_params_raw(q, &bound)
+                .fetch_all(pool)
+                .await
+                .map_err(|e| PyRuntimeError::new_err(format!("fetch_all_async: {e}")))?;
+
+            Python::attach(|py| -> PyResult<Py<PyAny>> {
+                let py_list = PyList::empty(py);
+                for row in &rows {
+                    py_list.append(row_to_dict(py, row)?)?;
+                }
+                Ok(py_list.into_any().unbind())
+            })
+        })
+    }
+
+    #[pyo3(signature = (sql, *params))]
+    fn fetch_scalar_async<'py>(
+        &self,
+        py: Python<'py>,
+        sql: String,
+        params: Vec<Py<PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let pool = pool_ref()?;
+        let bound = params
+            .iter()
+            .map(|p| extract_param(p.bind(py)))
+            .collect::<PyResult<Vec<_>>>()?;
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let q = sqlx::query(&sql);
+            let row = bind_params_raw(q, &bound)
+                .fetch_one(pool)
+                .await
+                .map_err(|e| PyRuntimeError::new_err(format!("fetch_scalar_async: {e}")))?;
+
+            Python::attach(|py| -> PyResult<Py<PyAny>> {
+                let raw = row.try_get_raw(0).map_err(|e| {
+                    PyRuntimeError::new_err(format!("fetch_scalar_async col 0: {e}"))
+                })?;
+                column_to_py(py, raw)
+            })
+        })
+    }
+
+    #[pyo3(signature = (sql, *params))]
+    fn execute_async<'py>(
+        &self,
+        py: Python<'py>,
+        sql: String,
+        params: Vec<Py<PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let pool = pool_ref()?;
+        let bound = params
+            .iter()
+            .map(|p| extract_param(p.bind(py)))
+            .collect::<PyResult<Vec<_>>>()?;
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let q = sqlx::query(&sql);
+            let result = bind_params_raw(q, &bound)
+                .execute(pool)
+                .await
+                .map_err(|e| PyRuntimeError::new_err(format!("execute_async: {e}")))?;
+            Ok(result.rows_affected())
+        })
+    }
+
     /// Execute a statement that doesn't return rows. Returns the number of
     /// rows affected.
     #[pyo3(signature = (sql, *params))]
