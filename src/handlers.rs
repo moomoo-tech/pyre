@@ -571,22 +571,10 @@ pub(crate) async fn handle_request_subinterp(
         .unwrap_or("")
         .to_string();
 
-    use http_body_util::Limited;
-    let limited = Limited::new(req.into_body(), max_body_size());
-    let body_bytes =
-        match tokio::time::timeout(std::time::Duration::from_secs(30), limited.collect()).await {
-            Ok(Ok(c)) => c.to_bytes(),
-            Ok(Err(_)) => {
-                let mut r = full_body(payload_too_large_response());
-                apply_cors(&mut r, pool.cors_config.as_ref());
-                return Ok(r);
-            }
-            Err(_) => {
-                let mut r = full_body(crate::response::gateway_timeout_response());
-                apply_cors(&mut r, pool.cors_config.as_ref());
-                return Ok(r);
-            }
-        };
+    // Take ownership of the body before routing so we can decide whether
+    // to collect (buffered path) or hand it to a feeder task (streaming
+    // path). Mirrors the restructure done in handle_request().
+    let body_obj = req.into_body();
 
     let lookup = pool.lookup(&method, &path);
     let has_fallback = routes.fallback_handler.is_some();
@@ -607,21 +595,50 @@ pub(crate) async fn handle_request_subinterp(
     let is_gil_route =
         handler_idx == usize::MAX || pool.requires_gil.get(handler_idx).copied().unwrap_or(false);
 
+    // Streaming is only honored on GIL routes (v1). A sub-interp route
+    // with stream=True falls through to the buffered path — but that's
+    // impossible by construction because add_route rejects non-GIL
+    // streaming at registration time.
+    let is_stream_route = is_gil_route
+        && handler_idx != usize::MAX
+        && routes.is_stream.get(handler_idx).copied().unwrap_or(false);
+
+    // Decide body handling: stream-capable GIL routes bypass the collect
+    // (proper streaming), everyone else collects up front.
+    let (body_bytes, body_stream_rx_early) = if is_stream_route {
+        let (tx, rx) = std::sync::mpsc::channel::<crate::body_stream::ChunkMsg>();
+        let cap = max_body_size();
+        tokio::spawn(stream_body_feeder(body_obj, tx, cap));
+        (
+            Bytes::new(),
+            Some(Arc::new(std::sync::Mutex::new(Some(rx)))),
+        )
+    } else {
+        use http_body_util::Limited;
+        let limited = Limited::new(body_obj, max_body_size());
+        match tokio::time::timeout(std::time::Duration::from_secs(30), limited.collect()).await {
+            Ok(Ok(c)) => (c.to_bytes(), None),
+            Ok(Err(_)) => {
+                let mut r = full_body(payload_too_large_response());
+                apply_cors(&mut r, pool.cors_config.as_ref());
+                return Ok(r);
+            }
+            Err(_) => {
+                let mut r = full_body(crate::response::gateway_timeout_response());
+                apply_cors(&mut r, pool.cors_config.as_ref());
+                return Ok(r);
+            }
+        }
+    };
+
     if is_gil_route {
         let method_log = Arc::clone(&method);
         let path_log = Arc::clone(&path);
-        // v1 streaming limitation: sub-interpreter hybrid mode always buffers
-        // the body before dispatching to the GIL route — a proper
-        // streaming path in sub-interp mode needs per-route flag
-        // propagation into the accept loop before the body collect
-        // (v2). As a compatibility shim so `for chunk in req.stream`
-        // still works on streaming routes under hybrid mode, wrap the
-        // already-collected bytes in a one-shot channel: one Data frame
-        // followed by Eof. The API is identical; only the memory-saving
-        // property is lost.
-        let is_stream_route = handler_idx != usize::MAX
-            && routes.is_stream.get(handler_idx).copied().unwrap_or(false);
-        let body_stream_rx = if is_stream_route {
+        let body_stream_rx = if let Some(rx) = body_stream_rx_early.clone() {
+            rx
+        } else if is_stream_route {
+            // Defensive: the is_stream branch above always populates
+            // body_stream_rx_early; this arm keeps the types lined up.
             let (tx, rx) = std::sync::mpsc::channel::<crate::body_stream::ChunkMsg>();
             if !body_bytes.is_empty() {
                 let _ = tx.send(crate::body_stream::ChunkMsg::Data(body_bytes.clone()));

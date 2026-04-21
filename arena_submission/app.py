@@ -58,7 +58,13 @@ if DATABASE_URL:
 # ---------------------------------------------------------------------------
 
 app = Pyre()
-app.enable_compression(min_size=1, brotli_quality=4, gzip_level=5)
+# min_size=256 skips tiny bodies (/pipeline "ok", short query params).
+# Arena's json-comp rotates through /json/1..50 with pipeline depth 25
+# and hundreds of connections — throughput is bounded by compression
+# CPU, so pick the cheapest settings that still compress meaningfully:
+# gzip level=1 (fastest) wins ~2x speed over level=6 at ~15% worse ratio,
+# and brotli quality=0 is the brotli equivalent.
+app.enable_compression(min_size=256, brotli_quality=0, gzip_level=1)
 
 # Static serving — Arena harness populates /data/static/.
 app.static("/static", "/data/static")
