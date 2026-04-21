@@ -247,6 +247,70 @@ def test_uuid_text_cast_roundtrip(pool):
     assert row["u"].count("-") == 4
 
 
+def test_fetch_iter_basic(pool):
+    """Cursor yields rows one at a time, preserving value + type."""
+    rows = list(pool.fetch_iter(
+        "SELECT $1::int AS x, $2::text AS y UNION ALL SELECT $3, $4",
+        1, "a", 2, "b",
+    ))
+    assert rows == [{"x": 1, "y": "a"}, {"x": 2, "y": "b"}]
+
+
+def test_fetch_iter_large_result_set_bounded_memory(pool):
+    """Streaming 50k rows must not spike resident memory. We can't
+    assert exact RSS in a pytest, but we can (a) verify the iterator
+    completes and (b) verify the process didn't crash — which fetch_all
+    on 50k-row queries has historically been close to doing on
+    memory-constrained boxes because of the O(2N) peak."""
+    count = 0
+    checksum = 0
+    for row in pool.fetch_iter(
+        "SELECT i, i * 2 AS doubled FROM generate_series(1, 50000) i"
+    ):
+        count += 1
+        checksum += row["doubled"]
+    assert count == 50000
+    assert checksum == sum(i * 2 for i in range(1, 50001))
+
+
+def test_fetch_iter_early_break_cleans_up(pool):
+    """Breaking out of the iteration mid-stream must not leak the
+    Postgres connection. Run many cursors with early break in sequence;
+    if connection cleanup is busted the pool (size 4) runs out after
+    a handful of iterations."""
+    for _ in range(50):
+        seen = 0
+        for _row in pool.fetch_iter(
+            "SELECT i FROM generate_series(1, 1000000) i"
+        ):
+            seen += 1
+            if seen == 3:
+                break
+        assert seen == 3
+    # If we got here the pool never starved.
+
+
+def test_fetch_iter_propagates_sql_error(pool):
+    """SQL errors surface as RuntimeError on the first __next__ that
+    sees the error (sqlx discovers the error during streaming)."""
+    import pytest
+    with pytest.raises(RuntimeError):
+        # Division by zero raises during execution (not planning).
+        list(pool.fetch_iter("SELECT 1/0"))
+
+
+def test_fetch_iter_empty_result(pool):
+    assert list(pool.fetch_iter("SELECT 1 WHERE FALSE")) == []
+
+
+def test_fetch_iter_via_to_list(pool):
+    """to_list is the eager-drain shortcut; equivalent to list(cursor)."""
+    rows = pool.fetch_iter(
+        "SELECT i FROM generate_series(1, 5) i"
+    ).to_list()
+    assert [r["i"] for r in rows] == [1, 2, 3, 4, 5]
+
+
 def test_async_concurrent_queries(pool):
     """Concurrent async queries interleave on the pool's tokio runtime."""
     import asyncio

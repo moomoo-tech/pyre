@@ -278,6 +278,10 @@ sys.modules["pyreframework.testing"] = types.ModuleType("pyreframework.testing")
 # called on the hot path.
 
 _db_mod = types.ModuleType("pyreframework.db")
+class _MockPgCursor:
+    def __iter__(self): return self
+    def __next__(self): raise StopIteration
+    def to_list(self): return []
 class _MockPgPool:
     @classmethod
     def connect(cls, *a, **kw): return cls()
@@ -285,7 +289,16 @@ class _MockPgPool:
     def fetch_all(self, *a, **kw): return []
     def fetch_scalar(self, *a, **kw): return None
     def execute(self, *a, **kw): return 0
+    def fetch_iter(self, *a, **kw): return _MockPgCursor()
+    # async variants; bootstrap mock is just "don't crash at import / route
+    # registration", so these return awaitable-None. Real async calls only
+    # execute on the main interpreter where the real PgPool lives.
+    async def fetch_one_async(self, *a, **kw): return None
+    async def fetch_all_async(self, *a, **kw): return []
+    async def fetch_scalar_async(self, *a, **kw): return None
+    async def execute_async(self, *a, **kw): return 0
 _db_mod.PgPool = _MockPgPool
+_db_mod.PgCursor = _MockPgCursor
 sys.modules["pyreframework.db"] = _db_mod
 
 _crud_mod = types.ModuleType("pyreframework.crud")

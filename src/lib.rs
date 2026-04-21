@@ -63,6 +63,7 @@ fn engine(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<stream::PyreStream>()?;
     m.add_class::<body_stream::PyreBodyStream>()?;
     m.add_class::<db::PgPool>()?;
+    m.add_class::<db::PgCursor>()?;
     m.add_function(pyo3::wrap_pyfunction!(monitor::get_gil_metrics, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(logging::init_logger, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(logging::emit_python_log, m)?)?;

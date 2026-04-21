@@ -25,15 +25,20 @@
 //!   * sqlx::PgPool is `Clone`-via-`Arc` internally, so the static
 //!     reference works fine from arbitrary threads and sub-interpreters.
 
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
-use pyo3::exceptions::{PyConnectionError, PyRuntimeError, PyValueError};
+use pyo3::exceptions::{PyConnectionError, PyRuntimeError, PyStopIteration, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyBytes, PyDict, PyFloat, PyInt, PyList, PyString};
 use pyo3::BoundObject;
 use sqlx::postgres::{PgPoolOptions, PgRow, PgValueRef};
 use sqlx::{Column, Row, TypeInfo, ValueRef};
 use tokio::runtime::Runtime;
+
+/// Channel capacity for `PgCursor`. 8 rows in flight keeps memory
+/// bounded while allowing enough prefetch to hide server-round-trip
+/// latency on the common case of a fast Python consumer.
+const CURSOR_CAPACITY: usize = 8;
 
 static PG_POOL: OnceLock<sqlx::PgPool> = OnceLock::new();
 static PG_RUNTIME: OnceLock<Runtime> = OnceLock::new();
@@ -239,6 +244,77 @@ fn row_to_dict(py: Python<'_>, row: &PgRow) -> PyResult<Py<PyDict>> {
 }
 
 // ---------------------------------------------------------------------------
+// Streaming cursor (fetch_iter)
+// ---------------------------------------------------------------------------
+
+/// Message sent from the cursor's background driver task to the
+/// Python-facing iterator. `None` on the receiver == EOF (sender
+/// dropped at end of stream or on connection loss).
+enum CursorMsg {
+    Row(PgRow),
+    Err(String),
+}
+
+/// Streaming result-set iterator. Constructed by `PgPool.fetch_iter(sql, ...)`.
+///
+/// Memory contract: at any point in time at most `CURSOR_CAPACITY` rows
+/// (8) are buffered on the Rust side and 1 PyDict is live on the Python
+/// side (the one just yielded from `__next__`). This bounds memory at
+/// O(1) — compare to `fetch_all`, which peaks at O(2N) (Rust Vec<PgRow>
+/// AND Python list<dict> both alive while the conversion loop runs).
+///
+/// A dedicated task on the pool's tokio runtime drives the sqlx stream
+/// and pushes each row through a bounded mpsc channel. Python's
+/// blocking `__next__` reads from the receiver end with the GIL
+/// released. Dropping the cursor before EOF closes the channel, which
+/// aborts the driver task on its next send attempt — the sqlx
+/// connection returns to the pool cleanly.
+#[pyclass]
+pub(crate) struct PgCursor {
+    rx: Mutex<Option<tokio::sync::mpsc::Receiver<CursorMsg>>>,
+}
+
+#[pymethods]
+impl PgCursor {
+    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    /// Pull the next row as a dict, or raise StopIteration at EOF,
+    /// or raise RuntimeError on a database error.
+    fn __next__(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
+        let rx_opt = { self.rx.lock().unwrap().take() };
+        let Some(mut rx) = rx_opt else {
+            return Err(PyStopIteration::new_err("cursor exhausted"));
+        };
+        let msg = py.detach(|| rx.blocking_recv());
+        match msg {
+            Some(CursorMsg::Row(row)) => {
+                *self.rx.lock().unwrap() = Some(rx);
+                row_to_dict(py, &row)
+            }
+            Some(CursorMsg::Err(e)) => Err(PyRuntimeError::new_err(e)),
+            None => Err(PyStopIteration::new_err(py.None())),
+        }
+    }
+
+    /// Eager-drain helper: materialize every remaining row as a list
+    /// of dicts. Same API shape as `fetch_all` — useful for tests that
+    /// want to verify a cursor's contents without writing a loop.
+    fn to_list<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+        let list = PyList::empty(py);
+        loop {
+            match self.__next__(py) {
+                Ok(row) => list.append(row)?,
+                Err(e) if e.is_instance_of::<PyStopIteration>(py) => break,
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(list)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Python-visible PgPool
 // ---------------------------------------------------------------------------
 
@@ -311,6 +387,68 @@ impl PgPool {
             Some(row) => Ok(Some(row_to_dict(py, &row)?)),
             None => Ok(None),
         }
+    }
+
+    /// Stream rows one at a time via an iterator cursor — keeps memory
+    /// O(1) instead of fetch_all's O(2N) peak (Rust Vec<PgRow> plus
+    /// Python list<dict> both alive simultaneously during conversion).
+    ///
+    /// Use for large result sets (data exports, full-table scans,
+    /// log paging). For typical API queries returning ≤ 50 rows,
+    /// `fetch_all` is simpler and the O(2N) peak is inconsequential.
+    ///
+    /// Python side:
+    ///
+    /// ```python
+    /// for row in pool.fetch_iter("SELECT * FROM users"):
+    ///     process(row)
+    /// # Cursor drops on loop exit → Rust driver task aborts → PG
+    /// # connection returns to the pool even if we broke early.
+    /// ```
+    #[pyo3(signature = (sql, *params))]
+    fn fetch_iter(&self, py: Python<'_>, sql: &str, params: Vec<Py<PyAny>>) -> PyResult<PgCursor> {
+        let pool = pool_ref()?;
+        let rt = runtime();
+        let bound = params
+            .iter()
+            .map(|p| extract_param(p.bind(py)))
+            .collect::<PyResult<Vec<_>>>()?;
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<CursorMsg>(CURSOR_CAPACITY);
+        let sql_owned = sql.to_string();
+
+        // Spawn the driver on the pool's tokio runtime. The `async move`
+        // owns `sql_owned` and `bound`; sqlx's Query borrows from them
+        // for the lifetime of the async block, which is fine because
+        // both live as long as the block runs. `pool` is `&'static`.
+        rt.spawn(async move {
+            use futures_util::StreamExt;
+            let q = sqlx::query(&sql_owned);
+            let mut stream = bind_params_raw(q, &bound).fetch(pool);
+            while let Some(result) = stream.next().await {
+                match result {
+                    Ok(row) => {
+                        if tx.send(CursorMsg::Row(row)).await.is_err() {
+                            // Receiver dropped (Python broke from the
+                            // loop or cursor went out of scope). Drop
+                            // the sqlx stream — connection returns to
+                            // the pool.
+                            return;
+                        }
+                    }
+                    Err(e) => {
+                        let _ = tx.send(CursorMsg::Err(e.to_string())).await;
+                        return;
+                    }
+                }
+            }
+            // Normal EOF: tx drops at scope end → Python side sees
+            // channel close → StopIteration.
+        });
+
+        Ok(PgCursor {
+            rx: Mutex::new(Some(rx)),
+        })
     }
 
     /// Fetch all matching rows into a list of dicts.
