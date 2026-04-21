@@ -1,4 +1,4 @@
-"""Robyn comparison server — matches Pyre bench routes."""
+"""Robyn comparison server — matches Pyronova bench routes."""
 
 from robyn import Robyn
 import json

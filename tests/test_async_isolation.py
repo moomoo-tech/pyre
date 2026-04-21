@@ -11,9 +11,9 @@ import os
 import signal
 
 SERVER_SCRIPT = """
-from pyreframework import PyreApp
+from pyronova import PyronovaApp
 
-app = PyreApp()
+app = PyronovaApp()
 
 async def slow(req):
     import asyncio
@@ -36,7 +36,7 @@ def test_async_isolation():
     import urllib.request
 
     # Write temp server script
-    script_path = "/tmp/pyre_async_isolation_test.py"
+    script_path = "/tmp/pyronova_async_isolation_test.py"
     with open(script_path, "w") as f:
         f.write(SERVER_SCRIPT)
 

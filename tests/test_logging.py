@@ -1,4 +1,4 @@
-"""Test: Pyre logging system — Rust tracing engine + Python bridge.
+"""Test: Pyronova logging system — Rust tracing engine + Python bridge.
 
 Verifies:
 1. Framework enable_logging() produces structured output (GIL mode)
@@ -21,7 +21,7 @@ PYTHON = sys.executable
 
 def run_server_and_check(script: str, label: str, expected_strings: list[str]):
     """Start a server, send requests, check output for expected strings."""
-    script_path = f"/tmp/pyre_log_test_{label}.py"
+    script_path = f"/tmp/pyronova_log_test_{label}.py"
     with open(script_path, "w") as f:
         f.write(script)
 
@@ -63,8 +63,8 @@ def run_server_and_check(script: str, label: str, expected_strings: list[str]):
 def test_gil_mode_logging():
     """Framework logging in GIL mode — Python hooks + tracing access log."""
     script = '''
-from pyreframework import Pyre
-app = Pyre()
+from pyronova import Pyronova
+app = Pyronova()
 app.enable_logging()
 
 @app.get("/", gil=True)
@@ -82,8 +82,8 @@ app.run(host="127.0.0.1", port=9876)
 def test_subinterp_rust_logging():
     """Rust-level request logging in sub-interpreter mode via tracing."""
     script = '''
-from pyreframework import Pyre
-app = Pyre()
+from pyronova import Pyronova
+app = Pyronova()
 app.enable_logging()
 
 @app.get("/")
@@ -92,7 +92,7 @@ def index(req): return "ok"
 app.run(host="127.0.0.1", port=9876, mode="subinterp")
 '''
     assert run_server_and_check(script, "subinterp_logging", [
-        "pyre::access",
+        "pyronova::access",
         "Request handled",
     ])
 
@@ -100,8 +100,8 @@ app.run(host="127.0.0.1", port=9876, mode="subinterp")
 def test_user_print_in_subinterp():
     """User print() works in sub-interpreter handlers."""
     script = '''
-from pyreframework import Pyre
-app = Pyre()
+from pyronova import Pyronova
+app = Pyronova()
 
 @app.get("/")
 def index(req):
@@ -121,8 +121,8 @@ def test_user_logging_in_subinterp():
 import logging
 logger = logging.getLogger("test")
 
-from pyreframework import Pyre
-app = Pyre(debug=True)
+from pyronova import Pyronova
+app = Pyronova(debug=True)
 
 @app.get("/")
 def index(req):
@@ -139,8 +139,8 @@ app.run(host="127.0.0.1", port=9876, mode="subinterp")
 def test_debug_mode_tracing():
     """debug=True enables tracing output with access log."""
     script = '''
-from pyreframework import Pyre
-app = Pyre(debug=True)
+from pyronova import Pyronova
+app = Pyronova(debug=True)
 
 @app.get("/")
 def index(req): return "ok"
@@ -148,17 +148,17 @@ def index(req): return "ok"
 app.run(host="127.0.0.1", port=9876)
 '''
     assert run_server_and_check(script, "debug_mode", [
-        "pyre::server",
-        "Pyre tracing engine initialized",
-        "Pyre started",
+        "pyronova::server",
+        "Pyronova tracing engine initialized",
+        "Pyronova started",
     ])
 
 
 def test_debug_mode_access_log():
     """debug=True produces access log with latency."""
     script = '''
-from pyreframework import Pyre
-app = Pyre(debug=True)
+from pyronova import Pyronova
+app = Pyronova(debug=True)
 
 @app.get("/")
 def index(req): return "ok"
@@ -166,7 +166,7 @@ def index(req): return "ok"
 app.run(host="127.0.0.1", port=9876)
 '''
     assert run_server_and_check(script, "debug_access_log", [
-        "pyre::access",
+        "pyronova::access",
         "Request handled",
         "latency_us",
     ])
@@ -176,9 +176,9 @@ def test_python_logging_bridge_main():
     """Python logging in main interpreter routes through Rust tracing."""
     script = '''
 import logging
-from pyreframework import Pyre
+from pyronova import Pyronova
 
-app = Pyre(debug=True)
+app = Pyronova(debug=True)
 logger = logging.getLogger("myapp")
 
 @app.get("/")
@@ -190,15 +190,15 @@ app.run(host="127.0.0.1", port=9876)
 '''
     assert run_server_and_check(script, "python_bridge_main", [
         "BRIDGE_TEST_MARKER",
-        "pyre::app",
+        "pyronova::app",
     ])
 
 
 def test_json_format():
     """JSON format output when configured."""
     script = '''
-from pyreframework import Pyre
-app = Pyre(debug=True, log_config={"format": "json"})
+from pyronova import Pyronova
+app = Pyronova(debug=True, log_config={"format": "json"})
 
 @app.get("/")
 def index(req): return "ok"
@@ -206,8 +206,8 @@ def index(req): return "ok"
 app.run(host="127.0.0.1", port=9876)
 '''
     assert run_server_and_check(script, "json_format", [
-        '"target":"pyre::server"',
-        '"message":"Pyre tracing engine initialized"',
+        '"target":"pyronova::server"',
+        '"message":"Pyronova tracing engine initialized"',
     ])
 
 

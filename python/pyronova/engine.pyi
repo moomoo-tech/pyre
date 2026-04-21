@@ -1,4 +1,4 @@
-"""Type stubs for pyreframework.engine (Rust extension module)."""
+"""Type stubs for pyronova.engine (Rust extension module)."""
 
 from typing import Optional
 
@@ -17,7 +17,7 @@ def emit_python_log(
     """Route a Python log record through Rust tracing."""
     ...
 
-class PyreRequest:
+class Request:
     method: str
     path: str
     params: dict[str, str]
@@ -29,7 +29,7 @@ class PyreRequest:
     def text(self) -> str: ...
     def json(self) -> dict: ...
 
-class PyreResponse:
+class Response:
     body: object
     status_code: int
     content_type: Optional[str]
@@ -42,12 +42,12 @@ class PyreResponse:
         headers: Optional[dict[str, str]] = None,
     ) -> None: ...
 
-class PyreWebSocket:
+class WebSocket:
     def recv(self) -> Optional[str]: ...
     def send(self, msg: str) -> None: ...
     def close(self) -> None: ...
 
-class PyreApp:
+class PyronovaApp:
     def __init__(self) -> None: ...
     def get(self, path: str, handler: object, gil: bool = False) -> None: ...
     def post(self, path: str, handler: object, gil: bool = False) -> None: ...

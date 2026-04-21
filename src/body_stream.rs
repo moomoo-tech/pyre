@@ -19,7 +19,7 @@
 //!
 //! Scope (v1):
 //!   * Only `gil=True` routes. Sub-interpreter streaming needs a C-FFI
-//!     bridge akin to `pyre_recv`/`pyre_send` and is deferred.
+//!     bridge akin to `pyronova_recv`/`pyronova_send` and is deferred.
 //!   * Sync iterator only. `async for chunk in req.stream()` is deferred.
 //!   * `max_body_size` still bounds total ingest even when streaming.
 //!
@@ -59,21 +59,21 @@ pub(crate) enum ChunkMsg {
 /// Only one logical iterator should consume a given stream — attempting to
 /// call `next()` on a stream that's already been drained yields
 /// `StopIteration` immediately.
-#[pyclass]
-pub(crate) struct PyreBodyStream {
+#[pyclass(name = "BodyStream")]
+pub(crate) struct PyronovaBodyStream {
     rx: Mutex<Option<tokio::sync::mpsc::Receiver<ChunkMsg>>>,
 }
 
-impl PyreBodyStream {
+impl PyronovaBodyStream {
     pub(crate) fn new(rx: tokio::sync::mpsc::Receiver<ChunkMsg>) -> Self {
-        PyreBodyStream {
+        PyronovaBodyStream {
             rx: Mutex::new(Some(rx)),
         }
     }
 }
 
 #[pymethods]
-impl PyreBodyStream {
+impl PyronovaBodyStream {
     fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
         slf
     }

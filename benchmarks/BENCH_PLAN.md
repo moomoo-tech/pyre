@@ -8,9 +8,9 @@
 
 | 框架 | 模式 | 说明 |
 |------|------|------|
-| Pyre SubInterp | `mode="subinterp"` | 子解释器，215k baseline |
-| Pyre GIL | 默认模式 | 主解释器 + middleware |
-| Pyre Hybrid | `mode="subinterp"` + `gil=True` 路由 | numpy 路由走 GIL |
+| Pyronova SubInterp | `mode="subinterp"` | 子解释器，215k baseline |
+| Pyronova GIL | 默认模式 | 主解释器 + middleware |
+| Pyronova Hybrid | `mode="subinterp"` + `gil=True` 路由 | numpy 路由走 GIL |
 | Robyn --fast | 多进程 | 当前最快的 Python Rust 框架 |
 | Axum (纯 Rust) | 无 Python | 性能天花板参考线 |
 
@@ -71,9 +71,9 @@ benchmarks/
 ├── suite/
 │   ├── runner.py           ← 主控脚本：启动服务、跑 wrk、收集结果
 │   ├── servers/
-│   │   ├── pyre_subinterp.py
-│   │   ├── pyre_gil.py
-│   │   ├── pyre_hybrid.py
+│   │   ├── pyronova_subinterp.py
+│   │   ├── pyronova_gil.py
+│   │   ├── pyronova_hybrid.py
 │   │   ├── robyn_server.py
 │   │   └── axum_server/    ← Cargo 项目，纯 Rust 对照
 │   ├── payloads/
@@ -97,7 +97,7 @@ benchmarks/
 ## runner.py 核心流程
 
 ```python
-for framework in [pyre_subinterp, pyre_gil, pyre_hybrid, robyn, axum]:
+for framework in [pyronova_subinterp, pyronova_gil, pyronova_hybrid, robyn, axum]:
     start_server(framework, port)
     wait_ready(port)
     for scenario in [T1, T2, ..., J3]:
@@ -135,7 +135,7 @@ generate_report(results)
 python benchmarks/suite/runner.py
 
 # 只跑某个框架
-python benchmarks/suite/runner.py --framework pyre_subinterp
+python benchmarks/suite/runner.py --framework pyronova_subinterp
 
 # 只跑某组场景
 python benchmarks/suite/runner.py --group cpu

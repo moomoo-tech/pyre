@@ -20,13 +20,13 @@ Covers all PyJsonError variants, path tracking, duck typing, and edge cases:
 
 import pytest
 from collections import defaultdict, OrderedDict, deque
-from pyreframework import Pyre
-from pyreframework.testing import TestClient
+from pyronova import Pyronova
+from pyronova.testing import TestClient
 
 
 @pytest.fixture(scope="module")
 def client():
-    app = Pyre()
+    app = Pyronova()
 
     @app.get("/")
     def health(req):

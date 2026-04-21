@@ -1,10 +1,10 @@
-"""Tests for the `pyre` CLI.
+"""Tests for the `pyronova` CLI.
 
 We test the three pieces we control:
 
 - ``routes`` subcommand prints the route table.
 - ``_load_app`` resolves ``module[:attr]``, errors helpfully when the
-  target is missing, not a Pyre, or the module fails to import.
+  target is missing, not a Pyronova, or the module fails to import.
 - ``--version`` exits cleanly.
 
 We don't exercise ``run``/``dev`` here — those block on the server loop
@@ -21,8 +21,8 @@ from pathlib import Path
 
 import pytest
 
-from pyreframework import Pyre
-from pyreframework.cli import _load_app, main
+from pyronova import Pyronova
+from pyronova.cli import _load_app, main
 
 
 # ---------------------------------------------------------------------------
@@ -33,8 +33,8 @@ from pyreframework.cli import _load_app, main
 def _write_app_module(tmp_path: Path, body: str = "") -> str:
     mod = tmp_path / "cli_fixture_app.py"
     mod.write_text(
-        "from pyreframework import Pyre\n"
-        "app = Pyre()\n"
+        "from pyronova import Pyronova\n"
+        "app = Pyronova()\n"
         "\n"
         "@app.get('/ping')\n"
         "def ping(req):\n"
@@ -64,13 +64,13 @@ def _cleanup_sys_path():
 def test_load_app_default_attr(tmp_path):
     modname = _write_app_module(tmp_path)
     app = _load_app(modname)
-    assert isinstance(app, Pyre)
+    assert isinstance(app, Pyronova)
 
 
 def test_load_app_explicit_attr(tmp_path):
     modname = _write_app_module(tmp_path)
     app = _load_app(f"{modname}:app")
-    assert isinstance(app, Pyre)
+    assert isinstance(app, Pyronova)
 
 
 def test_load_app_missing_module_exits(tmp_path):
@@ -87,12 +87,12 @@ def test_load_app_missing_attr(tmp_path):
 
 
 def test_load_app_wrong_type(tmp_path):
-    mod = tmp_path / "cli_not_pyre.py"
+    mod = tmp_path / "cli_not_pyron.py"
     mod.write_text("app = 42\n")
     sys.path.insert(0, str(tmp_path))
     with pytest.raises(SystemExit) as ei:
-        _load_app("cli_not_pyre:app")
-    assert "expected pyreframework.Pyre" in str(ei.value)
+        _load_app("cli_not_pyron:app")
+    assert "expected pyronova.Pyronova" in str(ei.value)
 
 
 # ---------------------------------------------------------------------------
@@ -115,7 +115,7 @@ def test_routes_prints_registered(tmp_path, capsys):
 
 def test_routes_empty_app(tmp_path, capsys):
     mod = tmp_path / "cli_empty.py"
-    mod.write_text("from pyreframework import Pyre\napp = Pyre()\n")
+    mod.write_text("from pyronova import Pyronova\napp = Pyronova()\n")
     sys.path.insert(0, str(tmp_path))
     main(["routes", "cli_empty"])
     assert "(no routes registered)" in capsys.readouterr().out
@@ -131,7 +131,7 @@ def test_version_flag(capsys):
         main(["--version"])
     assert ei.value.code == 0
     out = capsys.readouterr().out
-    assert out.startswith("pyre ")
+    assert out.startswith("pyronova ")
 
 
 def test_no_subcommand_errors(capsys):
@@ -145,12 +145,12 @@ def test_no_subcommand_errors(capsys):
 
 
 def test_module_entry_point_runs(tmp_path):
-    """`python -m pyreframework routes ...` should work without install."""
+    """`python -m pyronova routes ...` should work without install."""
     modname = _write_app_module(tmp_path)
     env = os.environ.copy()
     env["PYTHONPATH"] = str(tmp_path) + os.pathsep + env.get("PYTHONPATH", "")
     result = subprocess.run(
-        [sys.executable, "-m", "pyreframework", "routes", modname],
+        [sys.executable, "-m", "pyronova", "routes", modname],
         capture_output=True, text=True, env=env, timeout=30,
     )
     assert result.returncode == 0, result.stderr

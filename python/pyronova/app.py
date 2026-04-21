@@ -1,4 +1,4 @@
-"""High-level Pyre application class with decorator syntax."""
+"""High-level Pyronova application class with decorator syntax."""
 
 from __future__ import annotations
 
@@ -9,8 +9,8 @@ import inspect
 
 import os
 
-from pyreframework.engine import PyreApp as _PyreApp, PyreResponse, init_logger, emit_python_log
-from pyreframework.mcp import MCPServer
+from pyronova.engine import PyronovaApp as _PyronovaApp, Response, init_logger, emit_python_log
+from pyronova.mcp import MCPServer
 
 
 class LogConfig(TypedDict, total=False):
@@ -27,7 +27,7 @@ class LogConfig(TypedDict, total=False):
 
 def _is_worker() -> bool:
     """Check if we're running inside a sub-interpreter worker."""
-    return os.environ.get("PYRE_WORKER") == "1"
+    return os.environ.get("PYRONOVA_WORKER") == "1"
 
 
 def _setup_python_logging_bridge(rust_level: str = "DEBUG") -> None:
@@ -56,7 +56,7 @@ def _setup_python_logging_bridge(rust_level: str = "DEBUG") -> None:
         "OFF": logging.CRITICAL + 10,  # above CRITICAL — blocks everything
     }
 
-    class PyreRustHandler(logging.Handler):
+    class PyronovaRustHandler(logging.Handler):
         """logging.Handler that bridges to Rust tracing via FFI."""
 
         def emit(self, record: logging.LogRecord) -> None:
@@ -80,26 +80,26 @@ def _setup_python_logging_bridge(rust_level: str = "DEBUG") -> None:
 
     root = logging.getLogger()
     # Don't clear existing handlers — user may have Sentry, DataDog, etc.
-    # Only add Pyre bridge if not already present.
-    if not any(isinstance(h, PyreRustHandler) for h in root.handlers):
-        root.addHandler(PyreRustHandler())
+    # Only add Pyronova bridge if not already present.
+    if not any(isinstance(h, PyronovaRustHandler) for h in root.handlers):
+        root.addHandler(PyronovaRustHandler())
     # Sync Python's level gate with Rust's EnvFilter — avoids wasted
     # getMessage() + FFI calls for records that Rust would discard anyway
     root.setLevel(_LEVEL_MAP.get(rust_level.upper(), logging.DEBUG))
 
 
-class Pyre:
-    """Pyre web framework — decorator-friendly wrapper around the Rust engine.
+class Pyronova:
+    """Pyronova web framework — decorator-friendly wrapper around the Rust engine.
 
     Usage::
 
-        from pyreframework import Pyre
+        from pyronova import Pyronova
 
-        app = Pyre()
+        app = Pyronova()
 
         @app.get("/")
         def index(req):
-            return "Hello from Pyre!"
+            return "Hello from Pyronova!"
 
         app.run()
 
@@ -127,7 +127,7 @@ class Pyre:
         debug: bool = False,
         log_config: LogConfig | None = None,
     ) -> None:
-        self._engine = _PyreApp()
+        self._engine = _PyronovaApp()
         self._fallback_handler: Callable | None = None
         self._fallback_name: str | None = None
         self._mcp = MCPServer()
@@ -302,7 +302,7 @@ class Pyre:
                     try:
                         validated = mdl.model_validate_json(req.body)
                     except Exception as e:
-                        return PyreResponse(
+                        return Response(
                             body=str(e),
                             status_code=422,
                             content_type="text/plain",
@@ -315,7 +315,7 @@ class Pyre:
                     try:
                         validated = mdl.model_validate_json(req.body)
                     except Exception as e:
-                        return PyreResponse(
+                        return Response(
                             body=str(e),
                             status_code=422,
                             content_type="text/plain",
@@ -402,7 +402,7 @@ class Pyre:
         # Handle preflight OPTIONS + add CORS headers to all responses
         def _cors_before(req):
             if req.method == "OPTIONS":
-                return PyreResponse(body="", status_code=204, headers=cors_headers)
+                return Response(body="", status_code=204, headers=cors_headers)
             return None
 
         self._engine.before_request(_cors_before)
@@ -432,7 +432,7 @@ class Pyre:
             def get_data(req):
                 return {"prices": [150.1, 150.2]}
         """
-        from pyreframework.rpc import rpc_decorator
+        from pyronova.rpc import rpc_decorator
         return rpc_decorator(self, path, proto_model)
 
     # ------------------------------------------------------------------
@@ -457,7 +457,7 @@ class Pyre:
         """Register an after-request hook. Use as decorator or direct call.
 
         The hook receives ``(request, response)`` and must return a
-        ``PyreResponse``.
+        ``Response``.
         """
         if handler is not None:
             self._engine.after_request(handler)
@@ -524,7 +524,7 @@ class Pyre:
         """
         if getattr(self, "_request_id_enabled", False):
             return
-        from pyreframework.observability import install_request_id
+        from pyronova.observability import install_request_id
         install_request_id(self, header)
         self._request_id_enabled = True
 
@@ -537,7 +537,7 @@ class Pyre:
         """
         if getattr(self, "_metrics_enabled", False):
             return
-        from pyreframework.observability import install_metrics
+        from pyronova.observability import install_metrics
         install_metrics(self, path)
         self._metrics_enabled = True
 
@@ -559,7 +559,7 @@ class Pyre:
         and returns 200 only when all pass; any failure produces 503 with a
         JSON body listing the failing check.
 
-        Call once at startup, typically right after ``Pyre()``. Idempotent —
+        Call once at startup, typically right after ``Pyronova()``. Idempotent —
         calling again is a no-op.
 
         Args:
@@ -571,7 +571,7 @@ class Pyre:
         """
         if self._health_probes_enabled:
             return
-        from pyreframework.health import _build_livez_handler, _build_readyz_handler
+        from pyronova.health import _build_livez_handler, _build_readyz_handler
 
         self._route("GET", livez_path, _build_livez_handler(), gil=gil)
         self._route(
@@ -622,7 +622,7 @@ class Pyre:
     def websocket(self, path: str, handler: Callable | None = None):
         """Register a WebSocket handler. Use as decorator or direct call.
 
-        The handler receives a ``PyreWebSocket`` object with ``recv()``,
+        The handler receives a ``WebSocket`` object with ``recv()``,
         ``send(msg)``, and ``close()`` methods::
 
             @app.websocket("/ws")
@@ -757,7 +757,7 @@ class Pyre:
         tls_cert: str | None = None,
         tls_key: str | None = None,
     ) -> None:
-        """Start the Pyre server.
+        """Start the Pyronova server.
 
         Args:
             workers: Python sub-interpreter count (default: CPU count).
@@ -768,21 +768,21 @@ class Pyre:
             tls_key:  Path to PEM private key. Required together with ``tls_cert``.
         """
         # Priority: param > env var > default
-        host = host or os.environ.get("PYRE_HOST", "127.0.0.1")
-        port = port or int(os.environ.get("PYRE_PORT", "8000"))
-        workers = workers or (int(os.environ.get("PYRE_WORKERS")) if os.environ.get("PYRE_WORKERS") else None)
-        io_workers = io_workers or (int(os.environ.get("PYRE_IO_WORKERS")) if os.environ.get("PYRE_IO_WORKERS") else None)
-        tls_cert = tls_cert or os.environ.get("PYRE_TLS_CERT")
-        tls_key = tls_key or os.environ.get("PYRE_TLS_KEY")
+        host = host or os.environ.get("PYRONOVA_HOST", "127.0.0.1")
+        port = port or int(os.environ.get("PYRONOVA_PORT", "8000"))
+        workers = workers or (int(os.environ.get("PYRONOVA_WORKERS")) if os.environ.get("PYRONOVA_WORKERS") else None)
+        io_workers = io_workers or (int(os.environ.get("PYRONOVA_IO_WORKERS")) if os.environ.get("PYRONOVA_IO_WORKERS") else None)
+        tls_cert = tls_cert or os.environ.get("PYRONOVA_TLS_CERT")
+        tls_key = tls_key or os.environ.get("PYRONOVA_TLS_KEY")
 
         # Hot reload: watch .py files, restart on change
-        reload = reload or os.environ.get("PYRE_RELOAD") == "1"
-        if reload and os.environ.get("_PYRE_RELOAD_CHILD") != "1":
+        reload = reload or os.environ.get("PYRONOVA_RELOAD") == "1"
+        if reload and os.environ.get("_PYRONOVA_RELOAD_CHILD") != "1":
             self._run_with_reload()
             return
 
-        # Auto-enable logging if PYRE_LOG=1 or debug=True
-        if (os.environ.get("PYRE_LOG") == "1" or self.debug) and not hasattr(self, "_logging_enabled"):
+        # Auto-enable logging if PYRONOVA_LOG=1 or debug=True
+        if (os.environ.get("PYRONOVA_LOG") == "1" or self.debug) and not hasattr(self, "_logging_enabled"):
             self.enable_logging()
             self._logging_enabled = True
 
@@ -791,7 +791,7 @@ class Pyre:
         if not self._logger_initialized:
             self._logger_initialized = True
             # Expose level to sub-interpreter bootstrap via env var
-            os.environ["PYRE_LOG_LEVEL"] = self._log_config["level"]
+            os.environ["PYRONOVA_LOG_LEVEL"] = self._log_config["level"]
             init_logger(
                 self._log_config["level"],
                 self._log_config["access_log"],
@@ -805,7 +805,7 @@ class Pyre:
             def _mcp_handler(req):
                 body = req.text()
                 result = mcp.handle_request(body)
-                return PyreResponse(
+                return Response(
                     body=result,
                     content_type="application/json",
                 )
@@ -873,7 +873,7 @@ class Pyre:
         print(f"  [reload] Watching {watch_dir} for .py changes (watchfiles)...")
 
         while True:
-            env = {**os.environ, "_PYRE_RELOAD_CHILD": "1"}
+            env = {**os.environ, "_PYRONOVA_RELOAD_CHILD": "1"}
             proc = subprocess.Popen([sys.executable, script], env=env)
 
             try:
@@ -921,7 +921,7 @@ class Pyre:
             return files
 
         while True:
-            env = {**os.environ, "_PYRE_RELOAD_CHILD": "1"}
+            env = {**os.environ, "_PYRONOVA_RELOAD_CHILD": "1"}
             proc = subprocess.Popen([sys.executable, script], env=env)
             snap = _snapshot()
 

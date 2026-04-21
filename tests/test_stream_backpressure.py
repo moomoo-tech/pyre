@@ -18,14 +18,14 @@ import pathlib
 
 import pytest
 
-from pyreframework import Pyre
-from pyreframework.testing import TestClient
+from pyronova import Pyronova
+from pyronova.testing import TestClient
 
 
 def test_feeder_uses_bounded_async_channel():
     src = pathlib.Path("src/body_stream.rs").read_text()
     assert "tokio::sync::mpsc::Receiver" in src, (
-        "PyreBodyStream must hold a tokio bounded receiver; the previous "
+        "BodyStream must hold a tokio bounded receiver; the previous "
         "std::sync::mpsc path was unbounded (OOM risk on large uploads)"
     )
     assert "CHANNEL_CAPACITY" in src, (
@@ -43,7 +43,7 @@ def test_streaming_handler_receives_all_chunks():
     """Functional check: streamed uploads still work correctly with the
     new bounded channel. Sends 1 MB split into ~16KB hyper frames and
     the handler should see the same total byte count."""
-    app = Pyre()
+    app = Pyronova()
 
     @app.get("/")
     def root(req):

@@ -53,10 +53,10 @@ def stop_server(proc, port):
 
 SLOW_SYNC_SCRIPT = r'''
 import os
-os.environ["PYRE_WORKER"] = ""
-from pyreframework import Pyre
+os.environ["PYRONOVA_WORKER"] = ""
+from pyronova import Pyronova
 
-app = Pyre()
+app = Pyronova()
 
 @app.get("/")
 def index(req):
@@ -75,7 +75,7 @@ if __name__ == "__main__":
 
 @pytest.fixture(scope="module")
 def server():
-    script = "/tmp/pyre_test_sync_timeout.py"
+    script = "/tmp/pyronova_test_sync_timeout.py"
     with open(script, "w") as f:
         f.write(SLOW_SYNC_SCRIPT)
     proc = start_server(script, 19894)

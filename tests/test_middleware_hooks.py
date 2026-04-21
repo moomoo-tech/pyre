@@ -5,13 +5,13 @@ instead of rebuilding it, so req attributes must be fully intact.
 """
 
 import pytest
-from pyreframework import Pyre, PyreResponse
-from pyreframework.testing import TestClient
+from pyronova import Pyronova, Response
+from pyronova.testing import TestClient
 
 
 @pytest.fixture(scope="module")
 def client():
-    app = Pyre()
+    app = Pyronova()
 
     # before_request: inject custom header
     @app.before_request
@@ -29,7 +29,7 @@ def client():
         headers["x-handled-path"] = req.path
         headers["x-handled-method"] = req.method
         headers["x-client-ip"] = req.client_ip
-        return PyreResponse(
+        return Response(
             body=resp.body,
             status_code=resp.status_code,
             content_type=resp.content_type,
@@ -124,7 +124,7 @@ def test_before_hook_passes_through(client):
 
 def test_before_hook_short_circuit():
     """before_request returning a response should short-circuit."""
-    app = Pyre()
+    app = Pyronova()
 
     @app.before_request
     def auth_check(req):
@@ -132,7 +132,7 @@ def test_before_hook_short_circuit():
         if req.path == "/":
             return None
         if "x-token" not in req.headers:
-            return PyreResponse(body="unauthorized", status_code=401)
+            return Response(body="unauthorized", status_code=401)
         return None
 
     @app.get("/")
@@ -160,13 +160,13 @@ def test_before_hook_short_circuit():
 
 def test_multiple_after_hooks():
     """Multiple after_request hooks should chain correctly."""
-    app = Pyre()
+    app = Pyronova()
 
     @app.after_request
     def add_header_1(req, resp):
         headers = dict(getattr(resp, "headers", {}) or {})
         headers["x-hook-1"] = "yes"
-        return PyreResponse(
+        return Response(
             body=resp.body, status_code=resp.status_code,
             content_type=resp.content_type, headers=headers,
         )
@@ -175,7 +175,7 @@ def test_multiple_after_hooks():
     def add_header_2(req, resp):
         headers = dict(getattr(resp, "headers", {}) or {})
         headers["x-hook-2"] = "yes"
-        return PyreResponse(
+        return Response(
             body=resp.body, status_code=resp.status_code,
             content_type=resp.content_type, headers=headers,
         )

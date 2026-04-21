@@ -1,17 +1,17 @@
-"""Cookie utilities for Pyre.
+"""Cookie utilities for Pyronova.
 
 Read cookies from request headers, set cookies on responses.
 
 Usage::
 
-    from pyreframework.cookies import get_cookies, set_cookie
+    from pyronova.cookies import get_cookies, set_cookie
 
     @app.get("/")
     def index(req):
         cookies = get_cookies(req)
         session = cookies.get("session_id", "none")
         return set_cookie(
-            PyreResponse(body=f"session={session}"),
+            Response(body=f"session={session}"),
             "session_id", "abc123",
             max_age=3600, httponly=True,
         )
@@ -73,12 +73,12 @@ def set_cookie(
     secure: bool = False,
     httponly: bool = False,
     samesite: str | None = "Lax",
-) -> "PyreResponse":
-    """Set a cookie on a PyreResponse.
+) -> "Response":
+    """Set a cookie on a Response.
 
-    Returns a new PyreResponse with the Set-Cookie header added.
+    Returns a new Response with the Set-Cookie header added.
     """
-    from pyreframework.engine import PyreResponse
+    from pyronova.engine import Response
 
     _reject_control_chars("name", name)
     _reject_control_chars("value", value)
@@ -109,7 +109,7 @@ def set_cookie(
     headers = dict(getattr(response, "headers", {}) or {})
     headers["set-cookie"] = cookie_str
 
-    return PyreResponse(
+    return Response(
         body=response.body,
         status_code=getattr(response, "status_code", 200),
         content_type=getattr(response, "content_type", None),
@@ -117,7 +117,7 @@ def set_cookie(
     )
 
 
-def delete_cookie(response, name: str, *, path: str = "/") -> "PyreResponse":
+def delete_cookie(response, name: str, *, path: str = "/") -> "Response":
     """Delete a cookie by setting it expired."""
     return set_cookie(
         response, name, "",

@@ -1,6 +1,6 @@
 """Observability helpers — X-Request-ID + Prometheus ``/metrics``.
 
-Two opt-in toggles on ``Pyre``:
+Two opt-in toggles on ``Pyronova``:
 
     app.enable_request_id()   # guarantees X-Request-ID on every response
     app.enable_metrics()      # GET /metrics → Prometheus text format
@@ -11,11 +11,11 @@ across sub-interpreter workers.
 
 Metrics exposed (v1, RED-style without histograms):
 
-- ``pyre_http_requests_total`` — global request counter
-- ``pyre_http_requests_by_class_total{class="2xx|3xx|4xx|5xx"}``
-- ``pyre_http_requests_by_method_total{method="GET|POST|..."}``
-- ``pyre_http_request_duration_seconds_sum``
-- ``pyre_http_request_duration_seconds_count``
+- ``pyronova_http_requests_total`` — global request counter
+- ``pyronova_http_requests_by_class_total{class="2xx|3xx|4xx|5xx"}``
+- ``pyronova_http_requests_by_method_total{method="GET|POST|..."}``
+- ``pyronova_http_request_duration_seconds_sum``
+- ``pyronova_http_request_duration_seconds_count``
 
 (Latency is tracked as a running sum + count; compute avg via
 ``sum / count`` in the dashboard. Per-bucket histograms are a v1.1
@@ -34,14 +34,14 @@ import time
 import uuid
 from typing import TYPE_CHECKING
 
-from pyreframework.engine import PyreResponse
+from pyronova.engine import Response
 
 if TYPE_CHECKING:
-    from pyreframework.app import Pyre
+    from pyronova.app import Pyronova
 
 
 _METRIC_KEYS = [
-    ("_m:req:total", "pyre_http_requests_total", "Total HTTP requests handled.", "counter"),
+    ("_m:req:total", "pyronova_http_requests_total", "Total HTTP requests handled.", "counter"),
 ]
 
 _STATUS_CLASSES = ("1xx", "2xx", "3xx", "4xx", "5xx")
@@ -53,8 +53,8 @@ _TRACKED_METHODS = ("GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS")
 _tls = threading.local()
 
 
-def install_request_id(app: "Pyre", header: str) -> None:
-    from pyreframework.context import ctx, _reset_for_new_request
+def install_request_id(app: "Pyronova", header: str) -> None:
+    from pyronova.context import ctx, _reset_for_new_request
 
     header_lower = header.lower()
 
@@ -75,7 +75,7 @@ def install_request_id(app: "Pyre", header: str) -> None:
         if rid is None:
             return resp
         merged = {**resp.headers, header: rid}
-        return PyreResponse(
+        return Response(
             body=resp.body,
             status_code=resp.status_code,
             content_type=resp.content_type,
@@ -86,7 +86,7 @@ def install_request_id(app: "Pyre", header: str) -> None:
     app.after_request(_after)
 
 
-def install_metrics(app: "Pyre", path: str) -> None:
+def install_metrics(app: "Pyronova", path: str) -> None:
     state = app.state
 
     def _before(req):
@@ -117,7 +117,7 @@ def install_metrics(app: "Pyre", path: str) -> None:
     app.after_request(_after)
 
     def _metrics_handler(req):
-        return PyreResponse(
+        return Response(
             body=_render_prometheus(state),
             content_type="text/plain; version=0.0.4; charset=utf-8",
         )
@@ -142,30 +142,30 @@ def _render_prometheus(state) -> str:
     total = _read_int(state, "_m:req:total")
 
     parts: list[str] = []
-    parts.append("# HELP pyre_http_requests_total Total HTTP requests handled.")
-    parts.append("# TYPE pyre_http_requests_total counter")
-    parts.append(f"pyre_http_requests_total {total}")
+    parts.append("# HELP pyronova_http_requests_total Total HTTP requests handled.")
+    parts.append("# TYPE pyronova_http_requests_total counter")
+    parts.append(f"pyronova_http_requests_total {total}")
 
-    parts.append("# HELP pyre_http_requests_by_class_total Requests by status class.")
-    parts.append("# TYPE pyre_http_requests_by_class_total counter")
+    parts.append("# HELP pyronova_http_requests_by_class_total Requests by status class.")
+    parts.append("# TYPE pyronova_http_requests_by_class_total counter")
     for cls in _STATUS_CLASSES:
         v = _read_int(state, f"_m:req:class:{cls}")
-        parts.append(f'pyre_http_requests_by_class_total{{class="{cls}"}} {v}')
+        parts.append(f'pyronova_http_requests_by_class_total{{class="{cls}"}} {v}')
 
-    parts.append("# HELP pyre_http_requests_by_method_total Requests by HTTP method.")
-    parts.append("# TYPE pyre_http_requests_by_method_total counter")
+    parts.append("# HELP pyronova_http_requests_by_method_total Requests by HTTP method.")
+    parts.append("# TYPE pyronova_http_requests_by_method_total counter")
     for m in _TRACKED_METHODS:
         v = _read_int(state, f"_m:req:method:{m}")
-        parts.append(f'pyre_http_requests_by_method_total{{method="{m}"}} {v}')
+        parts.append(f'pyronova_http_requests_by_method_total{{method="{m}"}} {v}')
 
     sum_us = _read_int(state, "_m:lat:sum_us")
     count = _read_int(state, "_m:lat:count")
-    parts.append("# HELP pyre_http_request_duration_seconds_sum Cumulative latency in seconds.")
-    parts.append("# TYPE pyre_http_request_duration_seconds_sum counter")
-    parts.append(f"pyre_http_request_duration_seconds_sum {sum_us / 1_000_000:.6f}")
-    parts.append("# HELP pyre_http_request_duration_seconds_count Samples in the latency sum.")
-    parts.append("# TYPE pyre_http_request_duration_seconds_count counter")
-    parts.append(f"pyre_http_request_duration_seconds_count {count}")
+    parts.append("# HELP pyronova_http_request_duration_seconds_sum Cumulative latency in seconds.")
+    parts.append("# TYPE pyronova_http_request_duration_seconds_sum counter")
+    parts.append(f"pyronova_http_request_duration_seconds_sum {sum_us / 1_000_000:.6f}")
+    parts.append("# HELP pyronova_http_request_duration_seconds_count Samples in the latency sum.")
+    parts.append("# TYPE pyronova_http_request_duration_seconds_count counter")
+    parts.append(f"pyronova_http_request_duration_seconds_count {count}")
 
     parts.append("")  # trailing newline — Prometheus is tolerant but nicer
     return "\n".join(parts)

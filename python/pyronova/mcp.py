@@ -1,4 +1,4 @@
-"""MCP (Model Context Protocol) server support for Pyre.
+"""MCP (Model Context Protocol) server support for Pyronova.
 
 Implements JSON-RPC 2.0 over HTTP at the /mcp endpoint.
 AI applications (Claude Desktop, etc.) can discover and invoke tools,
@@ -6,9 +6,9 @@ read resources, and use prompt templates.
 
 Usage::
 
-    from pyreframework import Pyre
+    from pyronova import Pyronova
 
-    app = Pyre()
+    app = Pyronova()
 
     @app.mcp.tool(description="Add two numbers")
     def add(a: int, b: int) -> int:
@@ -214,7 +214,7 @@ class MCPServer:
                 "resources": {"subscribe": False, "listChanged": False},
                 "prompts": {"listChanged": False},
             },
-            "serverInfo": {"name": "pyre-mcp", "version": __import__("pyreframework").__version__},
+            "serverInfo": {"name": "pyronova-mcp", "version": __import__("pyronova").__version__},
         }
 
     def _handle_tools_list(self, params: dict) -> dict:

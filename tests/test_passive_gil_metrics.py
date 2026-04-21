@@ -12,13 +12,13 @@ Covers:
 """
 
 import pytest
-from pyreframework import Pyre, get_gil_metrics
-from pyreframework.testing import TestClient
+from pyronova import Pyronova, get_gil_metrics
+from pyronova.testing import TestClient
 
 
 @pytest.fixture(scope="module")
 def client():
-    app = Pyre()
+    app = Pyronova()
 
     @app.get("/")
     def index(req):

@@ -1,4 +1,4 @@
-"""Tests for PyreSettings + request-scoped ctx."""
+"""Tests for Settings + request-scoped ctx."""
 
 from __future__ import annotations
 
@@ -6,13 +6,13 @@ import os
 
 import pytest
 
-from pyreframework import Pyre
-from pyreframework.context import ctx
-from pyreframework.testing import TestClient
+from pyronova import Pyronova
+from pyronova.context import ctx
+from pyronova.testing import TestClient
 
 
 # ---------------------------------------------------------------------------
-# PyreSettings — skipped when pydantic-settings isn't installed
+# Settings — skipped when pydantic-settings isn't installed
 # ---------------------------------------------------------------------------
 
 
@@ -30,9 +30,9 @@ skip_no_ps = pytest.mark.skipif(
 
 @skip_no_ps
 def test_settings_reads_env(monkeypatch):
-    from pyreframework.config import PyreSettings
+    from pyronova.config import Settings
 
-    class S(PyreSettings):
+    class S(Settings):
         database_url: str
         debug: bool = False
 
@@ -45,9 +45,9 @@ def test_settings_reads_env(monkeypatch):
 
 @skip_no_ps
 def test_settings_case_insensitive(monkeypatch):
-    from pyreframework.config import PyreSettings
+    from pyronova.config import Settings
 
-    class S(PyreSettings):
+    class S(Settings):
         api_key: str
 
     monkeypatch.setenv("API_KEY", "secret")
@@ -58,9 +58,9 @@ def test_settings_case_insensitive(monkeypatch):
 def test_settings_ignores_unknown_env(monkeypatch):
     """Unknown env vars don't crash the app — important for deployments
     where the env is shared across many services."""
-    from pyreframework.config import PyreSettings
+    from pyronova.config import Settings
 
-    class S(PyreSettings):
+    class S(Settings):
         port: int = 8000
 
     monkeypatch.setenv("SOMETHING_ELSE", "noise")
@@ -85,7 +85,7 @@ def test_ctx_request_id_default_none():
 
 
 def test_ctx_populated_by_request_id_middleware():
-    app = Pyre()
+    app = Pyronova()
     app.enable_request_id()
     seen = {}
 
@@ -106,7 +106,7 @@ def test_ctx_populated_by_request_id_middleware():
 
 
 def test_ctx_isolated_between_requests():
-    app = Pyre()
+    app = Pyronova()
     app.enable_request_id()
     observed: list[str | None] = []
 

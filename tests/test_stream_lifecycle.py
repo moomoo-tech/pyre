@@ -1,4 +1,4 @@
-"""Tests for PyreStream deterministic lifecycle.
+"""Tests for Stream deterministic lifecycle.
 
 Covers:
 - close() performs immediate channel teardown (not deferred to GC)
@@ -10,17 +10,17 @@ Covers:
 """
 
 import pytest
-from pyreframework import Pyre, PyreResponse, PyreStream
-from pyreframework.testing import TestClient
+from pyronova import Pyronova, Response, Stream
+from pyronova.testing import TestClient
 
 
 @pytest.fixture(scope="module")
 def client():
-    app = Pyre()
+    app = Pyronova()
 
     @app.get("/stream/basic")
     def stream_basic(req):
-        stream = PyreStream()
+        stream = Stream()
         stream.send("data: hello\n\n")
         stream.send("data: world\n\n")
         stream.close()
@@ -28,7 +28,7 @@ def client():
 
     @app.get("/stream/event")
     def stream_event(req):
-        stream = PyreStream()
+        stream = Stream()
         stream.send_event("payload1", event="update", id="1")
         stream.send_event("payload2")
         stream.close()
@@ -37,19 +37,19 @@ def client():
     @app.get("/stream/close-then-send")
     def stream_close_then_send(req):
         """After close(), send() should raise ConnectionError."""
-        stream = PyreStream()
+        stream = Stream()
         stream.send("data: before\n\n")
         stream.close()
         try:
             stream.send("data: after\n\n")
             # Should not reach here
-            return PyreResponse(body="send after close did not raise", status_code=500)
+            return Response(body="send after close did not raise", status_code=500)
         except ConnectionError:
             return stream
 
     @app.get("/stream/double-close")
     def double_close(req):
-        stream = PyreStream()
+        stream = Stream()
         stream.send("data: ok\n\n")
         stream.close()
         stream.close()  # must not panic
@@ -58,13 +58,13 @@ def client():
     @app.get("/stream/no-close")
     def no_close(req):
         """Stream that relies on Drop/GC — backward compat."""
-        stream = PyreStream()
+        stream = Stream()
         stream.send("data: gc\n\n")
         return stream
 
     @app.get("/stream/custom")
     def stream_custom(req):
-        stream = PyreStream(
+        stream = Stream(
             content_type="text/plain",
             status_code=202,
             headers={"x-stream": "yes"},

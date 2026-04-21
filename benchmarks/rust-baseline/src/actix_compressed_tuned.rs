@@ -1,12 +1,12 @@
-//! Actix-web — TUNED compression for fair head-to-head with Pyre.
+//! Actix-web — TUNED compression for fair head-to-head with Pyronova.
 //!
 //! Differences vs actix_compressed.rs (which uses default `Compress` middleware):
-//!   * Brotli quality 4 (Pyre's default), not Actix's default quality 11
-//!   * Gzip level 6 (Pyre's default, also flate2 default)
+//!   * Brotli quality 4 (Pyronova's default), not Actix's default quality 11
+//!   * Gzip level 6 (Pyronova's default, also flate2 default)
 //!   * Compression runs on `web::block` (Actix's spawn_blocking equivalent)
-//!     so it doesn't head-of-line block the async runtime — matches Pyre's
+//!     so it doesn't head-of-line block the async runtime — matches Pyronova's
 //!     `tokio::task::spawn_blocking` strategy
-//!   * Same crates Pyre uses: `brotli` 7.x + `flate2` 1.x
+//!   * Same crates Pyronova uses: `brotli` 7.x + `flate2` 1.x
 //!
 //! This is what an experienced Actix user would write if they needed fast
 //! compression. It's the fair comparison — same CPU work on both sides,
@@ -60,8 +60,8 @@ fn fortunes() -> serde_json::Value {
 }
 
 fn negotiate(accept_encoding: &str) -> Option<&'static str> {
-    // Match Pyre: prefer brotli > gzip. Ignore q-values for simplicity (the
-    // wrk test sends no q-values anyway; Pyre's full q-parser is tested elsewhere).
+    // Match Pyronova: prefer brotli > gzip. Ignore q-values for simplicity (the
+    // wrk test sends no q-values anyway; Pyronova's full q-parser is tested elsewhere).
     if accept_encoding.split(',').any(|e| e.trim().eq_ignore_ascii_case("br")) {
         Some("br")
     } else if accept_encoding
@@ -127,7 +127,7 @@ async fn json_fortunes(req: HttpRequest) -> Result<HttpResponse, actix_web::Erro
         Some(algo) => {
             let algo_static = algo; // &'static str, no allocation
             // web::block puts the compression on Actix's blocking thread pool —
-            // matches Pyre's tokio::task::spawn_blocking. Prevents HoL blocking
+            // matches Pyronova's tokio::task::spawn_blocking. Prevents HoL blocking
             // of the async worker.
             let compressed = web::block(move || compress_sync(&payload, algo_static))
                 .await
@@ -156,7 +156,7 @@ async fn main() -> std::io::Result<()> {
 
     HttpServer::new(|| {
         App::new()
-            // Logger-free to match Pyre's bench config (log disabled).
+            // Logger-free to match Pyronova's bench config (log disabled).
             .wrap(middleware::DefaultHeaders::new())
             .service(index)
             .service(json_fortunes)

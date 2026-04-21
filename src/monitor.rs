@@ -70,7 +70,7 @@ pub fn record_gil_wait(wait_us: u64) {
 
     if wait_us > 50_000 {
         tracing::warn!(
-            target: "pyre::server",
+            target: "pyronova::server",
             latency_ms = wait_us / 1000,
             "GIL congested (measured on real request)"
         );
@@ -101,7 +101,7 @@ static RSS_SAMPLER_HANDLE: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>
 pub fn spawn_rss_sampler() {
     RSS_SAMPLER_RUNNING.store(true, Ordering::Release);
     let handle = std::thread::Builder::new()
-        .name("pyre-rss-sampler".to_string())
+        .name("pyronova-rss-sampler".to_string())
         .spawn(|| {
             while RSS_SAMPLER_RUNNING.load(Ordering::Relaxed) {
                 MEMORY_RSS_BYTES.store(get_rss_bytes(), Ordering::Relaxed);
@@ -109,7 +109,7 @@ pub fn spawn_rss_sampler() {
                 // more frequent sampling, and this thread does zero GIL work.
                 std::thread::sleep(Duration::from_secs(1));
             }
-            tracing::debug!(target: "pyre::server", "RSS sampler stopped");
+            tracing::debug!(target: "pyronova::server", "RSS sampler stopped");
         })
         .expect("failed to spawn RSS sampler");
     if let Ok(mut slot) = RSS_SAMPLER_HANDLE.lock() {

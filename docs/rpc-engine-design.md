@@ -6,10 +6,10 @@
 
 ## 定位
 
-Pyre 的第二阶段产品：从 Web 框架扩展为高性能 RPC 引擎。
+Pyronova 的第二阶段产品：从 Web 框架扩展为高性能 RPC 引擎。
 
 ```
-阶段 1 (当前): Pyre Web Framework — HTTP/WS/SSE/MCP, 碾压 Robyn ✅
+阶段 1 (当前): Pyronova Web Framework — HTTP/WS/SSE/MCP, 碾压 Robyn ✅
 阶段 2 (未来): Sky-RPC Engine — 二进制协议, Proto, 微服务内部通信
 ```
 
@@ -62,13 +62,13 @@ class MyTradeService(TradeServiceBase):
         return {"status": "ok", "symbol": request.symbol}
 ```
 
-## 与 Pyre Web 框架的关系
+## 与 Pyronova Web 框架的关系
 
 ```
 ┌─────────────────────────────────────┐
 │         用户的 Python 代码           │
 ├──────────────┬──────────────────────┤
-│  Pyre Web    │    Sky-RPC Engine    │
+│  Pyronova Web    │    Sky-RPC Engine    │
 │  HTTP/WS/SSE │    Binary Proto     │
 │  MCP/REST    │    gRPC compat      │
 ├──────────────┴──────────────────────┤
@@ -97,7 +97,7 @@ class MyTradeService(TradeServiceBase):
 
 ### MVP 路线
 
-1. **MsgPack over HTTP/1.1** — 最快落地，Pyre 底层零改动
+1. **MsgPack over HTTP/1.1** — 最快落地，Pyronova 底层零改动
 2. **prost + PyO3 PyDict** — 极致性能，Rust 侧解码后直传 Python
 3. **betterproto** — 如果需要 .proto 契约
 
@@ -105,9 +105,9 @@ class MyTradeService(TradeServiceBase):
 
 | 阶段 | 内容 | 前置条件 |
 |------|------|---------|
-| 0 | Pyre Web 发布 PyPI | ← **当前优先** |
-| 1 | 16B framer + prost 集成 | Pyre 稳定 |
+| 0 | Pyronova Web 发布 PyPI | ← **当前优先** |
+| 1 | 16B framer + prost 集成 | Pyronova 稳定 |
 | 2 | skyrpc-gen 代码生成器 | Proto 解析器 |
-| 3 | O(1) 路由 + 子解释器调度 | 复用 Pyre interp.rs |
+| 3 | O(1) 路由 + 子解释器调度 | 复用 Pyronova interp.rs |
 | 4 | gRPC 兼容层 (HTTP/2 + Proto) | HTTP/2 已有 |
 | 5 | Monoio thread-per-core 引擎 | Linux 机器 |

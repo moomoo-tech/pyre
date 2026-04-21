@@ -26,7 +26,7 @@ fi
 
 start_server() {
     local compression="$1"
-    PYRE_COMPRESSION=$compression PYRE_PORT=$PORT \
+    PYRONOVA_COMPRESSION=$compression PYRONOVA_PORT=$PORT \
         $PYTHON benchmarks/bench_compression.py >/tmp/bench_compression.log 2>&1 &
     local pid=$!
     for _ in $(seq 1 50); do
@@ -58,7 +58,7 @@ run_wrk() {
 }
 
 echo "╔══════════════════════════════════════════════════════════╗"
-echo "║  Pyre compression benchmark — /json-fortunes (~3.5 KB)  ║"
+echo "║  Pyronova compression benchmark — /json-fortunes (~3.5 KB)  ║"
 echo "╚══════════════════════════════════════════════════════════╝"
 echo "Config: ${THREADS} threads, ${CONNECTIONS} connections, ${DURATION}"
 

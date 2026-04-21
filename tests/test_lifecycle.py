@@ -1,14 +1,14 @@
 """Tests for on_startup / on_shutdown lifecycle hooks."""
 
 import pytest
-from pyreframework import Pyre, PyreResponse
-from pyreframework.testing import TestClient
+from pyronova import Pyronova, Response
+from pyronova.testing import TestClient
 
 
 @pytest.fixture(scope="module")
 def app_with_hooks():
     """Create an app with startup hooks that set state."""
-    app = Pyre()
+    app = Pyronova()
     # Track hook execution via a mutable container
     hook_log = {"startup_called": False, "startup_order": []}
 
@@ -82,7 +82,7 @@ def test_startup_counter_initialized(client):
 
 def test_on_startup_as_decorator():
     """on_startup should work as a decorator and return the original function."""
-    app = Pyre()
+    app = Pyronova()
 
     @app.on_startup
     def my_hook():
@@ -95,7 +95,7 @@ def test_on_startup_as_decorator():
 
 def test_on_startup_as_direct_call():
     """on_startup should work as a direct call (non-decorator)."""
-    app = Pyre()
+    app = Pyronova()
     called = []
 
     def my_hook():
@@ -107,7 +107,7 @@ def test_on_startup_as_direct_call():
 
 def test_on_shutdown_as_decorator():
     """on_shutdown should work as a decorator and return the original function."""
-    app = Pyre()
+    app = Pyronova()
 
     @app.on_shutdown
     def cleanup():
@@ -120,7 +120,7 @@ def test_on_shutdown_as_decorator():
 
 def test_on_shutdown_as_direct_call():
     """on_shutdown should work as a direct call (non-decorator)."""
-    app = Pyre()
+    app = Pyronova()
 
     def cleanup():
         pass
@@ -131,7 +131,7 @@ def test_on_shutdown_as_direct_call():
 
 def test_multiple_startup_hooks_registered():
     """Multiple startup hooks should all be registered."""
-    app = Pyre()
+    app = Pyronova()
 
     @app.on_startup
     def hook1():
@@ -150,7 +150,7 @@ def test_multiple_startup_hooks_registered():
 
 def test_multiple_shutdown_hooks_registered():
     """Multiple shutdown hooks should all be registered."""
-    app = Pyre()
+    app = Pyronova()
 
     @app.on_shutdown
     def hook1():

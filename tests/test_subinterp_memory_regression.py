@@ -17,7 +17,7 @@ Today's fixes (hot-path leak):
 
 Still open:
   - Per-request dict leak (~2 dicts / request survives despite fixes)
-  - Python __del__ does NOT fire in Pyre sub-interpreters at all
+  - Python __del__ does NOT fire in Pyronova sub-interpreters at all
     (confirmed with a pure Python class inside a handler). Likely a
     PEP 684 OWN_GIL finalizer issue.
 
@@ -45,11 +45,11 @@ PORT = 19777
 
 SERVER_SCRIPT = '''
 import gc, sys, os
-from pyreframework import Pyre
-from pyreframework.cookies import set_cookie
-from pyreframework.engine import PyreResponse
+from pyronova import Pyronova
+from pyronova.cookies import set_cookie
+from pyronova.engine import Response
 
-app = Pyre()
+app = Pyronova()
 
 # --- In-sub-interp finalizer counter (each sub-interp has its own) ------
 _probe_created = [0]
@@ -78,12 +78,12 @@ def rss_kb(req):
                 return {"rss_kb": int(line.split()[1])}
     return {"rss_kb": -1}
 
-@app.get("/pyreq_alive")
-def pyreq_alive(req):
-    # Count _PyreRequest instances alive in THIS sub-interp.
+@app.get("/pyronovareq_alive")
+def pyronovareq_alive(req):
+    # Count _Request instances alive in THIS sub-interp.
     for _ in range(2):
         gc.collect()
-    n = sum(1 for o in gc.get_objects() if type(o).__name__ == "_PyreRequest")
+    n = sum(1 for o in gc.get_objects() if type(o).__name__ == "_Request")
     return {"alive": n}
 
 @app.get("/dicts_alive")
@@ -102,14 +102,14 @@ def slot_attack(req):
     # Attempt to smuggle a user attribute past the Rust SlotClearer.
     # Strict __slots__ must reject this at runtime — otherwise the
     # attribute would leak past the sub-interp dealloc bug.
-    from pyreframework.engine import PyreResponse
+    from pyronova.engine import Response
     results = {}
     try:
         req.arbitrary_user_attr = "would leak"
         results["request_accepts_arbitrary_attr"] = True
     except AttributeError:
         results["request_accepts_arbitrary_attr"] = False
-    resp = PyreResponse(body="ok")
+    resp = Response(body="ok")
     try:
         resp.arbitrary_user_attr = "would leak"
         results["response_accepts_arbitrary_attr"] = True
@@ -137,7 +137,7 @@ def probe_stats(req):
 
 @app.get("/cookie_ok")
 def cookie_ok(req):
-    return set_cookie(PyreResponse(body="ok"), "session", "abc123")
+    return set_cookie(Response(body="ok"), "session", "abc123")
 
 @app.get("/cookie_crlf")
 def cookie_crlf(req):
@@ -146,7 +146,7 @@ def cookie_crlf(req):
     # quoted outer template.
     bad_value = "bad" + chr(13) + chr(10) + "Set-Cookie: evil=1"
     try:
-        set_cookie(PyreResponse(body="ok"), "x", bad_value)
+        set_cookie(Response(body="ok"), "x", bad_value)
         return {"rejected": False}
     except ValueError as e:
         return {"rejected": True, "err": str(e)[:60]}
@@ -164,7 +164,7 @@ if __name__ == "__main__":
 @pytest.fixture(scope="module")
 def server():
     """One long-lived hybrid-mode server shared across this module's tests."""
-    script_path = f"/tmp/pyre_regression_{os.getpid()}.py"
+    script_path = f"/tmp/pyronova_regression_{os.getpid()}.py"
     Path(script_path).write_text(
         SERVER_SCRIPT.replace("{HOST}", HOST).replace("{PORT}", str(PORT))
     )
@@ -186,7 +186,7 @@ def server():
             time.sleep(0.1)
     else:
         proc.kill()
-        pytest.fail("Pyre server did not start within 10s")
+        pytest.fail("Pyronova server did not start within 10s")
 
     yield
 
@@ -296,7 +296,7 @@ def test_router_case_insensitive_for_lowercase_method(server):
 
 
 # ─────────────────────────────────────────────────────────────────
-# Today's fix: _PyreRequest does not leak per-request
+# Today's fix: _Request does not leak per-request
 # ─────────────────────────────────────────────────────────────────
 
 
@@ -305,7 +305,7 @@ def test_request_response_lock_out_dynamic_attrs(server):
     __slots__ names it clears. If a user handler could do
     `request.my_thing = payload`, that attribute would bypass every
     cleanup path and leak past the sub-interp dealloc bug. Strict
-    __slots__ (no __dict__) on both `_PyreRequest` and `_PyreResponse`
+    __slots__ (no __dict__) on both `_Request` and `_Response`
     physically prevents that by raising AttributeError at runtime.
 
     This test asserts the closed-world invariant: both classes MUST
@@ -315,35 +315,35 @@ def test_request_response_lock_out_dynamic_attrs(server):
     """
     r = _get("/slot_attack")
     assert r["request_accepts_arbitrary_attr"] is False, (
-        "_PyreRequest lost its __slots__ discipline — user handlers "
+        "_Request lost its __slots__ discipline — user handlers "
         "can now stash arbitrary attributes on the request, and those "
         "will leak past the Rust SlotClearer."
     )
     assert r["response_accepts_arbitrary_attr"] is False, (
-        "_PyreResponse lost its __slots__ discipline — same failure "
+        "_Response lost its __slots__ discipline — same failure "
         "mode as the request case."
     )
 
 
-def test_pyrerequest_does_not_accumulate(server):
-    """After hammering /, _PyreRequest instances must not persist per request.
+def test_pyronovarequest_does_not_accumulate(server):
+    """After hammering /, _Request instances must not persist per request.
 
-    Before the Vectorcall fix, every request leaked one _PyreRequest. We
+    Before the Vectorcall fix, every request leaked one _Request. We
     allow a tiny constant (probe request + any in-flight) but reject the
     linear growth signature.
     """
     _hammer(50)
-    baseline = _get("/pyreq_alive")["alive"]
+    baseline = _get("/pyronovareq_alive")["alive"]
     _hammer(2000)
     # Poll several times — requests land on different sub-interpreters,
     # the leak would show on at least one of them.
     worst = 0
     for _ in range(30):
-        worst = max(worst, _get("/pyreq_alive")["alive"])
+        worst = max(worst, _get("/pyronovareq_alive")["alive"])
     # Pre-fix: ~130 alive per sub-interp after 2000 hits. Allow a
     # generous 20 to account for in-flight + pool churn + debug builds.
     assert worst < 20, (
-        f"_PyreRequest leaks — {worst} alive after 2000 hits "
+        f"_Request leaks — {worst} alive after 2000 hits "
         f"(baseline {baseline}). Expected < 20."
     )
 
@@ -356,7 +356,7 @@ def test_pyrerequest_does_not_accumulate(server):
 def test_subinterp_python_finalizers_fire(server):
     """Python __del__ / tp_finalize runs in sub-interp handlers.
 
-    Historically xfail'd because Pyre's sub-interp workers reused the
+    Historically xfail'd because Pyronova's sub-interp workers reused the
     creator-thread's tstate across OS threads, and CPython's per-OS-
     thread finalizer bookkeeping silently stopped firing. Fixed by
     `rebind_tstate_to_current_thread`: each worker creates a fresh
@@ -402,7 +402,7 @@ def test_rss_growth_per_request_is_bounded(server):
     request.
 
     Pre-fixes: ~1.0 KB/request (logged mode) or ~0.75 KB/request (no log).
-    Post _PyreRequest fix: ~0.75 KB/request (dict leak remains).
+    Post _Request fix: ~0.75 KB/request (dict leak remains).
     Post slot-DelAttr:     ~0.5 KB/request under wrk load; serial load
                            from this test is ~1 KB/req, still above bar.
     Target after full fix: < 50 B/request (just allocator slack).
@@ -419,10 +419,10 @@ def test_rss_growth_per_request_is_bounded(server):
     # Journey:
     #   Pre any fix:                           ~1000 B/req
     #   + Vectorcall handler call              ~1000 B/req
-    #   + Vectorcall _PyreRequest construction ~1000 B/req
+    #   + Vectorcall _Request construction ~1000 B/req
     #   + Slot DelAttr workaround              ~530 B/req
     #   + Instance recycling (d67a988)         ~530 B/req
-    #   + Raw C-API _PyreRequest type          ~820 B/req serial (worse)
+    #   + Raw C-API _Request type          ~820 B/req serial (worse)
     #                                          ~113 B/req @ 350k rps (better)
     #   + PyDict_Clear in tp_dealloc           ~63 B/req
     #   + TaskTracker graceful shutdown        ~63 B/req (same — shutdown concern)

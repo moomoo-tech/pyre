@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pyre Benchmark Suite — automated multi-framework, multi-scenario benchmarking."""
+"""Pyronova Benchmark Suite — automated multi-framework, multi-scenario benchmarking."""
 
 import json
 import os
@@ -72,9 +72,9 @@ class Framework:
 
 
 FRAMEWORKS = [
-    Framework("pyre_subinterp", "servers/pyre_subinterp.py", supports_numpy=False),
-    Framework("pyre_gil", "servers/pyre_gil.py", supports_numpy=True),
-    Framework("pyre_hybrid", "servers/pyre_hybrid.py", supports_numpy=True),
+    Framework("pyronova_subinterp", "servers/pyronova_subinterp.py", supports_numpy=False),
+    Framework("pyronova_gil", "servers/pyronova_gil.py", supports_numpy=True),
+    Framework("pyronova_hybrid", "servers/pyronova_hybrid.py", supports_numpy=True),
     Framework("robyn", "servers/robyn_server.py", extra_args=["--fast"], supports_numpy=True, startup_wait=3.0),
 ]
 
@@ -217,7 +217,7 @@ def run_benchmark():
     completed = 0
 
     print(f"\n{'='*70}")
-    print(f"  Pyre Benchmark Suite — {timestamp}")
+    print(f"  Pyronova Benchmark Suite — {timestamp}")
     print(f"  {len(FRAMEWORKS)} frameworks × {len(SCENARIOS)} scenarios")
     print(f"  Total tests: {total_tests}")
     print(f"{'='*70}\n")

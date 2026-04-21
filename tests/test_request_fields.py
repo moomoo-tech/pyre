@@ -1,17 +1,17 @@
-"""Tests for PyreRequest field completeness and edge cases.
+"""Tests for Request field completeness and edge cases.
 
 Verifies all request fields (method, path, params, query, headers,
 client_ip, body) are correctly populated across different scenarios.
 """
 
 import pytest
-from pyreframework import Pyre, PyreResponse
-from pyreframework.testing import TestClient
+from pyronova import Pyronova, Response
+from pyronova.testing import TestClient
 
 
 @pytest.fixture(scope="module")
 def client():
-    app = Pyre()
+    app = Pyronova()
 
     @app.get("/")
     def index(req):

@@ -26,7 +26,7 @@ app.run()                   # 自动检测，自动分流，零配置
 
 启动时框架会显示分配情况：
 ```
-  Pyre v1.0.0 [hybrid-async mode]
+  Pyronova v1.0.0 [hybrid-async mode]
   Workers: 5 sync + 5 async
   Routes: 2 sub-interp + 0 GIL + 1 async
 ```
@@ -48,7 +48,7 @@ app.run()                   # 自动检测，自动分流，零配置
 | 调用外部 API (httpx) | `async def handler(req)` + `await` |
 | numpy / pandas 计算 | `def handler(req)` + `gil=True` |
 | AI Agent (LLM 调用) | `async def handler(req)` + `await` |
-| SSE 流式输出 | `def handler(req)` + `gil=True` + `PyreStream` |
+| SSE 流式输出 | `def handler(req)` + `gil=True` + `Stream` |
 | 混合场景 | 直接混写，框架自动分流 |
 
 ### 性能保证
@@ -62,7 +62,7 @@ app.run()                   # 自动检测，自动分流，零配置
 
 每个子解释器增量 ~10 MB（共享进程代码段和共享库）：
 
-| Workers | Pyre SubInterp | Robyn 多进程 |
+| Workers | Pyronova SubInterp | Robyn 多进程 |
 |---------|---------------|-------------|
 | 1 | 31 MB | ~20 MB |
 | 10 | 119 MB | 447 MB |
@@ -81,7 +81,7 @@ C 扩展（numpy/orjson）的 `.so` 文件只 mmap 一次，32 workers 摊薄基
 app.run(host="0.0.0.0", port=9000, workers=16)
 
 # 或用环境变量（部署时覆盖，不改代码）
-# PYRE_HOST=0.0.0.0 PYRE_PORT=9000 PYRE_WORKERS=16 python app.py
+# PYRONOVA_HOST=0.0.0.0 PYRONOVA_PORT=9000 PYRONOVA_WORKERS=16 python app.py
 app.run()  # 自动读环境变量
 ```
 
@@ -89,12 +89,12 @@ app.run()  # 自动读环境变量
 
 | 参数 | 环境变量 | 默认值 | 说明 |
 |------|---------|--------|------|
-| `host` | `PYRE_HOST` | `127.0.0.1` | 监听地址 |
-| `port` | `PYRE_PORT` | `8000` | 监听端口 |
-| `workers` | `PYRE_WORKERS` | CPU 核心数 | Sub-interpreter 数量 |
+| `host` | `PYRONOVA_HOST` | `127.0.0.1` | 监听地址 |
+| `port` | `PYRONOVA_PORT` | `8000` | 监听端口 |
+| `workers` | `PYRONOVA_WORKERS` | CPU 核心数 | Sub-interpreter 数量 |
 | `mode` | — | 自动检测 | `subinterp` / `auto` |
-| — | `PYRE_LOG=1` | 关闭 | 启用请求日志 |
-| — | `PYRE_METRICS=1` | 关闭 | 启用 GIL Watchdog |
+| — | `PYRONOVA_LOG=1` | 关闭 | 启用请求日志 |
+| — | `PYRONOVA_METRICS=1` | 关闭 | 启用 GIL Watchdog |
 
 ### 部署示例
 
@@ -103,16 +103,16 @@ app.run()  # 自动读环境变量
 python app.py
 
 # 生产 (Docker/K8s)
-PYRE_HOST=0.0.0.0 PYRE_PORT=8080 PYRE_WORKERS=32 PYRE_LOG=1 python app.py
+PYRONOVA_HOST=0.0.0.0 PYRONOVA_PORT=8080 PYRONOVA_WORKERS=32 PYRONOVA_LOG=1 python app.py
 
 # 压测 (关闭日志，最大性能)
-PYRE_WORKERS=10 python app.py
+PYRONOVA_WORKERS=10 python app.py
 ```
 
 ### 设计原则
 
-- **不搞配置文件** — 不需要 `pyre.toml` / `settings.py`，环境变量足够
-- **不搞 CLI** — 不需要 `pyre run --port 8000`，直接 `python app.py`
+- **不搞配置文件** — 不需要 `pyronova.toml` / `settings.py`，环境变量足够
+- **不搞 CLI** — 不需要 `pyronova run --port 8000`，直接 `python app.py`
 - **容器原生** — Docker ENV / K8s ConfigMap 直接映射
 
 ## 日志
@@ -120,7 +120,7 @@ PYRE_WORKERS=10 python app.py
 ### 启用框架日志
 
 ```python
-app = Pyre()
+app = Pyronova()
 app.enable_logging()  # 开启结构化日志
 ```
 
@@ -191,9 +191,9 @@ def add(data):
 ### 客户端
 
 ```python
-from pyreframework import PyreRPCClient
+from pyronova import RPCClient
 
-with PyreRPCClient("http://127.0.0.1:8000") as client:
+with RPCClient("http://127.0.0.1:8000") as client:
     result = client.add(a=3, b=5)  # 像本地函数一样调用
     print(result)  # {"sum": 8}
 ```
@@ -234,11 +234,11 @@ msg_type, data = ws.recv_message()  # ("text", "hello") or ("binary", b"\x00")
 
 ```python
 import threading
-from pyreframework import PyreStream
+from pyronova import Stream
 
 @app.get("/stream", gil=True)
 def stream(req):
-    s = PyreStream()
+    s = Stream()
     def generate():
         for token in ["Hello", " ", "World"]:
             s.send_event(token)
@@ -268,9 +268,9 @@ del app.state["key"]
 
 ```python
 # 启用 (环境变量)
-# PYRE_METRICS=1 python app.py
+# PYRONOVA_METRICS=1 python app.py
 
-from pyreframework import get_gil_metrics
+from pyronova import get_gil_metrics
 last, peak, probes, total, rss, queue, hold, dropped, total_req = get_gil_metrics()
 ```
 
@@ -290,4 +290,4 @@ Workers=10  119 MB
 Workers=32  333 MB
 ```
 
-对比 Robyn 多进程：22 进程 = 427 MB。Pyre 节省 ~50-70%。
+对比 Robyn 多进程：22 进程 = 427 MB。Pyronova 节省 ~50-70%。

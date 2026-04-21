@@ -1,12 +1,12 @@
 """Regression for the graceful-shutdown bug (benchmark-17 audit bug #3).
 
-Before the fix, the async-worker's `_pyre_engine` exited the moment the
+Before the fix, the async-worker's `_pyronova_engine` exited the moment the
 fetcher thread returned, with pending asyncio tasks still in flight.
 `Py_EndInterpreter` then tore the VM down mid-task, which could
 segfault on ungraceful cleanup of coroutine frames and left orphan
 sockets for anything using asyncio-driven I/O (asyncpg, aiohttp, etc.).
 
-Now `_pyre_engine`'s `finally` branch cancels every pending task,
+Now `_pyronova_engine`'s `finally` branch cancels every pending task,
 gathers them with `return_exceptions=True`, and runs
 `loop.shutdown_asyncgens()` before the caller re-enters Rust.
 
@@ -20,9 +20,9 @@ import pathlib
 
 
 def test_async_engine_graceful_shutdown_present():
-    src = pathlib.Path("python/pyreframework/_async_engine.py").read_text()
+    src = pathlib.Path("python/pyronova/_async_engine.py").read_text()
     assert "asyncio.all_tasks(loop)" in src, (
-        "_pyre_engine's finally block must enumerate pending tasks to cancel"
+        "_pyronova_engine's finally block must enumerate pending tasks to cancel"
     )
     assert "task.cancel()" in src
     assert "asyncio.gather" in src and "return_exceptions=True" in src, (

@@ -1,4 +1,4 @@
-//! Actix-web compression baseline for head-to-head comparison with Pyre.
+//! Actix-web compression baseline for head-to-head comparison with Pyronova.
 //!
 //! Same /json-fortunes payload (32 records, ~3 KB JSON), same stack, same
 //! machine, same wrk invocation as benchmarks/bench_compression.py. Uses
@@ -80,7 +80,7 @@ async fn main() -> std::io::Result<()> {
     HttpServer::new(|| {
         App::new()
             // Default Compress: negotiates Accept-Encoding (br/gzip/deflate/zstd).
-            // Same as Pyre — handler returns plain JSON, middleware layers encoding on top.
+            // Same as Pyronova — handler returns plain JSON, middleware layers encoding on top.
             .wrap(Compress::default())
             .service(index)
             .service(json_fortunes)

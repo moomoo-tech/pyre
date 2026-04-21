@@ -1,8 +1,8 @@
-# Pyre 🔥
+# Pyronova 🔥
 
 **High-performance Python web framework powered by Rust.**
 
-Built on Per-Interpreter GIL (PEP 684) and a Rust async core, Pyre runs Python handlers across all CPU cores in a single process.
+Built on Per-Interpreter GIL (PEP 684) and a Rust async core, Pyronova runs Python handlers across all CPU cores in a single process.
 
 - **902k req/s** on Linux (AMD Ryzen 7840HS, 8C/16T) under TechEmpower-style
   pipelined plaintext (`wrk -t8 -c256 --pipeline 16`).
@@ -14,9 +14,9 @@ Built on Per-Interpreter GIL (PEP 684) and a Rust async core, Pyre runs Python h
 
 ### What's new in v1.6
 
-- **`pyre` CLI** — `pyre run <module:app>` (prod), `pyre dev <module:app>`
-  (hot-reload + debug logging), `pyre routes <module:app>` (print the
-  route table). `python -m pyreframework ...` works the same way.
+- **`pyronova` CLI** — `pyronova run <module:app>` (prod), `pyronova dev <module:app>`
+  (hot-reload + debug logging), `pyronova routes <module:app>` (print the
+  route table). `python -m pyronova ...` works the same way.
 - **Kubernetes health probes** — one-liner `app.enable_health_probes()`
   registers `/livez` (always 200) and `/readyz` (runs every
   `@app.readiness_check("name")`, sync or async; any failure → 503 with
@@ -28,18 +28,18 @@ Built on Per-Interpreter GIL (PEP 684) and a Rust async core, Pyre runs Python h
 - **X-Request-ID** — `app.enable_request_id()` mints a UUID if the
   client didn't send one, echoes it back on every response, and pushes
   it into the per-request `ctx` for downstream handlers.
-- **Request-scoped context** — `from pyreframework.context import ctx`;
+- **Request-scoped context** — `from pyronova.context import ctx`;
   `ContextVar`-backed `ctx.get/set/request_id()`, reset per request so
   recycled worker threads don't leak state.
-- **`PyreSettings`** — thin pydantic-settings base (lazy import, opt-in)
-  with Pyre-friendly defaults (case-insensitive, ignore unknown, `.env`).
+- **`Settings`** — thin pydantic-settings base (lazy import, opt-in)
+  with Pyronova-friendly defaults (case-insensitive, ignore unknown, `.env`).
 - **TestClient v2** — `params=`, persistent cookie jar,
   `follow_redirects=False`, `OPTIONS`/`HEAD`, `.ok`/`.raise_for_status()`,
   `websocket_connect()` via the `websockets` package.
 - **Streaming DB cursor** — `pool.fetch_iter(sql, ...)` yields Postgres
   rows with O(1) memory (see `docs/positioning-and-roadmap.md`).
 - **Misc.**: admission gate skipped for small bodies (fixes HTTP/2
-  regression), `drain_count()` on `PyreBodyStream` for upload
+  regression), `drain_count()` on `BodyStream` for upload
   throughput, fast-path responses with zero-cost guard, TLS handshake
   10 s timeout (Slowloris).
 
@@ -50,7 +50,7 @@ Built on Per-Interpreter GIL (PEP 684) and a Rust async core, Pyre runs Python h
   `PyThreadState` reuse and fixed via `PyThreadState_New` per worker.
   See `docs/advisor-triage-2026-04-19.md` and
   [CHANGELOG](CHANGELOG.md#v150-2026-04-19) for the full writeup.
-- **Raw C-API `_PyreRequest` type** built via `PyType_FromSpec` with
+- **Raw C-API `_Request` type** built via `PyType_FromSpec` with
   a deterministic Rust-owned `tp_dealloc` — replaces the Python-class
   stub, closes a CPython `subtype_dealloc` hazard, restores proper
   `__del__` / `tp_finalize` semantics in sub-interp handlers.
@@ -69,16 +69,16 @@ Built on Per-Interpreter GIL (PEP 684) and a Rust async core, Pyre runs Python h
 Full benchmark (v1.4.0 baseline, unchanged methodology):
 [benchmarks/benchmark-14-linux.en.md](benchmarks/benchmark-14-linux.en.md)
 
-### What others can't do, Pyre has built-in
+### What others can't do, Pyronova has built-in
 
 - **SharedState** — cross-worker memory sharing without Redis (nanosecond latency)
 - **AI-native** — MCP server, MsgPack RPC, SSE streaming
 - **Observable** — GIL watchdog, backpressure (503), request timeout (504)
 
 ```python
-from pyreframework import Pyre
+from pyronova import Pyronova
 
-app = Pyre()
+app = Pyronova()
 
 @app.get("/")
 def index(req):
@@ -93,13 +93,13 @@ async def io_heavy(req):
 app.run()
 ```
 
-## Why Pyre?
+## Why Pyronova?
 
 ### The problem
 
 AI applications in Python need **high throughput and low memory**. An AI agent backend handles thousands of concurrent LLM calls, RAG queries, and tool invocations — all I/O-heavy, all in Python. A quantitative trading gateway processes hundreds of real-time data feeds simultaneously. These workloads demand the performance of C++ with the ecosystem of Python.
 
-But Python has the GIL (Global Interpreter Lock). One lock, one core, no parallelism. Every framework before Pyre works around this with compromises.
+But Python has the GIL (Global Interpreter Lock). One lock, one core, no parallelism. Every framework before Pyronova works around this with compromises.
 
 ### What others do (and why it's not enough)
 
@@ -111,20 +111,20 @@ But Python has the GIL (Global Interpreter Lock). One lock, one core, no paralle
 
 **Free-threaded Python** (no-GIL, PEP 703) removes the lock but makes every Python object operation slower (atomic reference counting). The ecosystem isn't ready — most C extensions assume the GIL exists. It trades one problem for another.
 
-### What Pyre does differently
+### What Pyronova does differently
 
-**Pyre multiplies the GIL.** Using Per-Interpreter GIL (PEP 684), each worker gets its own independent Python interpreter with its own GIL inside a single process. True multi-core parallelism, zero memory duplication, zero IPC overhead.
+**Pyronova multiplies the GIL.** Using Per-Interpreter GIL (PEP 684), each worker gets its own independent Python interpreter with its own GIL inside a single process. True multi-core parallelism, zero memory duplication, zero IPC overhead.
 
 ```
 FastAPI:  1 process × 1 GIL × async tricks     = fast I/O, slow CPU, 15k QPS
 Robyn:    16 processes × 16 GILs × 16× memory  = brute force, 156k QPS, 583 MB
-Pyre:     1 process × 16 GILs × shared memory   = elegant, 429k QPS, 189 MB
+Pyronova:     1 process × 16 GILs × shared memory   = elegant, 429k QPS, 189 MB
 ```
 
 This matters for AI:
-- **LLM gateway** — thousands of concurrent `await` calls, each taking 2-5 seconds. Pyre's async pool handles 133k concurrent I/O operations.
+- **LLM gateway** — thousands of concurrent `await` calls, each taking 2-5 seconds. Pyronova's async pool handles 133k concurrent I/O operations.
 - **Agent orchestration** — multiple agents computing simultaneously. Each sub-interpreter runs at full CPU speed without blocking others.
-- **Memory efficiency** — deploy 3x more instances on the same hardware. Pyre 189 MB for 16 workers vs Robyn 583 MB. On a 512 MB container, Pyre runs 16 parallel workers; Robyn fits 12 at best.
+- **Memory efficiency** — deploy 3x more instances on the same hardware. Pyronova 189 MB for 16 workers vs Robyn 583 MB. On a 512 MB container, Pyronova runs 16 parallel workers; Robyn fits 12 at best.
 - **State sharing** — cross-worker `app.state` with nanosecond latency. No Redis, no serialization, no network hop. Session management, caching, and coordination built into the framework.
 
 ## Performance
@@ -135,7 +135,7 @@ Full report: [benchmarks/benchmark-14-linux.md](benchmarks/benchmark-14-linux.md
 
 ### Throughput (requests/sec)
 
-| Route | Pyre | P50 | P99 |
+| Route | Pyronova | P50 | P99 |
 |-------|------|-----|-----|
 | GET / (plain text) | **429,000** | 185μs | 579μs |
 | GET /json | **405,000** | 196μs | 599μs |
@@ -143,11 +143,11 @@ Full report: [benchmarks/benchmark-14-linux.md](benchmarks/benchmark-14-linux.md
 | POST /echo (JSON parse) | **372,000** | 214μs | 785μs |
 | GET /compute (CPU-bound) | **379,000** | 211μs | 772μs |
 
-### Pyre vs Robyn (fair comparison)
+### Pyronova vs Robyn (fair comparison)
 
 Both frameworks given 16 workers on the same hardware. Robyn: `--processes 16 --workers 2`.
 
-| Route | Pyre (1 proc, 16 sub-interp) | Robyn (16 proc × 2 workers) | Ratio |
+| Route | Pyronova (1 proc, 16 sub-interp) | Robyn (16 proc × 2 workers) | Ratio |
 |-------|-----|-------|-------|
 | GET / | **429k** req/s | 156k req/s | **2.7x** |
 | GET /json | **405k** req/s | 155k req/s | **2.6x** |
@@ -157,14 +157,14 @@ Both frameworks given 16 workers on the same hardware. Robyn: `--processes 16 --
 
 ### Resource efficiency
 
-| Resource | Pyre | Robyn (16 proc) |
+| Resource | Pyronova | Robyn (16 proc) |
 |----------|------|-----------------|
 | Memory | **189 MB** | 583 MB |
 | Processes | **1** | 16 |
 | QPS per MB | **2,268 req/s/MB** | 268 req/s/MB |
 | Cross-worker state | Built-in (DashMap, nanosecond) | Needs Redis |
 
-Pyre achieves **2.7x the throughput with 1/3 the memory**. Per-MB efficiency is **8.5x** better.
+Pyronova achieves **2.7x the throughput with 1/3 the memory**. Per-MB efficiency is **8.5x** better.
 
 ### Stability (5-minute sustained load)
 
@@ -191,15 +191,15 @@ Sustained 300s stress test, wrk -t4 -c100.
 
 Graceful degradation under extreme concurrency — still 356k QPS with zero errors.
 
-### Pyre vs Robyn: feature comparison
+### Pyronova vs Robyn: feature comparison
 
-| Capability | Pyre | Robyn |
+| Capability | Pyronova | Robyn |
 |------------|------|-------|
 | **Architecture** | 1 process, N sub-interpreters | N OS processes |
 | **SharedState** (cross-worker) | Built-in (DashMap, nanosecond) | Not supported (needs Redis) |
 | **MCP Server** (AI tool protocol) | Built-in | Supported (experimental) |
 | **MsgPack RPC** | Built-in + magic client | Not supported |
-| **SSE Streaming** | Built-in (PyreStream) | Supported |
+| **SSE Streaming** | Built-in (Stream) | Supported |
 | **GIL Watchdog** | Built-in (contention + hold time) | Not supported |
 | **Backpressure** (503 overload) | Built-in (bounded channels) | Not supported |
 | **Request Timeout** (504) | Built-in (30s zombie reaper) | Not supported |
@@ -211,7 +211,7 @@ Graceful degradation under extreme concurrency — still 356k QPS with zero erro
 | **Middleware** | before/after hooks | Supported |
 | **Hot Reload** | Supported | Supported |
 
-### Who is Pyre for?
+### Who is Pyronova for?
 
 **AI Agent servers** — Build MCP-compatible tool servers, LLM gateways, and multi-agent orchestration backends. Handle thousands of concurrent LLM streaming responses with SSE. SharedState coordinates agents without Redis.
 
@@ -221,11 +221,11 @@ Graceful degradation under extreme concurrency — still 356k QPS with zero erro
 
 **Edge/IoT gateways** — Run on memory-constrained devices (512 MB containers, Raspberry Pi). 67 MB for 10 parallel workers vs 447 MB for the alternatives.
 
-## How Pyre works
+## How Pyronova works
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│                    Pyre Architecture                     │
+│                    Pyronova Architecture                     │
 ├─────────────────────────────────────────────────────────┤
 │  Python handlers (def / async def / gil=True)           │
 │      ↓                                                   │
@@ -242,7 +242,7 @@ Graceful degradation under extreme concurrency — still 356k QPS with zero erro
 
 ### Routing & Request/Response
 
-| Feature | Pyre | FastAPI | Robyn |
+| Feature | Pyronova | FastAPI | Robyn |
 |---------|------|---------|-------|
 | Decorator routing | ✅ | ✅ | ✅ |
 | Path params `/hello/{name}` | ✅ | ✅ | ✅ |
@@ -257,7 +257,7 @@ Graceful degradation under extreme concurrency — still 356k QPS with zero erro
 
 ### Protocols
 
-| Feature | Pyre | FastAPI | Robyn |
+| Feature | Pyronova | FastAPI | Robyn |
 |---------|------|---------|-------|
 | HTTP/1.1 | ✅ | ✅ | ✅ |
 | HTTP/2 | ✅ | ✅ (Hypercorn) | ✅ |
@@ -266,7 +266,7 @@ Graceful degradation under extreme concurrency — still 356k QPS with zero erro
 
 ### Middleware & Security
 
-| Feature | Pyre | FastAPI | Robyn |
+| Feature | Pyronova | FastAPI | Robyn |
 |---------|------|---------|-------|
 | before/after hooks | ✅ | ✅ middleware | ✅ |
 | CORS | ✅ built-in | ✅ | ✅ |
@@ -277,7 +277,7 @@ Graceful degradation under extreme concurrency — still 356k QPS with zero erro
 
 ### AI & Microservices
 
-| Feature | Pyre | FastAPI | Robyn |
+| Feature | Pyronova | FastAPI | Robyn |
 |---------|------|---------|-------|
 | MCP Server (AI tools) | ✅ native | ❌ (third-party) | ✅ |
 | MsgPack RPC | ✅ | ❌ | ❌ |
@@ -285,18 +285,18 @@ Graceful degradation under extreme concurrency — still 356k QPS with zero erro
 | Magic RPC Client | ✅ | ❌ | ❌ |
 | SharedState (no Redis) | ✅ nanosecond | ❌ needs Redis | ❌ needs Redis |
 
-### Concurrency (Pyre unique)
+### Concurrency (Pyronova unique)
 
-| Feature | Pyre | FastAPI | Robyn |
+| Feature | Pyronova | FastAPI | Robyn |
 |---------|------|---------|-------|
 | Sub-interpreter parallelism | ✅ Per-GIL | ❌ | ❌ |
 | Hybrid GIL dispatch | ✅ | ❌ | ❌ |
 | Auto sync/async dual pool | ✅ zero-loss | ❌ | ❌ |
 | Multi-process | — (not needed) | ✅ Gunicorn | ✅ --fast |
 
-### Observability (Pyre unique)
+### Observability (Pyronova unique)
 
-| Feature | Pyre | FastAPI | Robyn |
+| Feature | Pyronova | FastAPI | Robyn |
 |---------|------|---------|-------|
 | GIL Watchdog | ✅ | ❌ | ❌ |
 | Memory RSS monitoring | ✅ | ❌ | ❌ |
@@ -308,20 +308,20 @@ Graceful degradation under extreme concurrency — still 356k QPS with zero erro
 
 ### Developer Experience
 
-| Feature | Pyre | FastAPI | Robyn | Notes |
+| Feature | Pyronova | FastAPI | Robyn | Notes |
 |---------|------|---------|-------|-------|
 | Type stubs (.pyi) | ✅ | ✅ native | ✅ | |
 | TestClient | ✅ full (cookies, redirects, ws) | ✅ | ❌ | |
 | Env var config | ✅ | ✅ | ✅ | |
-| Hot reload | ✅ `reload=True` / `pyre dev` | ✅ `--reload` | ✅ | |
-| CLI (`run` / `dev` / `routes`) | ✅ `pyre` | ✅ `fastapi` (newer) | ❌ | |
-| Pydantic-settings config | ✅ `PyreSettings` | ✅ | ❌ | |
-| OpenAPI docs | — | ✅ | ✅ | Pyre uses MCP for AI discovery; type hints serve as docs |
-| Dependency injection | — | ✅ `Depends()` | ✅ | Pyre uses `before_request` hooks for the same purpose |
+| Hot reload | ✅ `reload=True` / `pyronova dev` | ✅ `--reload` | ✅ | |
+| CLI (`run` / `dev` / `routes`) | ✅ `pyronova` | ✅ `fastapi` (newer) | ❌ | |
+| Pydantic-settings config | ✅ `Settings` | ✅ | ❌ | |
+| OpenAPI docs | — | ✅ | ✅ | Pyronova uses MCP for AI discovery; type hints serve as docs |
+| Dependency injection | — | ✅ `Depends()` | ✅ | Pyronova uses `before_request` hooks for the same purpose |
 
 ### C Extension Compatibility
 
-Python C extensions (PyO3/Rust, C/C++) use global state that isn't compatible with sub-interpreters (PEP 684). This is a CPython ecosystem limitation, not a Pyre limitation.
+Python C extensions (PyO3/Rust, C/C++) use global state that isn't compatible with sub-interpreters (PEP 684). This is a CPython ecosystem limitation, not a Pyronova limitation.
 
 | Library | Sub-interp | gil=True | Why |
 |---------|-----------|----------|-----|
@@ -357,11 +357,11 @@ def analyze(req, data):
     return {"mean": float(np.mean(data.values))}
 ```
 
-Pyre auto-detects which routes need GIL and dispatches accordingly. Fast routes stay at 429k req/s; GIL routes get full ecosystem access. Both run concurrently in the same server.
+Pyronova auto-detects which routes need GIL and dispatches accordingly. Fast routes stay at 429k req/s; GIL routes get full ecosystem access. Both run concurrently in the same server.
 
 > **When will this be fixed?** When PyO3 and numpy add PEP 684 multi-phase init support. Tracking: [PyO3#3451](https://github.com/PyO3/pyo3/issues/3451), [numpy#24003](https://github.com/numpy/numpy/issues/24003). When they do, these libraries will run at full speed in sub-interpreters — no `gil=True` needed.
 
-> **Why no OpenAPI?** Pyre targets high-performance APIs and AI agents, not browser-based API explorers. For AI tool discovery, MCP is a more modern protocol. For human developers, Pydantic models + type stubs provide the same contract guarantees.
+> **Why no OpenAPI?** Pyronova targets high-performance APIs and AI agents, not browser-based API explorers. For AI tool discovery, MCP is a more modern protocol. For human developers, Pydantic models + type stubs provide the same contract guarantees.
 >
 > **Why no dependency injection?** `before_request` hooks solve the same problem (auth, DB connections, shared logic) with less magic and better debuggability. DI adds framework coupling without performance benefit.
 
@@ -369,8 +369,8 @@ Pyre auto-detects which routes need GIL and dispatches accordingly. Fast routes 
 
 ```bash
 # From source (requires Rust toolchain + Python 3.12+)
-git clone https://github.com/moomoo-tech/pyre.git
-cd pyre
+git clone https://github.com/moomoo-tech/pyronova.git
+cd pyronova
 python -m venv .venv && source .venv/bin/activate
 pip install maturin
 maturin develop --release
@@ -378,7 +378,7 @@ maturin develop --release
 
 ## Demos
 
-Three production-grade example applications. Each demonstrates a different real-world use case with multiple Pyre features working together.
+Three production-grade example applications. Each demonstrates a different real-world use case with multiple Pyronova features working together.
 
 ```bash
 # Install dependencies first
@@ -418,7 +418,7 @@ curl -X POST http://127.0.0.1:8000/mcp \
 curl http://127.0.0.1:8000/memory/user1
 ```
 
-**Features used:** MCP Server, SSE (PyreStream), async handlers, SharedState, Pydantic, CORS
+**Features used:** MCP Server, SSE (Stream), async handlers, SharedState, Pydantic, CORS
 
 ### Trading Data API (`examples/trading_api.py`)
 
@@ -440,8 +440,8 @@ curl http://127.0.0.1:8000/analytics/portfolio
 
 # RPC call from another service
 python -c "
-from pyreframework import PyreRPCClient
-with PyreRPCClient('http://127.0.0.1:8000') as c:
+from pyronova import RPCClient
+with RPCClient('http://127.0.0.1:8000') as c:
     print(c.get_signals(tickers=['AAPL', 'TSLA']))
 "
 ```
@@ -480,13 +480,13 @@ curl http://127.0.0.1:8000/items?page=1&per_page=10
 ### Basic API
 
 ```python
-from pyreframework import Pyre, PyreResponse
+from pyronova import Pyronova, Response
 
-app = Pyre()
+app = Pyronova()
 
 @app.get("/")
 def index(req):
-    return {"message": "Hello from Pyre!"}
+    return {"message": "Hello from Pyronova!"}
 
 @app.get("/user/{name}")
 def greet(req):
@@ -544,11 +544,11 @@ app.enable_cors(allow_origins=["https://example.com"], allow_credentials=True)
 ### Cookies
 
 ```python
-from pyreframework.cookies import get_cookie, set_cookie, delete_cookie
+from pyronova.cookies import get_cookie, set_cookie, delete_cookie
 
 @app.get("/login")
 def login(req):
-    return set_cookie(PyreResponse(body="ok"), "session", "abc", httponly=True)
+    return set_cookie(Response(body="ok"), "session", "abc", httponly=True)
 
 @app.get("/me")
 def me(req):
@@ -558,7 +558,7 @@ def me(req):
 ### File Upload
 
 ```python
-from pyreframework.uploads import parse_multipart
+from pyronova.uploads import parse_multipart
 
 @app.post("/upload")
 def upload(req):
@@ -569,7 +569,7 @@ def upload(req):
 ### Redirect
 
 ```python
-from pyreframework import redirect
+from pyronova import redirect
 
 @app.get("/old")
 def old(req):
@@ -590,12 +590,12 @@ def echo(ws):
 ### SSE Streaming
 
 ```python
-from pyreframework import PyreStream
+from pyronova import Stream
 import threading
 
 @app.get("/stream", gil=True)
 def stream(req):
-    s = PyreStream()
+    s = Stream()
     def gen():
         for token in ["Hello", " ", "World"]:
             s.send_event(token)
@@ -621,8 +621,8 @@ def compute(data):
     return {"result": data["a"] + data["b"]}
 
 # Client:
-from pyreframework import PyreRPCClient
-with PyreRPCClient("http://server:8000") as c:
+from pyronova import RPCClient
+with RPCClient("http://server:8000") as c:
     c.compute(a=3, b=5)  # → {"result": 8}
 ```
 
@@ -645,19 +645,19 @@ def compute(req):
 ## Configuration
 
 ```bash
-PYRE_HOST=0.0.0.0 PYRE_PORT=9000 PYRE_WORKERS=16 PYRE_LOG=1 python app.py
+PYRONOVA_HOST=0.0.0.0 PYRONOVA_PORT=9000 PYRONOVA_WORKERS=16 PYRONOVA_LOG=1 python app.py
 ```
 
 ## Monitoring
 
 ```bash
-PYRE_METRICS=1 python app.py   # Enable GIL watchdog
+PYRONOVA_METRICS=1 python app.py   # Enable GIL watchdog
 ```
 
 ## Testing
 
 ```python
-from pyreframework.testing import TestClient
+from pyronova.testing import TestClient
 
 client = TestClient(app)
 resp = client.get("/")
@@ -670,7 +670,7 @@ assert resp.json()["hello"] == "world"
 ```
 Python handlers (def / async def / gil=True)
     ↓
-Pyre (Rust core, 12 modules)
+Pyronova (Rust core, 12 modules)
 ├── Tokio runtime (HTTP/1+2, WebSocket, SSE)
 ├── Sub-interpreter pool (N independent GILs)
 │   ├── Sync workers (def → 429k req/s)
@@ -683,7 +683,7 @@ Pyre (Rust core, 12 modules)
 
 ## Sub-interpreter Safe Ecosystem
 
-Pyre's sub-interpreters deliver 429k req/s, but C extensions (Pydantic, NumPy, Pandas) can't run in them. Instead of fighting the ecosystem, Pyre offers a **Golden Path**: modern, pure-Python alternatives that are **not just safe — they're faster**.
+Pyronova's sub-interpreters deliver 429k req/s, but C extensions (Pydantic, NumPy, Pandas) can't run in them. Instead of fighting the ecosystem, Pyronova offers a **Golden Path**: modern, pure-Python alternatives that are **not just safe — they're faster**.
 
 | Category | Traditional (needs `gil=True`) | Golden Path (sub-interp safe) |
 |----------|-------------------------------|-------------------------------|
@@ -697,26 +697,26 @@ Pyre's sub-interpreters deliver 429k req/s, but C extensions (Pydantic, NumPy, P
 
 ### Not just safe — faster
 
-Same endpoints, same logic. Pyre with sub-interp safe libs vs FastAPI with the traditional Pydantic stack:
+Same endpoints, same logic. Pyronova with sub-interp safe libs vs FastAPI with the traditional Pydantic stack:
 
-| Test | FastAPI + Pydantic | Pyre + Golden Path | Speedup | Latency reduction |
+| Test | FastAPI + Pydantic | Pyronova + Golden Path | Speedup | Latency reduction |
 |------|-------------------|-------------------|---------|-------------------|
 | Health Check | 9,031 req/s | **214,714 req/s** | **23.8x** | 11.1ms → 0.38ms |
 | JSON Echo | 7,602 req/s | **209,012 req/s** | **27.5x** | 13.2ms → 0.40ms |
 | CPU-bound (10k moving avg) | 263 req/s | **599 req/s** | **2.3x** | 374ms → 165ms |
 | Validation | 7,345 req/s | **208,439 req/s** | **28.4x** | 13.8ms → 0.41ms |
 
-The traditional stack is single-threaded — the GIL serializes every request. Pyre runs 10 sub-interpreters in parallel, each with its own GIL. The Golden Path libraries are pure Python, so they load cleanly in every interpreter. The result: **24-28x throughput, 29-34x lower latency**.
+The traditional stack is single-threaded — the GIL serializes every request. Pyronova runs 10 sub-interpreters in parallel, each with its own GIL. The Golden Path libraries are pure Python, so they load cleanly in every interpreter. The result: **24-28x throughput, 29-34x lower latency**.
 
 Run the benchmark yourself: `bash benchmarks/run_comparison.sh`
 
-> *"Pyre doesn't force you to change, but it rewards you when you do."*
+> *"Pyronova doesn't force you to change, but it rewards you when you do."*
 
 Full ecosystem guide: [docs/subinterp-safe-ecosystem.md](docs/subinterp-safe-ecosystem.md)
 
 ## Limitations
 
-Pyre's sub-interpreter architecture delivers extreme performance but comes with specific constraints. All are caused by **CPython ecosystem limitations, not Pyre design choices**, and all have clear workarounds.
+Pyronova's sub-interpreter architecture delivers extreme performance but comes with specific constraints. All are caused by **CPython ecosystem limitations, not Pyronova design choices**, and all have clear workarounds.
 
 ### C extensions in sub-interpreters
 
@@ -740,15 +740,15 @@ def analyze(req):
 
 ### Python 3.12+ required
 
-**What:** Pyre requires Python 3.12 or later.
+**What:** Pyronova requires Python 3.12 or later.
 
-**Why:** Per-Interpreter GIL (PEP 684) was introduced in Python 3.12. This is the core technology that enables Pyre's parallelism.
+**Why:** Per-Interpreter GIL (PEP 684) was introduced in Python 3.12. This is the core technology that enables Pyronova's parallelism.
 
 **Workaround:** None. Python 3.12+ is required. Consider using [pyenv](https://github.com/pyenv/pyenv) to manage multiple Python versions.
 
 ### Build from source
 
-**What:** Pyre must be compiled from source using Rust and Maturin. No pre-built wheels on PyPI yet.
+**What:** Pyronova must be compiled from source using Rust and Maturin. No pre-built wheels on PyPI yet.
 
 **Why:** The project is pre-release. PyPI binary wheels for multiple platforms require CI/CD infrastructure.
 
@@ -756,13 +756,13 @@ def analyze(req):
 
 ### No OpenAPI auto-documentation
 
-**What:** Pyre doesn't generate Swagger/OpenAPI documentation from route definitions.
+**What:** Pyronova doesn't generate Swagger/OpenAPI documentation from route definitions.
 
-**Why:** Pyre targets high-performance backends and AI agents, not browser-based API explorers. For AI tool discovery, Pyre provides native MCP (Model Context Protocol) support, which is purpose-built for AI applications. For human developers, Pydantic models and type stubs provide compile-time contract guarantees.
+**Why:** Pyronova targets high-performance backends and AI agents, not browser-based API explorers. For AI tool discovery, Pyronova provides native MCP (Model Context Protocol) support, which is purpose-built for AI applications. For human developers, Pydantic models and type stubs provide compile-time contract guarantees.
 
 ### Single-process only
 
-**What:** Pyre runs as a single OS process. No multi-process mode like Gunicorn or Robyn `--fast`.
+**What:** Pyronova runs as a single OS process. No multi-process mode like Gunicorn or Robyn `--fast`.
 
 **Why:** This is by design. Sub-interpreters provide multi-core parallelism within one process, with 6.7x less memory than multi-process alternatives. SharedState works without Redis. Adding multi-process would destroy these advantages.
 

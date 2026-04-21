@@ -1,11 +1,11 @@
 """Bootstrap script injected into each sub-interpreter worker.
 
-Provides mock pyreframework modules so user scripts can be executed in isolated
+Provides mock pyronova modules so user scripts can be executed in isolated
 sub-interpreters without importing the real Rust extension (which doesn't
 support PEP 684 multi-interpreter loading).
 
-Also installs PyreRustHandler to hijack Python's logging module — all log
-records are routed through the _pyre_emit_log C-FFI function into Rust's
+Also installs PyronovaRustHandler to hijack Python's logging module — all log
+records are routed through the _pyronova_emit_log C-FFI function into Rust's
 tracing system for zero-GIL-blocking I/O.
 
 WARNING: This replaces `sys.modules["pydantic"]` with a no-op stub.
@@ -19,10 +19,10 @@ succeed but does NOT perform real validation.
 import logging as _logging
 import os as _os
 
-class _PyreRustHandler(_logging.Handler):
+class _PyronovaRustHandler(_logging.Handler):
     """Routes Python logging records through Rust tracing via C-FFI.
 
-    _pyre_emit_log is injected into globals by Rust (interp.rs) before
+    _pyronova_emit_log is injected into globals by Rust (interp.rs) before
     this bootstrap script runs. It accepts (level, name, message, pathname,
     lineno, worker_id) and dispatches to tracing macros with near-zero cost.
     """
@@ -39,7 +39,7 @@ class _PyreRustHandler(_logging.Handler):
                 record.exc_text = self.formatException(record.exc_info)
             if record.exc_text:
                 msg = f"{msg}\n{record.exc_text}"
-            _pyre_emit_log(
+            _pyronova_emit_log(
                 record.levelname,
                 record.name,
                 msg,
@@ -58,23 +58,23 @@ class _PyreRustHandler(_logging.Handler):
 
 _root = _logging.getLogger()
 _root.handlers.clear()
-_root.addHandler(_PyreRustHandler())
+_root.addHandler(_PyronovaRustHandler())
 # Sync Python's level gate with Rust's EnvFilter — rejects calls below
 # threshold *before* getMessage() formatting or FFI crossing occurs.
 # e.g. level=ERROR → logger.debug() returns immediately, no FFI overhead.
-_PYRE_LEVEL_MAP = {
+_PYRONOVA_LEVEL_MAP = {
     "TRACE": _logging.DEBUG, "DEBUG": _logging.DEBUG,
     "INFO": _logging.INFO, "WARN": _logging.WARNING, "WARNING": _logging.WARNING,
     "ERROR": _logging.ERROR, "CRITICAL": _logging.CRITICAL,
     "OFF": _logging.CRITICAL + 10,
 }
-_root.setLevel(_PYRE_LEVEL_MAP.get(
-    _os.environ.get("PYRE_LOG_LEVEL", "DEBUG").upper(), _logging.DEBUG
+_root.setLevel(_PYRONOVA_LEVEL_MAP.get(
+    _os.environ.get("PYRONOVA_LOG_LEVEL", "DEBUG").upper(), _logging.DEBUG
 ))
 
 # -- Request / Response stubs ------------------------------------------------
 #
-# `_PyreRequest` is defined later by Rust (src/pyre_request_type.rs) via
+# `_Request` is defined later by Rust (src/pyronova_request_type.rs) via
 # PyType_FromSpec — it's a raw C heap type with __slots__-equivalent C
 # members, a custom tp_dealloc, and helper methods (.text/.json/.body/
 # .query_params) monkey-patched on at sub-interp init. The Python class
@@ -82,7 +82,7 @@ _root.setLevel(_PYRE_LEVEL_MAP.get(
 # Route B migration and commit `fc45a7f` for the tstate fix that made
 # it safe to rely solely on the Rust type.
 
-class _PyreResponse:
+class _Response:
     # Strict __slots__: no __dict__, no dynamic attributes. Paired with
     # Rust's SlotClearer, this makes the per-request cleanup exhaustive —
     # user code cannot stash an object on the response and leak it past
@@ -96,13 +96,13 @@ class _PyreResponse:
         self.content_type = content_type
         self.headers = headers or {}
 
-# -- Mock pyreframework modules ----------------------------------------------------
+# -- Mock pyronova modules ----------------------------------------------------
 
 import sys, types, os
-os.environ["PYRE_WORKER"] = "1"
+os.environ["PYRONOVA_WORKER"] = "1"
 
-_mock_engine = types.ModuleType("pyreframework.engine")
-_mock_engine.PyreApp = type("PyreApp", (), {
+_mock_engine = types.ModuleType("pyronova.engine")
+_mock_engine.PyronovaApp = type("PyronovaApp", (), {
     "__init__": lambda self: None,
     "get": lambda self, *a, **kw: (lambda f: f) if len(a) < 2 else None,
     "post": lambda self, *a, **kw: (lambda f: f) if len(a) < 2 else None,
@@ -116,34 +116,34 @@ _mock_engine.PyreApp = type("PyreApp", (), {
     "static_dir": lambda self, *a: None,
     "run": lambda self, **kw: None,
 })
-# PyreRequest is bound to the raw-C Rust type by interp.rs after this
+# Request is bound to the raw-C Rust type by interp.rs after this
 # bootstrap script finishes running — the Rust injection overwrites
-# both `globals()["_PyreRequest"]` and these module-level references.
-# Until then it's None; user code should not import PyreRequest at
+# both `globals()["_Request"]` and these module-level references.
+# Until then it's None; user code should not import Request at
 # module-load time anyway (the type is only meaningful inside a
 # running sub-interp handler).
-_mock_engine.PyreRequest = None
-_mock_engine.PyreResponse = _PyreResponse
-_mock_engine.PyreWebSocket = type("PyreWebSocket", (), {})
+_mock_engine.Request = None
+_mock_engine.Response = _Response
+_mock_engine.WebSocket = type("WebSocket", (), {})
 _mock_engine.SharedState = type("SharedState", (), {})
-_mock_engine.PyreStream = type("PyreStream", (), {})
+_mock_engine.Stream = type("Stream", (), {})
 _mock_engine.get_gil_metrics = lambda: (0,0,0,0,0,0,0,0,0)
 
-_mock_pyreframework = types.ModuleType("pyreframework")
-_mock_pyreframework.engine = _mock_engine
-_mock_pyreframework.PyreApp = _mock_engine.PyreApp
-_mock_pyreframework.PyreRequest = None  # overwritten by interp.rs post-bootstrap
-_mock_pyreframework.PyreResponse = _PyreResponse
-_mock_pyreframework.PyreWebSocket = _mock_engine.PyreWebSocket
-_mock_pyreframework.SharedState = _mock_engine.SharedState
-_mock_pyreframework.PyreStream = _mock_engine.PyreStream
-_mock_pyreframework.get_gil_metrics = _mock_engine.get_gil_metrics
+_mock_pyron = types.ModuleType("pyronova")
+_mock_pyron.engine = _mock_engine
+_mock_pyron.PyronovaApp = _mock_engine.PyronovaApp
+_mock_pyron.Request = None  # overwritten by interp.rs post-bootstrap
+_mock_pyron.Response = _Response
+_mock_pyron.WebSocket = _mock_engine.WebSocket
+_mock_pyron.SharedState = _mock_engine.SharedState
+_mock_pyron.Stream = _mock_engine.Stream
+_mock_pyron.get_gil_metrics = _mock_engine.get_gil_metrics
 def _redirect(url, status_code=302):
-    return _PyreResponse(body="", status_code=status_code, headers={"location": url})
-_mock_pyreframework.redirect = _redirect
+    return _Response(body="", status_code=status_code, headers={"location": url})
+_mock_pyron.redirect = _redirect
 
-# Pyre wrapper (no-op in worker mode)
-class _MockPyre:
+# Pyronova wrapper (no-op in worker mode)
+class _MockPyron:
     def __init__(self, debug=False, log_config=None): pass
     # Route decorators accept whatever kwargs the real API takes (gil,
     # model, stream, ...); swallow them so adding a new flag to the real
@@ -205,20 +205,20 @@ class _MockPyre:
     def mcp(self):
         return type("MCP", (), {"tool": lambda s, *a, **kw: (lambda f: f), "resource": lambda s, *a, **kw: (lambda f: f), "prompt": lambda s, *a, **kw: (lambda f: f)})()
 
-_mock_pyreframework.Pyre = _MockPyre
+_mock_pyron.Pyronova = _MockPyron
 
 # App module mock
-_mock_app = types.ModuleType("pyreframework.app")
-_mock_app.Pyre = _MockPyre
+_mock_app = types.ModuleType("pyronova.app")
+_mock_app.Pyronova = _MockPyron
 
-sys.modules["pyreframework"] = _mock_pyreframework
-sys.modules["pyreframework.engine"] = _mock_engine
-sys.modules["pyreframework.app"] = _mock_app
-sys.modules["pyreframework.mcp"] = types.ModuleType("pyreframework.mcp")
+sys.modules["pyronova"] = _mock_pyron
+sys.modules["pyronova.engine"] = _mock_engine
+sys.modules["pyronova.app"] = _mock_app
+sys.modules["pyronova.mcp"] = types.ModuleType("pyronova.mcp")
 
 # -- Cookie utilities (pure Python) -------------------------------------------
 
-_cookies_mod = types.ModuleType("pyreframework.cookies")
+_cookies_mod = types.ModuleType("pyronova.cookies")
 def _get_cookies(req):
     h = req.headers.get("cookie", "") if hasattr(req, "headers") else ""
     if not h: return {}
@@ -242,7 +242,7 @@ def _reject_cookie_crlf(field, value):
                 f"{ch!r}; refusing to emit (HTTP response splitting risk)"
             )
 def _set_cookie(resp, name, value, **kw):
-    # Mirror the real pyreframework.cookies check so sub-interp mode has
+    # Mirror the real pyronova.cookies check so sub-interp mode has
     # the same HTTP Response Splitting defence as GIL mode. Without this
     # the sub-interp mock would silently emit attacker-controlled bytes
     # into the Set-Cookie header, defeating the v1.4.5 fix.
@@ -258,18 +258,18 @@ def _set_cookie(resp, name, value, **kw):
     if kw.get("samesite", "Lax"): parts.append(f"SameSite={kw.get('samesite','Lax')}")
     hdrs = dict(getattr(resp, "headers", {}) or {})
     hdrs["set-cookie"] = "; ".join(parts)
-    return _PyreResponse(body=resp.body, status_code=getattr(resp,"status_code",200), content_type=getattr(resp,"content_type",None), headers=hdrs)
+    return _Response(body=resp.body, status_code=getattr(resp,"status_code",200), content_type=getattr(resp,"content_type",None), headers=hdrs)
 def _delete_cookie(resp, name, **kw):
     return _set_cookie(resp, name, "", max_age=0, path=kw.get("path","/"))
 _cookies_mod.get_cookies = _get_cookies
 _cookies_mod.get_cookie = _get_cookie
 _cookies_mod.set_cookie = _set_cookie
 _cookies_mod.delete_cookie = _delete_cookie
-sys.modules["pyreframework.cookies"] = _cookies_mod
-sys.modules["pyreframework.rpc"] = types.ModuleType("pyreframework.rpc")
-sys.modules["pyreframework.testing"] = types.ModuleType("pyreframework.testing")
+sys.modules["pyronova.cookies"] = _cookies_mod
+sys.modules["pyronova.rpc"] = types.ModuleType("pyronova.rpc")
+sys.modules["pyronova.testing"] = types.ModuleType("pyronova.testing")
 
-# -- Mock pyreframework.db and .crud for sub-interp replay --------------------
+# -- Mock pyronova.db and .crud for sub-interp replay --------------------
 #
 # The real PgPool lives in the main interpreter and writes to a Rust-side
 # OnceLock; sub-interpreter replays only need the imports to succeed.
@@ -277,7 +277,7 @@ sys.modules["pyreframework.testing"] = types.ModuleType("pyreframework.testing")
 # not inside a sub-interp, so the mock methods below are never actually
 # called on the hot path.
 
-_db_mod = types.ModuleType("pyreframework.db")
+_db_mod = types.ModuleType("pyronova.db")
 class _MockPgCursor:
     def __iter__(self): return self
     def __next__(self): raise StopIteration
@@ -299,11 +299,11 @@ class _MockPgPool:
     async def execute_async(self, *a, **kw): return 0
 _db_mod.PgPool = _MockPgPool
 _db_mod.PgCursor = _MockPgCursor
-sys.modules["pyreframework.db"] = _db_mod
+sys.modules["pyronova.db"] = _db_mod
 
-_crud_mod = types.ModuleType("pyreframework.crud")
+_crud_mod = types.ModuleType("pyronova.crud")
 _crud_mod.register_crud = lambda *a, **kw: None
-sys.modules["pyreframework.crud"] = _crud_mod
+sys.modules["pyronova.crud"] = _crud_mod
 
 # -- Pydantic stub (WARNING: replaces real pydantic in sub-interpreters) ------
 # Pydantic V2's pydantic-core is a Rust/PyO3 extension that cannot load in
@@ -334,7 +334,7 @@ for _pm in ("pydantic.fields", "pydantic.main", "pydantic._migration",
 
 # -- Upload utilities (pure Python) -------------------------------------------
 
-_uploads_mod = types.ModuleType("pyreframework.uploads")
+_uploads_mod = types.ModuleType("pyronova.uploads")
 class _UploadFile:
     def __init__(self, name, filename, content_type, data):
         self.name = name
@@ -381,4 +381,4 @@ def _parse_multipart(req):
     return result
 _uploads_mod.parse_multipart = _parse_multipart
 _uploads_mod.UploadFile = _UploadFile
-sys.modules["pyreframework.uploads"] = _uploads_mod
+sys.modules["pyronova.uploads"] = _uploads_mod

@@ -1,11 +1,11 @@
-"""Launcher — spawns two Pyre processes (HTTP plain + HTTPS).
+"""Launcher — spawns two Pyronova processes (HTTP plain + HTTPS).
 
 Plain HTTP on $PORT (default 8080) and HTTPS on $PORT+1 for the json-tls
 profile. A separate HTTP/2 listener on 8443 is launched when TLS certs
 are present — rustls advertises ALPN h2 + http/1.1, so clients negotiate
 automatically.
 
-Why two processes: Pyre's `app.run()` binds a single port. Running it
+Why two processes: Pyronova's `app.run()` binds a single port. Running it
 twice is the simplest way to serve plaintext + TLS without adding
 multi-bind support to the engine for one benchmark. Each process gets
 half the available CPUs so we don't over-subscribe the sub-interpreter
@@ -36,36 +36,36 @@ def main() -> int:
     have_tls = os.path.exists(tls_cert) and os.path.exists(tls_key)
 
     env_common = dict(os.environ)
-    env_common["PYRE_WORKERS"] = str(per_proc)
-    env_common["PYRE_IO_WORKERS"] = str(per_proc)
+    env_common["PYRONOVA_WORKERS"] = str(per_proc)
+    env_common["PYRONOVA_IO_WORKERS"] = str(per_proc)
     # Metrics / access log off; benchmarks care about throughput, not logs.
-    env_common.pop("PYRE_LOG", None)
-    env_common.pop("PYRE_METRICS", None)
+    env_common.pop("PYRONOVA_LOG", None)
+    env_common.pop("PYRONOVA_METRICS", None)
 
     procs = []
 
     # Plain HTTP on $base_port.
     env_plain = dict(env_common)
-    env_plain["PYRE_PORT"] = str(base_port)
-    env_plain["PYRE_HOST"] = "0.0.0.0"
-    env_plain.pop("PYRE_TLS_CERT", None)
-    env_plain.pop("PYRE_TLS_KEY", None)
+    env_plain["PYRONOVA_PORT"] = str(base_port)
+    env_plain["PYRONOVA_HOST"] = "0.0.0.0"
+    env_plain.pop("PYRONOVA_TLS_CERT", None)
+    env_plain.pop("PYRONOVA_TLS_KEY", None)
     procs.append(subprocess.Popen(["python3", "app.py"], env=env_plain))
 
     # HTTPS on $base_port + 1 (json-tls profile target).
     if have_tls:
         env_tls = dict(env_common)
-        env_tls["PYRE_PORT"] = str(base_port + 1)
-        env_tls["PYRE_HOST"] = "0.0.0.0"
-        env_tls["PYRE_TLS_CERT"] = tls_cert
-        env_tls["PYRE_TLS_KEY"] = tls_key
+        env_tls["PYRONOVA_PORT"] = str(base_port + 1)
+        env_tls["PYRONOVA_HOST"] = "0.0.0.0"
+        env_tls["PYRONOVA_TLS_CERT"] = tls_cert
+        env_tls["PYRONOVA_TLS_KEY"] = tls_key
         procs.append(subprocess.Popen(["python3", "app.py"], env=env_tls))
 
         # HTTP/2 on 8443 (baseline-h2 / static-h2 profile target). ALPN on
         # this listener advertises h2 + http/1.1; hyper's AutoBuilder picks
         # the right protocol from the handshake.
         env_h2 = dict(env_tls)
-        env_h2["PYRE_PORT"] = "8443"
+        env_h2["PYRONOVA_PORT"] = "8443"
         procs.append(subprocess.Popen(["python3", "app.py"], env=env_h2))
 
     def shutdown(_sig, _frame):
@@ -74,7 +74,7 @@ def main() -> int:
                 p.terminate()
             except Exception:
                 pass
-        # give them a moment to drain gracefully; Pyre's graceful shutdown
+        # give them a moment to drain gracefully; Pyronova's graceful shutdown
         # waits up to 30s for in-flight conns — the Arena harness typically
         # SIGKILLs the container anyway, but polite is polite.
         time.sleep(1)

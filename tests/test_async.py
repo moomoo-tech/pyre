@@ -1,7 +1,7 @@
 """Test: async def handlers in both GIL and sub-interpreter modes."""
-from pyreframework import Pyre
+from pyronova import Pyronova
 
-app = Pyre()
+app = Pyronova()
 
 
 @app.get("/sync")

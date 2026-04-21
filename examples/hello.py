@@ -1,8 +1,8 @@
-"""Pyre example — decorator syntax, middleware, custom responses, static files."""
+"""Pyronova example — decorator syntax, middleware, custom responses, static files."""
 
-from pyreframework import Pyre, PyreResponse
+from pyronova import Pyronova, Response
 
-app = Pyre()
+app = Pyronova()
 
 # Enable built-in request logging
 app.enable_logging()
@@ -18,7 +18,7 @@ app.enable_logging()
 @app.after_request
 def add_cors(req, resp):
     """Add CORS headers to every response."""
-    return PyreResponse(
+    return Response(
         body=resp.body,
         status_code=resp.status_code,
         content_type=resp.content_type,
@@ -32,7 +32,7 @@ def add_cors(req, resp):
 
 @app.get("/")
 def index(req):
-    return "Hello from Pyre!"
+    return "Hello from Pyronova!"
 
 
 @app.get("/hello/{name}")
@@ -57,8 +57,8 @@ def search(req):
 @app.get("/html")
 def html_page(req):
     """Custom content-type."""
-    return PyreResponse(
-        body="<h1>Hello from Pyre</h1>",
+    return Response(
+        body="<h1>Hello from Pyronova</h1>",
         content_type="text/html; charset=utf-8",
     )
 
@@ -66,7 +66,7 @@ def html_page(req):
 @app.fallback
 def not_found(req):
     """Custom 404 handler."""
-    return PyreResponse(
+    return Response(
         body={"error": "not found", "path": req.path},
         status_code=404,
         content_type="application/json",

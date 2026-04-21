@@ -1,24 +1,24 @@
-# Pyre — Positioning & Roadmap
+# Pyronova — Positioning & Roadmap
 
 Checkpoint as of 2026-04-21. Read this first in any new session to
-understand what Pyre is, what it isn't, and what's worth working on.
+understand what Pyronova is, what it isn't, and what's worth working on.
 
 ## Identity
 
-Pyre is **a self-contained high-performance Python web framework with a
+Pyronova is **a self-contained high-performance Python web framework with a
 Rust core**. It is NOT an ASGI-compatible FastAPI replacement. It is NOT
 a Django-style batteries-included monolith. It is not trying to win
 every HTTP Arena profile at any cost.
 
-Decorator-style API (`@app.get("/")`) with Pyre-specific `Request` /
+Decorator-style API (`@app.get("/")`) with Pyronova-specific `Request` /
 `Response` types. Users who want Starlette/FastAPI middleware use
-Starlette/FastAPI — not Pyre. Users who want a direct Python-with-Rust-core
+Starlette/FastAPI — not Pyronova. Users who want a direct Python-with-Rust-core
 path to real multi-core throughput (PEP 684 sub-interpreters, no GIL
-contention, low memory footprint) pick Pyre.
+contention, low memory footprint) pick Pyronova.
 
 Explicit anti-goals:
 - **ASGI/WSGI protocol compatibility.** The scope/receive/send
-  translation layer costs ~μs per request and forces every Pyre
+  translation layer costs ~μs per request and forces every Pyronova
   primitive (streaming, compression, fast_response) through an
   abstraction that wasn't built for them.
 - **Winning every HTTP Arena profile.** We accept losing pipelined
@@ -46,11 +46,11 @@ Where we DO want to win hard:
 | TLS (rustls) | opt-in, H2 via ALPN |
 | Compression (gzip + brotli) | opt-in, configurable quality |
 | Streaming uploads | opt-in per route, bounded bp |
-| Postgres sync + async API | `pyreframework.db.PgPool` |
-| CRUD REST helper | `pyreframework.crud.register_crud` |
+| Postgres sync + async API | `pyronova.db.PgPool` |
+| CRUD REST helper | `pyronova.crud.register_crud` |
 | Fast-path routes (no Python) | `app.add_fast_response` |
 | WebSocket | stable |
-| SSE (PyreStream) | stable |
+| SSE (Stream) | stable |
 | MCP server | stable |
 | Static files | stable |
 
@@ -82,7 +82,7 @@ Defense primitives kept around for future reuse:
 - `log_and_clear_py_exception(context)` — exception → tracing
 - `ffi_catch_unwind(context, fn)` — wrap all FFI entry points
 - `InterpreterPool::submit_semaphore` — admission control
-- `WorkerState::pool_id` + `_pyre_pool_id` — zombie-worker guard
+- `WorkerState::pool_id` + `_pyronova_pool_id` — zombie-worker guard
 - `MaybeTlsStream` enum — plain/TLS unified IO type
 
 ## Open engineering work
@@ -116,7 +116,7 @@ surfaced)
 8. **HTTP Arena submission PR** to `MDA2AV/HttpArena`. Artifacts in
    `arena_submission/`. Benchmark-17 has the numbers. Clean-room
    rerun + PR.
-9. **Comparative bench docs.** `pyre vs fastapi vs uvicorn vs robyn
+9. **Comparative bench docs.** `pyronova vs fastapi vs uvicorn vs robyn
    vs fastpysgi` on this machine. FastAPI 5× lead is the main claim.
 
 ### P4 — ecosystem
@@ -127,7 +127,7 @@ surfaced)
     (parallel to uvicorn's docs). Current `docs/*.md` is mostly
     post-mortems and design notes — good for contributors, bad for
     new users.
-12. **CLI.** `pyre run app:app`, `pyre dev` with reload, `pyre
+12. **CLI.** `pyronova run app:app`, `pyronova dev` with reload, `pyronova
     routes` to list the registered routes.
 
 ## Anti-features (actively won't do)
@@ -136,7 +136,7 @@ surfaced)
   use `uvicorn` or `gunicorn`.
 - Pipelined-at-any-cost tricks (caching the `/pipeline` route in
   Rust, etc.). Robyn got 16M rps on pipelined by not entering
-  Python; Pyre's pipelined passes through Python as the contract.
+  Python; Pyronova's pipelined passes through Python as the contract.
   We accept losing that profile.
 - Drop-in FastAPI route compat layer. Too much scope creep; FastAPI
   users are better served by staying on FastAPI.
@@ -161,7 +161,7 @@ surfaced)
   FFI catch_unwind)
 - **Suite status:** 275 pytest pass / 30 skipped (no-PG), 44 cargo
   test pass, clippy clean
-- **Bench status:** benchmark-17 pinned Pyre composite ~620 on 8C
+- **Bench status:** benchmark-17 pinned Pyronova composite ~620 on 8C
   Ryzen in Arena harness; projected 64C rank #1 Python on baseline /
   short-lived / upload
 - **Next action:** pick P1 item (`fetch_iter` or release cut) and go

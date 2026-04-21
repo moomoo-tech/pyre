@@ -2,10 +2,10 @@
 without AST filtering. Covers decorator syntax, multi-file imports,
 custom variable names, and middleware."""
 
-from pyreframework import Pyre, PyreResponse
+from pyronova import Pyronova, Response
 
 # Custom variable name (not "app" — old AST filter would miss this)
-my_server = Pyre()
+my_server = Pyronova()
 
 # Decorator syntax
 @my_server.get("/")
@@ -27,7 +27,7 @@ def with_query(req):
 # Middleware (should work in sub-interp after_request fix)
 @my_server.after_request
 def add_header(req, resp):
-    return _PyreResponse(
+    return _Response(
         body=resp.body,
         status_code=resp.status_code,
         content_type=resp.content_type,

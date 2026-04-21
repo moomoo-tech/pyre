@@ -1,15 +1,15 @@
 """SSE streaming demo — simulates AI Agent token-by-token output."""
 import time
 import threading
-from pyreframework import Pyre, PyreStream
+from pyronova import Pyronova, Stream
 
-app = Pyre()
+app = Pyronova()
 
 
 @app.get("/")
 def index(req):
     return """<html><body>
-<h1>Pyre SSE Demo</h1>
+<h1>Pyronova SSE Demo</h1>
 <pre id="output"></pre>
 <script>
 const source = new EventSource('/stream');
@@ -26,10 +26,10 @@ source.addEventListener('done', () => {
 @app.get("/stream", gil=True)
 def stream_tokens(req):
     """Simulate LLM streaming: emit tokens one by one."""
-    stream = PyreStream()
+    stream = Stream()
 
     def generate():
-        tokens = "Hello! I am Pyre, a high-performance Python web framework powered by Rust. ".split()
+        tokens = "Hello! I am Pyronova, a high-performance Python web framework powered by Rust. ".split()
         for token in tokens:
             stream.send_event(token + " ")
             time.sleep(0.05)  # Simulate LLM token generation delay

@@ -12,8 +12,8 @@ import urllib.error
 
 import pytest
 
-from pyreframework import Pyre
-from pyreframework.testing import TestClient
+from pyronova import Pyronova
+from pyronova.testing import TestClient
 
 
 # ---------------------------------------------------------------------------
@@ -21,7 +21,7 @@ from pyreframework.testing import TestClient
 # ---------------------------------------------------------------------------
 
 def test_stream_requires_gil():
-    app = Pyre()
+    app = Pyronova()
     with pytest.raises(ValueError, match="gil=True"):
         @app.post("/x", stream=True)  # gil defaults to False
         def handler(req):
@@ -29,7 +29,7 @@ def test_stream_requires_gil():
 
 
 def test_stream_rejects_async():
-    app = Pyre()
+    app = Pyronova()
     with pytest.raises(ValueError, match="async def"):
         @app.post("/x", gil=True, stream=True)
         async def handler(req):
@@ -42,7 +42,7 @@ def test_stream_rejects_async():
 
 @pytest.fixture(scope="module")
 def client():
-    app = Pyre()
+    app = Pyronova()
 
     @app.get("/")
     def root(req):
@@ -111,7 +111,7 @@ def test_max_body_size_enforced_on_stream(client):
     # the base_url to set the cap then restore.
     # Actually we want a separate app for this to avoid bleeding into other
     # tests. Build one here.
-    app = Pyre()
+    app = Pyronova()
     app.max_body_size = 1024
 
     @app.get("/")

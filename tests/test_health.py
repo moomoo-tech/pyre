@@ -6,12 +6,12 @@ import json
 
 import pytest
 
-from pyreframework import Pyre
-from pyreframework.testing import TestClient
+from pyronova import Pyronova
+from pyronova.testing import TestClient
 
 
 def test_livez_returns_200_always():
-    app = Pyre()
+    app = Pyronova()
     app.enable_health_probes()
     with TestClient(app, port=None) as c:
         r = c.get("/livez")
@@ -20,7 +20,7 @@ def test_livez_returns_200_always():
 
 
 def test_readyz_ok_when_no_checks():
-    app = Pyre()
+    app = Pyronova()
     app.enable_health_probes()
     with TestClient(app, port=None) as c:
         r = c.get("/readyz")
@@ -30,7 +30,7 @@ def test_readyz_ok_when_no_checks():
 
 
 def test_readyz_ok_with_passing_checks():
-    app = Pyre()
+    app = Pyronova()
 
     @app.readiness_check("always_ok")
     def _():
@@ -51,7 +51,7 @@ def test_readyz_ok_with_passing_checks():
 
 
 def test_readyz_503_on_exception():
-    app = Pyre()
+    app = Pyronova()
 
     @app.readiness_check("db")
     def _():
@@ -69,7 +69,7 @@ def test_readyz_503_on_exception():
 
 
 def test_readyz_503_on_false_return():
-    app = Pyre()
+    app = Pyronova()
 
     @app.readiness_check("feature_flag")
     def _():
@@ -83,7 +83,7 @@ def test_readyz_503_on_false_return():
 
 
 def test_readyz_aggregates_multiple_checks():
-    app = Pyre()
+    app = Pyronova()
 
     @app.readiness_check("ok1")
     def _():
@@ -109,7 +109,7 @@ def test_readyz_aggregates_multiple_checks():
 
 
 def test_async_readiness_check_supported():
-    app = Pyre()
+    app = Pyronova()
 
     @app.readiness_check("async_ok")
     async def _():
@@ -130,7 +130,7 @@ def test_async_readiness_check_supported():
 
 
 def test_enable_health_probes_idempotent():
-    app = Pyre()
+    app = Pyronova()
     app.enable_health_probes()
     # Second call is a no-op — no duplicate route registration error.
     app.enable_health_probes()
@@ -139,7 +139,7 @@ def test_enable_health_probes_idempotent():
 
 
 def test_custom_paths():
-    app = Pyre()
+    app = Pyronova()
     app.enable_health_probes(livez_path="/_alive", readyz_path="/_ready")
     with TestClient(app, port=None) as c:
         assert c.get("/_alive").status_code == 200
@@ -149,10 +149,10 @@ def test_custom_paths():
 
 
 def test_check_registered_after_enable_still_runs():
-    """You can enable probes early (e.g., in Pyre() setup) and register
+    """You can enable probes early (e.g., in Pyronova() setup) and register
     checks later as modules load. The readyz handler closes over the
     shared list, so late appends take effect immediately."""
-    app = Pyre()
+    app = Pyronova()
     app.enable_health_probes()
 
     @app.readiness_check("late")

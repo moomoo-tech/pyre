@@ -1,14 +1,14 @@
-"""Tests for RPC system — server-side @app.rpc() + PyreRPCClient."""
+"""Tests for RPC system — server-side @app.rpc() + RPCClient."""
 
 import json
 import pytest
-from pyreframework import Pyre
-from pyreframework.testing import TestClient
+from pyronova import Pyronova
+from pyronova.testing import TestClient
 
 
 @pytest.fixture(scope="module")
 def client():
-    app = Pyre()
+    app = Pyronova()
 
     @app.get("/")
     def health(req):

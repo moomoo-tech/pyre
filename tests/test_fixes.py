@@ -1,12 +1,12 @@
 """Test: verify all bug fixes — middleware on GIL routes, body limit, etc."""
-from pyreframework import Pyre, PyreResponse
+from pyronova import Pyronova, Response
 
-app = Pyre()
+app = Pyronova()
 
 
 @app.after_request
 def add_header(req, resp):
-    return PyreResponse(
+    return Response(
         body=resp.body,
         status_code=resp.status_code,
         content_type=resp.content_type,

@@ -7,10 +7,10 @@ from tests.conftest import feature_server_factory
 
 SERVER = '''
 import os
-from pyreframework import Pyre
-from pyreframework.uploads import parse_multipart
+from pyronova import Pyronova
+from pyronova.uploads import parse_multipart
 
-app = Pyre()
+app = Pyronova()
 
 @app.get("/__ping")
 def ping(req):
@@ -27,8 +27,8 @@ def upload(req):
 if __name__ == "__main__":
     app.run(
         host="127.0.0.1",
-        port=int(os.environ["PYRE_PORT"]),
-        mode=os.environ["PYRE_MODE"],
+        port=int(os.environ["PYRONOVA_PORT"]),
+        mode=os.environ["PYRONOVA_MODE"],
     )
 '''
 
@@ -36,7 +36,7 @@ feature_server = feature_server_factory(SERVER)
 
 
 def _build_multipart(filename: str, content: bytes) -> tuple[bytes, str]:
-    boundary = "----PyreBoundary123"
+    boundary = "----PyronovaBoundary123"
     body = (
         f"--{boundary}\r\n"
         f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'

@@ -1,12 +1,12 @@
-"""Pyre compression benchmark — TechEmpower / HTTP Arena shape.
+"""Pyronova compression benchmark — TechEmpower / HTTP Arena shape.
 
 Profile: "JSON Compressed" — returns a ~3-4 KB JSON payload representing a
 realistic web response (32 fortunes-style records with enough variety for
 non-trivial compression). Mirrors the TechEmpower Fortunes payload shape.
 
 Usage (toggled by env var so sub-interpreter replays inherit the config):
-    PYRE_COMPRESSION=0 python benchmarks/bench_compression.py
-    PYRE_COMPRESSION=1 python benchmarks/bench_compression.py
+    PYRONOVA_COMPRESSION=0 python benchmarks/bench_compression.py
+    PYRONOVA_COMPRESSION=1 python benchmarks/bench_compression.py
 
 Driver:
     bash benchmarks/run_compression_bench.sh
@@ -17,7 +17,7 @@ on 8000.
 
 import os
 
-from pyreframework import Pyre
+from pyronova import Pyronova
 
 # 32 records × realistic English text ≈ 3–4 KB JSON.
 # Deliberately varied wording so compression sees real redundancy, not
@@ -57,10 +57,10 @@ FORTUNES = [
     {"id": 32, "message": "Debugging is twice as hard as writing the code in the first place."},
 ]
 
-app = Pyre()
+app = Pyronova()
 
-if os.environ.get("PYRE_COMPRESSION") == "1":
-    # Sub-interpreter replay uses a mock Pyre that doesn't expose this method.
+if os.environ.get("PYRONOVA_COMPRESSION") == "1":
+    # Sub-interpreter replay uses a mock Pyronova that doesn't expose this method.
     # Only the main interp actually serves responses, so the no-op in sub-interp
     # is fine — the global compression flag is set once from the main interp.
     enable = getattr(app, "enable_compression", None)
@@ -71,7 +71,7 @@ if os.environ.get("PYRE_COMPRESSION") == "1":
 @app.get("/")
 def index(req):
     # TFB-style plaintext probe route.
-    return "Hello from Pyre!"
+    return "Hello from Pyronova!"
 
 
 @app.get("/json-fortunes")
@@ -80,6 +80,6 @@ def fortunes(req):
 
 
 if __name__ == "__main__":
-    host = os.environ.get("PYRE_HOST", "127.0.0.1")
-    port = int(os.environ.get("PYRE_PORT", "8001"))
+    host = os.environ.get("PYRONOVA_HOST", "127.0.0.1")
+    port = int(os.environ.get("PYRONOVA_PORT", "8001"))
     app.run(host=host, port=port)

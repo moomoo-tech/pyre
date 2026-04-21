@@ -2,10 +2,10 @@
 
 Wire-up::
 
-    from pyreframework import Pyre
-    from pyreframework.db import PgPool
+    from pyronova import Pyronova
+    from pyronova.db import PgPool
 
-    app = Pyre()
+    app = Pyronova()
     app.enable_health_probes()   # /livez + /readyz auto-registered
 
     pool = PgPool.connect(...)
@@ -40,7 +40,7 @@ import json
 import inspect
 from typing import Any, Awaitable, Callable, Union
 
-from pyreframework.engine import PyreResponse
+from pyronova.engine import Response
 
 
 CheckFn = Union[Callable[[], Any], Callable[[], Awaitable[Any]]]
@@ -73,7 +73,7 @@ def _build_livez_handler():
     body = json.dumps({"status": "alive"}).encode("utf-8")
 
     def livez(req):
-        return PyreResponse(body=body, content_type="application/json")
+        return Response(body=body, content_type="application/json")
 
     return livez
 
@@ -85,7 +85,7 @@ def _build_readyz_handler(checks: list[tuple[str, CheckFn]]):
             "status": "ready" if ok else "not_ready",
             "checks": results,
         })
-        return PyreResponse(
+        return Response(
             body=payload,
             status_code=200 if ok else 503,
             content_type="application/json",

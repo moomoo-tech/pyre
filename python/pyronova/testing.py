@@ -1,4 +1,4 @@
-"""TestClient — exercise a Pyre app without manually managing a server.
+"""TestClient — exercise a Pyronova app without manually managing a server.
 
 Starts the app in a background thread and talks to it over a real TCP
 socket, so every piece of the stack (Rust accept loop, sub-interp
@@ -8,7 +8,7 @@ in production. Pure stdlib for HTTP; WebSocket support requires the
 
 Basics::
 
-    from pyreframework.testing import TestClient
+    from pyronova.testing import TestClient
 
     with TestClient(app) as c:
         r = c.get("/users", params={"limit": 10})
@@ -79,10 +79,10 @@ class TestResponse:
 
 
 class TestClient:
-    """Test client — starts Pyre in a background thread.
+    """Test client — starts Pyronova in a background thread.
 
     Args:
-        app: Pyre app instance.
+        app: Pyronova app instance.
         host: bind address (default ``127.0.0.1``).
         port: bind port. ``None`` picks an unused port — preferred for
               new tests so parallel runs don't collide on a hard-coded

@@ -100,10 +100,10 @@ def check(name, condition):
 # ==========================================================================
 
 SUBINTERP_SERVER = f'''
-from pyreframework import Pyre, PyreResponse
+from pyronova import Pyronova, Response
 import json
 
-app = Pyre()
+app = Pyronova()
 
 # --- Lifecycle hooks ---
 @app.on_startup
@@ -181,7 +181,7 @@ def main():
     print("  Sub-interpreter Feature Tests")
     print("=" * 60)
 
-    script = "/tmp/pyre_test_subinterp_features.py"
+    script = "/tmp/pyronova_test_subinterp_features.py"
     with open(script, "w") as f:
         f.write(SUBINTERP_SERVER)
 

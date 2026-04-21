@@ -1,4 +1,4 @@
-"""End-to-end TLS tests — start a Pyre server with a self-signed cert,
+"""End-to-end TLS tests — start a Pyronova server with a self-signed cert,
 issue requests with the Python stdlib (`http.client` + `ssl`), verify the
 response.
 
@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from pyreframework import Pyre
+from pyronova import Pyronova
 
 
 if shutil.which("openssl") is None:
@@ -29,7 +29,7 @@ if shutil.which("openssl") is None:
 
 @pytest.fixture(scope="module")
 def cert_key(tmp_path_factory):
-    d = tmp_path_factory.mktemp("pyre_tls")
+    d = tmp_path_factory.mktemp("pyronova_tls")
     cert = d / "cert.pem"
     key = d / "key.pem"
     # 2048-bit RSA is the cheapest cert openssl generates reliably on all
@@ -59,7 +59,7 @@ def tls_server(cert_key):
     cert, key = cert_key
     port = _free_port()
 
-    app = Pyre()
+    app = Pyronova()
 
     @app.get("/")
     def root(req):
@@ -136,7 +136,7 @@ def test_http_on_tls_port_fails(tls_server):
 def test_only_cert_raises(cert_key, tmp_path):
     """Passing tls_cert without tls_key is a config error."""
     cert, _ = cert_key
-    app = Pyre()
+    app = Pyronova()
     # run() must raise before accepting any connection
     with pytest.raises((ValueError, TypeError)):
         app.run(
@@ -147,7 +147,7 @@ def test_only_cert_raises(cert_key, tmp_path):
 
 def test_missing_cert_file_raises(tmp_path):
     """Non-existent cert path should raise a clear ValueError."""
-    app = Pyre()
+    app = Pyronova()
     with pytest.raises((ValueError, OSError)):
         app.run(
             host="127.0.0.1", port=_free_port(),

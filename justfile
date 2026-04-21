@@ -1,4 +1,4 @@
-# Pyre task runner. See docs/release-pipeline.md for the design.
+# Pyronova task runner. See docs/release-pipeline.md for the design.
 # `just` instead of Makefile — no .PHONY noise, no tab/space traps,
 # each recipe runs in its own shell.
 
@@ -53,7 +53,7 @@ test: test-rust test-py
 bench-record: build-release
     #!/usr/bin/env bash
     set -euo pipefail
-    nohup .venv/bin/python benchmarks/bench_plaintext.py > /tmp/pyre_bench_srv.log 2>&1 &
+    nohup .venv/bin/python benchmarks/bench_plaintext.py > /tmp/pyronova_bench_srv.log 2>&1 &
     pid=$!
     trap "kill $pid 2>/dev/null || true" EXIT
     # Wait for server
@@ -92,7 +92,7 @@ bench-compare: build-release
     if [[ ! -f benchmarks/baseline.json ]]; then
       echo "no baseline — run 'just bench-record' first"; exit 1
     fi
-    nohup .venv/bin/python benchmarks/bench_plaintext.py > /tmp/pyre_bench_srv.log 2>&1 &
+    nohup .venv/bin/python benchmarks/bench_plaintext.py > /tmp/pyronova_bench_srv.log 2>&1 &
     pid=$!
     trap "kill $pid 2>/dev/null || true" EXIT
     for i in {1..40}; do
@@ -123,7 +123,7 @@ bench-compare: build-release
 bench-features: build-release
     #!/usr/bin/env bash
     set -euo pipefail
-    nohup .venv/bin/python examples/hello.py > /tmp/pyre_bench_srv.log 2>&1 &
+    nohup .venv/bin/python examples/hello.py > /tmp/pyronova_bench_srv.log 2>&1 &
     pid=$!
     trap "kill $pid 2>/dev/null || true" EXIT
     for i in {1..40}; do
@@ -145,8 +145,8 @@ bench-features: build-release
 bench-tfb-plaintext: build-release
     #!/usr/bin/env bash
     set -euo pipefail
-    mkdir -p /tmp/pyre_tfb
-    cat > /tmp/pyre_tfb/pipeline.lua <<'LUA'
+    mkdir -p /tmp/pyronova_tfb
+    cat > /tmp/pyronova_tfb/pipeline.lua <<'LUA'
     init = function(args)
       local depth = tonumber(args[1]) or 16
       local r = {}
@@ -155,7 +155,7 @@ bench-tfb-plaintext: build-release
     end
     request = function() return req end
     LUA
-    nohup .venv/bin/python benchmarks/bench_plaintext.py > /tmp/pyre_bench_srv.log 2>&1 &
+    nohup .venv/bin/python benchmarks/bench_plaintext.py > /tmp/pyronova_bench_srv.log 2>&1 &
     pid=$!
     trap "kill $pid 2>/dev/null || true" EXIT
     for i in {1..40}; do
@@ -163,9 +163,9 @@ bench-tfb-plaintext: build-release
       sleep 0.25
     done
     # Warm
-    wrk -t8 -c256 -d5s --script /tmp/pyre_tfb/pipeline.lua http://127.0.0.1:8000/ -- 16 >/dev/null 2>&1
+    wrk -t8 -c256 -d5s --script /tmp/pyronova_tfb/pipeline.lua http://127.0.0.1:8000/ -- 16 >/dev/null 2>&1
     echo "--- TFB Plaintext: -t8 -c256 -d15s --pipeline 16 ---"
-    wrk -t8 -c256 -d15s --script /tmp/pyre_tfb/pipeline.lua --latency http://127.0.0.1:8000/ -- 16 | tail -12
+    wrk -t8 -c256 -d15s --script /tmp/pyronova_tfb/pipeline.lua --latency http://127.0.0.1:8000/ -- 16 | tail -12
 
 # ─── Leak soak ──────────────────────────────────────────────────
 
@@ -177,23 +177,23 @@ canary-soak: build-canary
     #!/usr/bin/env bash
     set -euo pipefail
     # GIL-routed /dump so leak_detect_dump is importable.
-    cat > /tmp/pyre_canary_srv.py <<'PY'
-    from pyreframework import Pyre
-    app = Pyre()
+    cat > /tmp/pyronova_canary_srv.py <<'PY'
+    from pyronova import Pyronova
+    app = Pyronova()
     @app.get("/")
     def i(req):
         return "ok"
     @app.get("/_dump", gil=True)
     def d(req):
-        from pyreframework.engine import leak_detect_dump
+        from pyronova.engine import leak_detect_dump
         leak_detect_dump()
         return "dumped"
     if __name__ == "__main__":
         app.run(host="127.0.0.1", port=8000)
     PY
-    nohup .venv/bin/python /tmp/pyre_canary_srv.py 2>/tmp/pyre_canary.stderr >/dev/null &
+    nohup .venv/bin/python /tmp/pyronova_canary_srv.py 2>/tmp/pyronova_canary.stderr >/dev/null &
     pid=$!
-    trap "kill $pid 2>/dev/null || true; rm -f /tmp/pyre_canary_srv.py" EXIT
+    trap "kill $pid 2>/dev/null || true; rm -f /tmp/pyronova_canary_srv.py" EXIT
     for i in {1..40}; do
       curl -s http://127.0.0.1:8000/ >/dev/null 2>&1 && break
       sleep 0.25
@@ -203,26 +203,26 @@ canary-soak: build-canary
     curl -s http://127.0.0.1:8000/_dump > /dev/null
     sleep 1
     echo "--- leak histogram (type@rc) ---"
-    grep "pyre_drop_rc" /tmp/pyre_canary.stderr | tee /tmp/pyre_canary.histogram
+    grep "pyronova_drop_rc" /tmp/pyronova_canary.stderr | tee /tmp/pyronova_canary.histogram
     # Known legit high-rc: interned singletons. Everything else growing
     # at rc>=2 fails the gate.
     #
     # Very simple filter: any non-whitelisted type at rc=2 with a count
     # >= 10% of total requests is a growing leak.
-    total_requests=$(grep Requests/sec /tmp/pyre_canary.stderr | head -1 | awk '{print int($2 * 300)}' || echo 0)
+    total_requests=$(grep Requests/sec /tmp/pyronova_canary.stderr | head -1 | awk '{print int($2 * 300)}' || echo 0)
     if [[ -z "$total_requests" || "$total_requests" == "0" ]]; then
       total_requests=10000000  # conservative — ~400k rps × 300s
     fi
     threshold=$(( total_requests / 10 ))
     problem=$(awk -v th=$threshold '
-      /pyre_drop_rc\{type="str",rc="2"\}/ || /pyre_drop_rc\{type="str",rc="1"\}/ ||
-      /pyre_drop_rc\{type="bytes",/ || /pyre_drop_rc\{type="tuple",/ ||
-      /pyre_drop_rc\{type="type",/ || /pyre_drop_rc\{type="NoneType",/ ||
+      /pyronova_drop_rc\{type="str",rc="2"\}/ || /pyronova_drop_rc\{type="str",rc="1"\}/ ||
+      /pyronova_drop_rc\{type="bytes",/ || /pyronova_drop_rc\{type="tuple",/ ||
+      /pyronova_drop_rc\{type="type",/ || /pyronova_drop_rc\{type="NoneType",/ ||
       /rc="1"/ || /rc="0"/ || /rc="9\+"/ { next }
-      /pyre_drop_rc\{type="[^"]+",rc="[2-8]"\}/ {
+      /pyronova_drop_rc\{type="[^"]+",rc="[2-8]"\}/ {
         n = $NF + 0
         if (n > th) print
-      }' /tmp/pyre_canary.histogram)
+      }' /tmp/pyronova_canary.histogram)
     if [[ -n "$problem" ]]; then
       echo ""
       echo "LEAK SUSPECT — non-whitelist type accumulates rc>=2 samples:"
@@ -260,6 +260,6 @@ pre-push: check test bench-compare
 
 # Clean bench / leak artifacts, but keep the baseline file.
 clean-bench:
-    rm -f /tmp/pyre_bench_srv.log /tmp/pyre_canary.stderr /tmp/pyre_canary.histogram /tmp/pyre_canary_srv.py
+    rm -f /tmp/pyronova_bench_srv.log /tmp/pyronova_canary.stderr /tmp/pyronova_canary.histogram /tmp/pyronova_canary_srv.py
     pkill -f "benchmarks/bench_plaintext.py" 2>/dev/null || true
-    pkill -f "pyre_canary_srv" 2>/dev/null || true
+    pkill -f "pyronova_canary_srv" 2>/dev/null || true

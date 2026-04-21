@@ -1,12 +1,12 @@
-"""Lightweight CRUD REST helper built on :class:`pyreframework.db.PgPool`.
+"""Lightweight CRUD REST helper built on :class:`pyronova.db.PgPool`.
 
 Registers five standard REST routes in one call::
 
-    from pyreframework import Pyre
-    from pyreframework.db import PgPool
-    from pyreframework.crud import register_crud
+    from pyronova import Pyronova
+    from pyronova.db import PgPool
+    from pyronova.crud import register_crud
 
-    app = Pyre()
+    app = Pyronova()
     pool = PgPool.connect("postgres://...")
 
     register_crud(
@@ -40,7 +40,7 @@ intend to expose.
 
 import re
 
-from .app import PyreResponse
+from .app import Response
 
 __all__ = ["register_crud"]
 
@@ -78,7 +78,7 @@ def register_crud(
     """Register five REST routes backed by a Postgres table.
 
     Args:
-        app: the ``Pyre`` instance.
+        app: the ``Pyronova`` instance.
         pool: a connected ``PgPool``.
         prefix: URL prefix, e.g. ``"/users"`` (no trailing slash).
         table: SQL table name. Validated against ``[A-Za-z_][A-Za-z0-9_]*``.
@@ -119,7 +119,7 @@ def register_crud(
             limit = min(int(q.get("limit", default_limit)), max_limit)
             offset = max(int(q.get("offset", 0)), 0)
         except (TypeError, ValueError):
-            return PyreResponse(
+            return Response(
                 body={"error": "invalid limit/offset"},
                 status_code=400,
             )
@@ -134,10 +134,10 @@ def register_crud(
         try:
             id_val = id_type(req.params["id"])
         except (TypeError, ValueError):
-            return PyreResponse(body={"error": "invalid id"}, status_code=400)
+            return Response(body={"error": "invalid id"}, status_code=400)
         row = pool.fetch_one(get_sql, id_val)
         if row is None:
-            return PyreResponse(body={"error": "not found"}, status_code=404)
+            return Response(body={"error": "not found"}, status_code=404)
         return row
 
     # --- POST /prefix -------------------------------------------------------
@@ -149,13 +149,13 @@ def register_crud(
         try:
             body = req.json()
         except Exception:
-            return PyreResponse(body={"error": "invalid JSON"}, status_code=400)
+            return Response(body={"error": "invalid JSON"}, status_code=400)
         if not isinstance(body, dict):
-            return PyreResponse(body={"error": "body must be a JSON object"}, status_code=400)
+            return Response(body={"error": "body must be a JSON object"}, status_code=400)
 
         present = [c for c in columns if c in body]
         if not present:
-            return PyreResponse(
+            return Response(
                 body={"error": f"body must include at least one of {columns}"},
                 status_code=422,
             )
@@ -169,8 +169,8 @@ def register_crud(
         try:
             row = pool.fetch_one(insert_sql, *args)
         except RuntimeError as e:
-            return PyreResponse(body={"error": str(e)}, status_code=400)
-        return PyreResponse(body=row, status_code=201)
+            return Response(body={"error": str(e)}, status_code=400)
+        return Response(body=row, status_code=201)
 
     # --- PUT /prefix/{id} ---------------------------------------------------
     @app.put(f"{prefix}/{{id}}", gil=True)
@@ -178,18 +178,18 @@ def register_crud(
         try:
             id_val = id_type(req.params["id"])
         except (TypeError, ValueError):
-            return PyreResponse(body={"error": "invalid id"}, status_code=400)
+            return Response(body={"error": "invalid id"}, status_code=400)
         try:
             body = req.json()
         except Exception:
-            return PyreResponse(body={"error": "invalid JSON"}, status_code=400)
+            return Response(body={"error": "invalid JSON"}, status_code=400)
         if not isinstance(body, dict):
-            return PyreResponse(body={"error": "body must be a JSON object"}, status_code=400)
+            return Response(body={"error": "body must be a JSON object"}, status_code=400)
 
         # Only update non-PK columns.
         present = [c for c in non_id_cols if c in body]
         if not present:
-            return PyreResponse(
+            return Response(
                 body={"error": f"body must include at least one of {non_id_cols}"},
                 status_code=422,
             )
@@ -203,9 +203,9 @@ def register_crud(
         try:
             row = pool.fetch_one(update_sql, *args)
         except RuntimeError as e:
-            return PyreResponse(body={"error": str(e)}, status_code=400)
+            return Response(body={"error": str(e)}, status_code=400)
         if row is None:
-            return PyreResponse(body={"error": "not found"}, status_code=404)
+            return Response(body={"error": "not found"}, status_code=404)
         return row
 
     # --- DELETE /prefix/{id} ------------------------------------------------
@@ -216,8 +216,8 @@ def register_crud(
         try:
             id_val = id_type(req.params["id"])
         except (TypeError, ValueError):
-            return PyreResponse(body={"error": "invalid id"}, status_code=400)
+            return Response(body={"error": "invalid id"}, status_code=400)
         affected = pool.execute(delete_sql, id_val)
         if affected == 0:
-            return PyreResponse(body={"error": "not found"}, status_code=404)
-        return PyreResponse(body=b"", status_code=204)
+            return Response(body={"error": "not found"}, status_code=404)
+        return Response(body=b"", status_code=204)

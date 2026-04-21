@@ -1,19 +1,19 @@
-"""Pyre command-line interface.
+"""Pyronova command-line interface.
 
-Entry point for the ``pyre`` console script. Three subcommands:
+Entry point for the ``pyronova`` console script. Three subcommands:
 
-- ``pyre run <module:attr>``   production-ish launch (no reload)
-- ``pyre dev <module:attr>``   hot-reload + DEBUG logging
-- ``pyre routes <module:attr>`` print the registered route table
+- ``pyronova run <module:attr>``   production-ish launch (no reload)
+- ``pyronova dev <module:attr>``   hot-reload + DEBUG logging
+- ``pyronova routes <module:attr>`` print the registered route table
 
-The target is a ``module:attr`` string identifying a Pyre app, just like
+The target is a ``module:attr`` string identifying a Pyronova app, just like
 gunicorn/uvicorn. ``attr`` defaults to ``app``.
 
 Examples::
 
-    pyre run examples.hello:app --port 8080
-    pyre dev examples.hello
-    pyre routes examples.hello
+    pyronova run examples.hello:app --port 8080
+    pyronova dev examples.hello
+    pyronova routes examples.hello
 """
 
 from __future__ import annotations
@@ -25,11 +25,11 @@ import sys
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from pyreframework.app import Pyre
+    from pyronova.app import Pyronova
 
 
-def _load_app(target: str) -> "Pyre":
-    """Resolve ``module[:attr]`` → Pyre instance. Importing the module
+def _load_app(target: str) -> "Pyronova":
+    """Resolve ``module[:attr]`` → Pyronova instance. Importing the module
     runs its top-level code, which registers routes on the app."""
     if ":" in target:
         module_name, attr = target.split(":", 1)
@@ -44,17 +44,17 @@ def _load_app(target: str) -> "Pyre":
     try:
         module = importlib.import_module(module_name)
     except ModuleNotFoundError as e:
-        sys.exit(f"pyre: cannot import {module_name!r}: {e}")
+        sys.exit(f"pyronova: cannot import {module_name!r}: {e}")
 
     try:
         app = getattr(module, attr)
     except AttributeError:
-        sys.exit(f"pyre: module {module_name!r} has no attribute {attr!r}")
+        sys.exit(f"pyronova: module {module_name!r} has no attribute {attr!r}")
 
-    from pyreframework.app import Pyre
-    if not isinstance(app, Pyre):
+    from pyronova.app import Pyronova
+    if not isinstance(app, Pyronova):
         sys.exit(
-            f"pyre: {target} is a {type(app).__name__}, expected pyreframework.Pyre"
+            f"pyronova: {target} is a {type(app).__name__}, expected pyronova.Pyronova"
         )
     return app
 
@@ -73,7 +73,7 @@ def _cmd_run(args: argparse.Namespace) -> None:
 
 
 def _cmd_dev(args: argparse.Namespace) -> None:
-    os.environ.setdefault("PYRE_LOG", "1")
+    os.environ.setdefault("PYRONOVA_LOG", "1")
     app = _load_app(args.target)
     # Dev defaults: bind all interfaces so LAN clients can probe.
     app.run(
@@ -128,14 +128,14 @@ def _add_run_flags(p: argparse.ArgumentParser) -> None:
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
-        prog="pyre",
-        description="Pyre — high-performance Python web framework powered by Rust.",
+        prog="pyronova",
+        description="Pyronova — high-performance Python web framework powered by Rust.",
     )
     try:
-        from pyreframework import __version__ as _v
+        from pyronova import __version__ as _v
     except Exception:
         _v = "dev"
-    parser.add_argument("--version", action="version", version=f"pyre {_v}")
+    parser.add_argument("--version", action="version", version=f"pyronova {_v}")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     p_run = sub.add_parser("run", help="start the server")

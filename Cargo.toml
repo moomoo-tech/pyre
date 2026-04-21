@@ -1,10 +1,10 @@
 [package]
-name = "pyreframework-engine"
-version = "1.5.0"
+name = "pyronova-engine"
+version = "2.0.0"
 edition = "2021"
 
 [lib]
-name = "pyreframework_engine"
+name = "pyronova_engine"
 crate-type = ["cdylib"]
 
 [features]
@@ -17,7 +17,7 @@ crate-type = ["cdylib"]
 # Build with:
 #   maturin develop --release --features leak_detect
 # Snapshot the histogram from Python (handler or shutdown) via
-#   pyreframework.engine.leak_detect_dump()
+#   pyronova.engine.leak_detect_dump()
 # See docs/memory-leak-investigation-2026-04-19.md for how we used
 # this to pin down the sub-interpreter finalizer bug.
 leak_detect = ["dep:metrics", "dep:metrics-util"]

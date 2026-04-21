@@ -1,13 +1,13 @@
 """Tests for TestClient and HTTP verbs."""
 
 import pytest
-from pyreframework import Pyre, PyreResponse
-from pyreframework.testing import TestClient
+from pyronova import Pyronova, Response
+from pyronova.testing import TestClient
 
 
 @pytest.fixture(scope="module")
 def client():
-    app = Pyre()
+    app = Pyronova()
 
     @app.get("/")
     def index(req):
@@ -35,11 +35,11 @@ def client():
 
     @app.get("/status")
     def custom_status(req):
-        return PyreResponse(body="created", status_code=201)
+        return Response(body="created", status_code=201)
 
     @app.get("/headers")
     def custom_headers(req):
-        return PyreResponse(body="ok", headers={"x-custom": "test"})
+        return Response(body="ok", headers={"x-custom": "test"})
 
     c = TestClient(app, port=19877)
     yield c
@@ -102,7 +102,7 @@ def test_404(client):
 
 @pytest.fixture(scope="module")
 def cors_client():
-    app = Pyre()
+    app = Pyronova()
     app.enable_cors()
 
     @app.get("/")
@@ -111,7 +111,7 @@ def cors_client():
 
     @app.get("/binary")
     def binary(req):
-        return PyreResponse(
+        return Response(
             body=b"\xff\xd8\xff\xe0\x00\x10JFIF",
             content_type="image/jpeg",
         )

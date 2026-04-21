@@ -13,9 +13,9 @@ from tests.conftest import feature_server_factory
 
 SERVER = '''
 import os
-from pyreframework import Pyre, PyreResponse
+from pyronova import Pyronova, Response
 
-app = Pyre()
+app = Pyronova()
 app.enable_cors()
 
 @app.get("/__ping")
@@ -34,8 +34,8 @@ def boom(req):
 if __name__ == "__main__":
     app.run(
         host="127.0.0.1",
-        port=int(os.environ["PYRE_PORT"]),
-        mode=os.environ["PYRE_MODE"],
+        port=int(os.environ["PYRONOVA_PORT"]),
+        mode=os.environ["PYRONOVA_MODE"],
     )
 '''
 

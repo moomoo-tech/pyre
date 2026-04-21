@@ -77,16 +77,16 @@ let config = ffi::PyInterpreterConfig {
 - 文档注明已测试通过的库清单
 - 提供 `strict_extensions=True` 选项让用户回退严格模式
 
-### Phase B：Fork PyO3（中期，解锁 Pyre 自身模块）
+### Phase B：Fork PyO3（中期，解锁 Pyronova 自身模块）
 
-改 PyO3 两处，让 Pyre 的 `#[pymodule]` 能在子解释器中加载：
+改 PyO3 两处，让 Pyronova 的 `#[pymodule]` 能在子解释器中加载：
 
 1. `pymodule.rs` — 去掉 `make_module` 的 `AtomicI64` interpreter ID 检查
 2. `#[pymodule]` 的全局 `static` 状态 → 迁移到 `PyModule_GetState`（per-interpreter 隔离）
 
 **效果**：
-- `PyreRequest` / `PyreResponse` 的 `#[pyclass]` 直接在子解释器中可用
-- 干掉 `_PyreRequest` / `_PyreResponse` 纯 Python 替身（减少维护 + 统一行为）
+- `Request` / `Response` 的 `#[pyclass]` 直接在子解释器中可用
+- 干掉 `_Request` / `_Response` 纯 Python 替身（减少维护 + 统一行为）
 - 基于 PyO3 的第三方扩展也能通过 fork 版本编译使用
 
 **不解决的问题**：

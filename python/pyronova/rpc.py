@@ -1,7 +1,7 @@
-"""Pyre RPC — MsgPack/JSON/Protobuf content-negotiated RPC over HTTP.
+"""Pyronova RPC — MsgPack/JSON/Protobuf content-negotiated RPC over HTTP.
 
 Server: @app.rpc("/method") decorator with auto-decode/encode.
-Client: PyreRPCClient with __getattr__ magic for local-like calls.
+Client: RPCClient with __getattr__ magic for local-like calls.
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ import logging
 import inspect
 from typing import Callable
 
-_log = logging.getLogger("pyreframework.rpc")
+_log = logging.getLogger("pyronova.rpc")
 
 try:
     import msgpack
@@ -20,12 +20,12 @@ except ImportError:
     HAS_MSGPACK = False
 
 
-class PyreRPCClient:
+class RPCClient:
     """Magic RPC client — call remote methods like local functions.
 
     Usage::
 
-        client = PyreRPCClient("http://127.0.0.1:8000")
+        client = RPCClient("http://127.0.0.1:8000")
         result = client.get_market_snapshot(tickers=["AAPL", "TSLA"])
     """
 
@@ -104,9 +104,9 @@ def rpc_decorator(app, path: str, proto_model=None):
             envelope = {"ok": True, "result": result}
 
             if HAS_MSGPACK and "msgpack" in accept:
-                from pyreframework.engine import PyreResponse
+                from pyronova.engine import Response
                 body = msgpack.packb(envelope, use_bin_type=True)
-                return PyreResponse(body=body, content_type="application/msgpack")
+                return Response(body=body, content_type="application/msgpack")
             else:
                 return envelope  # Framework auto-serializes dict as JSON
 

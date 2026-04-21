@@ -33,7 +33,7 @@ Robyn 用 `async def` + 原生 asyncio，一个线程内 Event Loop 并发挂起
                Python: await sleep(1ms)  ← 阻塞 Rust 线程！
 
 目标（Python 驱动异步）：
-  Rust channel ──→ pyre_recv() ──→ Python asyncio loop
+  Rust channel ──→ pyronova_recv() ──→ Python asyncio loop
                                       ↓
                                  create_task(handler(req))
                                  create_task(handler(req))  ← 数千个并发！
@@ -41,7 +41,7 @@ Robyn 用 `async def` + 原生 asyncio，一个线程内 Event Loop 并发挂起
                                       ↓
                                  await sleep(1ms)  ← 挂起，不阻塞线程
                                       ↓
-                                 pyre_send(req_id, response)  ──→ Rust oneshot
+                                 pyronova_send(req_id, response)  ──→ Rust oneshot
 ```
 
 ## 核心设计：3 个组件
@@ -59,13 +59,13 @@ static WORKER_STATES: OnceLock<Mutex<HashMap<usize, Arc<WorkerState>>>> = OnceLo
 ```
 
 每个请求分配唯一 `req_id`，存入 `response_map`。
-Python 处理完后调 `pyre_send(req_id, response)` 通过 `oneshot` 唤醒 Tokio。
+Python 处理完后调 `pyronova_send(req_id, response)` 通过 `oneshot` 唤醒 Tokio。
 
 ### 组件 2：C-FFI 桥接函数
 
 ```rust
-// pyre_recv(worker_id) → (req_id, handler_idx, method, path, query, body) or None
-unsafe extern "C" fn pyre_recv_cfunc(...) -> *mut PyObject {
+// pyronova_recv(worker_id) → (req_id, handler_idx, method, path, query, body) or None
+unsafe extern "C" fn pyronova_recv_cfunc(...) -> *mut PyObject {
     // 关键：释放 GIL 后再 recv()
     let saved = ffi::PyEval_SaveThread();      // ← 释放 GIL
     let req = state.rx.recv();                  // ← 阻塞等待，但不持有 GIL
@@ -73,8 +73,8 @@ unsafe extern "C" fn pyre_recv_cfunc(...) -> *mut PyObject {
     // 打包成 Python tuple 返回
 }
 
-// pyre_send(worker_id, req_id, status, content_type, body)
-unsafe extern "C" fn pyre_send_cfunc(...) -> *mut PyObject {
+// pyronova_send(worker_id, req_id, status, content_type, body)
+unsafe extern "C" fn pyronova_send_cfunc(...) -> *mut PyObject {
     // 从 response_map 取出 oneshot::Sender，发送响应
     let _ = tx.send(Ok(SubInterpResponse { ... }));
 }
@@ -89,17 +89,17 @@ import asyncio, threading
 
 async def _process_request(req_id, handler_idx, method, path, query, body):
     handler = globals()[HANDLER_NAMES[handler_idx]]
-    req = _PyreRequest(method, path, {}, query, body, {})
+    req = _Request(method, path, {}, query, body, {})
     res = handler(req)
     if asyncio.iscoroutine(res):
         res = await res                    # ← 完美挂起，不阻塞线程！
     # before/after hooks...
-    _pyre_send(WORKER_ID, req_id, 200, "text/plain", str(res))
+    _pyronova_send(WORKER_ID, req_id, 200, "text/plain", str(res))
 
 def _fetcher_thread(loop):
     """后台线程：从 Rust channel 拉请求，塞进 asyncio loop"""
     while True:
-        req_data = _pyre_recv(WORKER_ID)   # ← 释放 GIL 等待
+        req_data = _pyronova_recv(WORKER_ID)   # ← 释放 GIL 等待
         if req_data is None: break
         req_id, handler_idx, method, path, query, body = req_data
         loop.call_soon_threadsafe(          # ← 线程安全地提交到 event loop
@@ -108,13 +108,13 @@ def _fetcher_thread(loop):
             )
         )
 
-async def _pyre_engine():
+async def _pyronova_engine():
     loop = asyncio.get_running_loop()
     t = threading.Thread(target=_fetcher_thread, args=(loop,), daemon=True)
     t.start()
     await asyncio.to_thread(t.join)        # ← 保持 event loop 运行
 
-asyncio.run(_pyre_engine())
+asyncio.run(_pyronova_engine())
 ```
 
 ## 线程模型变化
@@ -131,8 +131,8 @@ Worker 9: [OS thread] → recv → GIL → handler → wait → GIL release → 
 
 ### 目标（Phase 7.2）
 ```
-Worker 0: [OS thread] → asyncio.run(_pyre_engine())
-    ├── [fetcher thread] → pyre_recv() (释放 GIL 等待) → call_soon_threadsafe
+Worker 0: [OS thread] → asyncio.run(_pyronova_engine())
+    ├── [fetcher thread] → pyronova_recv() (释放 GIL 等待) → call_soon_threadsafe
     └── [asyncio loop] → task1(await sleep) + task2(await sleep) + ... + task1000(await sleep)
 
 总计：20 OS threads (10 workers × 2)，并发能力 = 10,000+
@@ -160,6 +160,6 @@ Worker 0: [OS thread] → asyncio.run(_pyre_engine())
 
 1. **PoC**：只改 `worker_thread_loop`，注入 FFI 函数 + Python 引擎脚本，验证 sleep 性能
 2. **Hook 迁移**：在 Python 引擎中实现 before/after_request 完整链
-3. **错误处理**：traceback 捕获 + pyre_send 错误响应
+3. **错误处理**：traceback 捕获 + pyronova_send 错误响应
 4. **Sync 兼容**：非协程 handler 自动包装 `asyncio.to_thread`
 5. **指标集成**：event loop lag 监控嵌入引擎脚本

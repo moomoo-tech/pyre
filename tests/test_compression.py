@@ -11,16 +11,16 @@ import urllib.request
 
 import pytest
 
-from pyreframework import Pyre, PyreResponse
-from pyreframework.testing import TestClient
+from pyronova import Pyronova, Response
+from pyronova.testing import TestClient
 
 
 LARGE_JSON = {"items": ["hello world" for _ in range(200)]}  # ~2.5 KB
 LARGE_TEXT = "abcdefghijklmnopqrstuvwxyz" * 200  # ~5 KB
 
 
-def _build_app() -> Pyre:
-    app = Pyre()
+def _build_app() -> Pyronova:
+    app = Pyronova()
 
     # TestClient readiness probe hits "/"; 404 would loop forever.
     @app.get("/")
@@ -37,16 +37,16 @@ def _build_app() -> Pyre:
 
     @app.get("/big-text")
     def big_text(req):
-        return PyreResponse(LARGE_TEXT, content_type="text/plain; charset=utf-8")
+        return Response(LARGE_TEXT, content_type="text/plain; charset=utf-8")
 
     @app.get("/big-binary")
     def big_binary(req):
-        return PyreResponse(bytes([0] * 4096), content_type="image/png")
+        return Response(bytes([0] * 4096), content_type="image/png")
 
     @app.get("/preset-encoding")
     def preset_encoding(req):
         # Handler already set Content-Encoding — framework must not re-compress
-        return PyreResponse(
+        return Response(
             LARGE_TEXT,
             content_type="text/plain; charset=utf-8",
             headers={"Content-Encoding": "identity"},

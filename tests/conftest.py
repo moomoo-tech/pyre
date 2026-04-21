@@ -1,6 +1,6 @@
-"""Shared pytest fixtures for Pyre integration tests.
+"""Shared pytest fixtures for Pyronova integration tests.
 
-Provides a parameterised `feature_server` fixture that spins up Pyre in
+Provides a parameterised `feature_server` fixture that spins up Pyronova in
 either GIL or sub-interpreter mode on an ephemeral port, yields a base
 URL, and tears down cleanly. Individual tests express their routes via
 the SERVER_SCRIPT string (a template) and reuse the fixture.
@@ -67,16 +67,16 @@ class ServerHandle:
 
 
 def _boot(script: str, mode: str, port: int) -> subprocess.Popen:
-    """Start a Pyre server from a script string. Returns the process handle.
+    """Start a Pyronova server from a script string. Returns the process handle.
     `mode` controls whether app.run() uses subinterp or GIL mode — the
-    script is expected to read $PYRE_MODE and branch.
+    script is expected to read $PYRONOVA_MODE and branch.
     """
-    path = f"/tmp/pyre_test_{os.getpid()}_{port}.py"
+    path = f"/tmp/pyronova_test_{os.getpid()}_{port}.py"
     with open(path, "w") as f:
         f.write(script)
     env = dict(os.environ)
-    env["PYRE_MODE"] = mode
-    env["PYRE_PORT"] = str(port)
+    env["PYRONOVA_MODE"] = mode
+    env["PYRONOVA_PORT"] = str(port)
     proc = subprocess.Popen(
         [sys.executable, path],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -96,7 +96,7 @@ def _boot(script: str, mode: str, port: int) -> subprocess.Popen:
     proc.kill()
     out, _ = proc.communicate(timeout=5)
     raise RuntimeError(
-        f"Pyre server ({mode} mode on port {port}) failed to start: "
+        f"Pyronova server ({mode} mode on port {port}) failed to start: "
         f"{last_err}\nServer output:\n{out.decode(errors='replace')[:2000]}"
     )
 

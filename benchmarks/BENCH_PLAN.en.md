@@ -8,9 +8,9 @@ Establish a **reusable automated benchmark framework** covering multiple workloa
 
 | Framework | Mode | Description |
 |-----------|------|-------------|
-| Pyre SubInterp | `mode="subinterp"` | Sub-interpreters, 215k baseline |
-| Pyre GIL | Default mode | Main interpreter + middleware |
-| Pyre Hybrid | `mode="subinterp"` + `gil=True` routes | numpy routes go through GIL |
+| Pyronova SubInterp | `mode="subinterp"` | Sub-interpreters, 215k baseline |
+| Pyronova GIL | Default mode | Main interpreter + middleware |
+| Pyronova Hybrid | `mode="subinterp"` + `gil=True` routes | numpy routes go through GIL |
 | Robyn --fast | Multi-process | Currently the fastest Python Rust framework |
 | Axum (pure Rust) | No Python | Performance ceiling reference |
 
@@ -71,9 +71,9 @@ benchmarks/
 ├── suite/
 │   ├── runner.py           ← Main controller: start servers, run wrk, collect results
 │   ├── servers/
-│   │   ├── pyre_subinterp.py
-│   │   ├── pyre_gil.py
-│   │   ├── pyre_hybrid.py
+│   │   ├── pyronova_subinterp.py
+│   │   ├── pyronova_gil.py
+│   │   ├── pyronova_hybrid.py
 │   │   ├── robyn_server.py
 │   │   └── axum_server/    ← Cargo project, pure Rust baseline
 │   ├── payloads/
@@ -97,7 +97,7 @@ benchmarks/
 ## runner.py Core Flow
 
 ```python
-for framework in [pyre_subinterp, pyre_gil, pyre_hybrid, robyn, axum]:
+for framework in [pyronova_subinterp, pyronova_gil, pyronova_hybrid, robyn, axum]:
     start_server(framework, port)
     wait_ready(port)
     for scenario in [T1, T2, ..., J3]:
@@ -135,7 +135,7 @@ generate_report(results)
 python benchmarks/suite/runner.py
 
 # Run only a specific framework
-python benchmarks/suite/runner.py --framework pyre_subinterp
+python benchmarks/suite/runner.py --framework pyronova_subinterp
 
 # Run only a specific scenario group
 python benchmarks/suite/runner.py --group cpu

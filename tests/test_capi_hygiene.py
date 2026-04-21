@@ -32,8 +32,8 @@ PYTHON = sys.executable
 
 
 def _launch(script: str, port: int) -> subprocess.Popen:
-    """Start a Pyre server with `script` contents, wait for /health."""
-    # Pyre needs `__main__.__file__` to locate the user script for its
+    """Start a Pyronova server with `script` contents, wait for /health."""
+    # Pyronova needs `__main__.__file__` to locate the user script for its
     # sub-interp loader. `python -c` leaves __file__ unset, so we write
     # the script to a temp file and run it as a module file.
     tf = tempfile.NamedTemporaryFile("w", suffix=".py", delete=False)
@@ -43,7 +43,7 @@ def _launch(script: str, port: int) -> subprocess.Popen:
         [PYTHON, tf.name],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        env={**os.environ, "PYRE_PORT": str(port)},
+        env={**os.environ, "PYRONOVA_PORT": str(port)},
     )
     proc._script_path = tf.name  # type: ignore[attr-defined]
     deadline = time.time() + 15
@@ -81,7 +81,7 @@ def _kill(proc: subprocess.Popen) -> None:
 # Bug #1 — PyDict_Next + PyObject_Str reentrancy
 # -----------------------------------------------------------------------------
 #
-# A handler returns a _PyreResponse whose `headers` dict contains a key
+# A handler returns a _Response whose `headers` dict contains a key
 # whose `__str__` mutates the headers dict. Before the fix, the Rust
 # iterator inside parse_sky_response called PyObject_Str inside the
 # PyDict_Next loop — the user's __str__ mutation would invalidate the
@@ -92,11 +92,11 @@ def _kill(proc: subprocess.Popen) -> None:
 # unrelated state. The server stays up.
 
 REENTRANCY_SERVER = """
-from pyreframework import Pyre
-from pyreframework.engine import PyreResponse
+from pyronova import Pyronova
+from pyronova.engine import Response
 import os
 
-app = Pyre()
+app = Pyronova()
 
 @app.get("/health")
 def health(req):
@@ -117,15 +117,15 @@ def reentrant(req):
             return 'tricky'
 
     resp_headers[TrickyKey()] = 'value'
-    return PyreResponse(body='ok', status_code=200, headers=resp_headers)
+    return Response(body='ok', status_code=200, headers=resp_headers)
 
 if __name__ == '__main__':
-    app.run(host='127.0.0.1', port=int(os.environ['PYRE_PORT']))
+    app.run(host='127.0.0.1', port=int(os.environ['PYRONOVA_PORT']))
 """
 
 
 def test_pydict_next_mutating_str_does_not_crash():
-    """Handler returning a dict with mutating __str__ must not crash Pyre."""
+    """Handler returning a dict with mutating __str__ must not crash Pyronova."""
     port = 8931
     proc = _launch(REENTRANCY_SERVER, port)
     try:
@@ -151,7 +151,7 @@ def test_pydict_next_mutating_str_does_not_crash():
 # -----------------------------------------------------------------------------
 #
 # A handler returns a custom object whose metaclass raises in
-# __instancecheck__. The `isinstance(x, _PyreResponse)` check inside
+# __instancecheck__. The `isinstance(x, _Response)` check inside
 # parse_result would observe return value -1. Before the fix the code
 # treated -1 as "not an instance" but left a pending exception — the
 # next C-API call then raised SystemError.
@@ -161,10 +161,10 @@ def test_pydict_next_mutating_str_does_not_crash():
 # spam or a crash).
 
 INSTANCECHECK_SERVER = """
-from pyreframework import Pyre
+from pyronova import Pyronova
 import os
 
-app = Pyre()
+app = Pyronova()
 
 @app.get("/health")
 def health(req):
@@ -179,12 +179,12 @@ class NotQuiteResponse(metaclass=BadMeta):
 
 @app.get("/badcheck")
 def badcheck(req):
-    # An object that isn't a _PyreResponse. The explicit
-    # isinstance(result, _PyreResponse) inside Rust will NOT call our
+    # An object that isn't a _Response. The explicit
+    # isinstance(result, _Response) inside Rust will NOT call our
     # BadMeta (because the class on the OTHER side raises, not ours).
     # Instead: we rely on the overall pipeline staying stable regardless
     # of what we return. To exercise the -1 path specifically we'd need
-    # Pyre's response class to have a misbehaving __instancecheck__ —
+    # Pyronova's response class to have a misbehaving __instancecheck__ —
     # that's a per-class thing we can't inject from user land.
     #
     # So this test just verifies the duck-type path handles a non-
@@ -192,7 +192,7 @@ def badcheck(req):
     return NotQuiteResponse.__class__.__call__(NotQuiteResponse)
 
 if __name__ == '__main__':
-    app.run(host='127.0.0.1', port=int(os.environ['PYRE_PORT']))
+    app.run(host='127.0.0.1', port=int(os.environ['PYRONOVA_PORT']))
 """
 
 
@@ -219,17 +219,17 @@ def test_handler_returns_weird_object_server_stays_up():
 # Bug #26 — PyDict_Clear assumes dict type
 # -----------------------------------------------------------------------------
 #
-# `_PyreRequest.__init__` accepts 7 positional PyObject* args via
+# `_Request.__init__` accepts 7 positional PyObject* args via
 # PyArg_ParseTuple "OOOOOOO" — no type checks. User code could stash a
 # string where a dict is expected. tp_dealloc previously called
 # PyDict_Clear unconditionally → segfault on non-dict slot.
 # Fix: PyDict_Check guard before PyDict_Clear.
 
 WRONG_TYPE_SERVER = """
-from pyreframework import Pyre
+from pyronova import Pyronova
 import os
 
-app = Pyre()
+app = Pyronova()
 
 @app.get("/health")
 def health(req):
@@ -237,11 +237,11 @@ def health(req):
 
 @app.get("/abuse")
 def abuse(req):
-    # Construct _PyreRequest with a string where headers dict is expected.
+    # Construct _Request with a string where headers dict is expected.
     # Before the fix, tp_dealloc would PyDict_Clear the string → segfault.
     from builtins import type as _type
     try:
-        cls = _type(req)   # _PyreRequest class
+        cls = _type(req)   # _Request class
         # Build with a non-dict in the headers slot. params is also a dict slot.
         bad = cls("GET", "/", {}, "", b"", "i am not a dict", "127.0.0.1")
         # Let it drop — tp_dealloc runs the defended PyDict_Clear path.
@@ -251,11 +251,11 @@ def abuse(req):
     return {"ok": True}
 
 if __name__ == '__main__':
-    app.run(host='127.0.0.1', port=int(os.environ['PYRE_PORT']))
+    app.run(host='127.0.0.1', port=int(os.environ['PYRONOVA_PORT']))
 """
 
 
-def test_pyrerequest_constructed_with_wrong_types_does_not_crash():
+def test_pyronovarequest_constructed_with_wrong_types_does_not_crash():
     port = 8933
     proc = _launch(WRONG_TYPE_SERVER, port)
     try:
@@ -276,10 +276,10 @@ def test_pyrerequest_constructed_with_wrong_types_does_not_crash():
 # -----------------------------------------------------------------------------
 
 URL_DECODE_SERVER = """
-from pyreframework import Pyre
+from pyronova import Pyronova
 import json, os
 
-app = Pyre()
+app = Pyronova()
 
 @app.get("/health")
 def health(req):
@@ -290,7 +290,7 @@ def user(req):
     return {"name": req.params["name"]}
 
 if __name__ == '__main__':
-    app.run(host='127.0.0.1', port=int(os.environ['PYRE_PORT']))
+    app.run(host='127.0.0.1', port=int(os.environ['PYRONOVA_PORT']))
 """
 
 
@@ -317,10 +317,10 @@ def test_path_params_are_url_decoded():
 # -----------------------------------------------------------------------------
 
 ASYNC_HOOK_SERVER = """
-from pyreframework import Pyre
+from pyronova import Pyronova
 import os
 
-app = Pyre()
+app = Pyronova()
 
 @app.get("/health")
 def health(req):
@@ -339,7 +339,7 @@ def hi(req):
     return "hello"
 
 if __name__ == '__main__':
-    app.run(host='127.0.0.1', port=int(os.environ['PYRE_PORT']))
+    app.run(host='127.0.0.1', port=int(os.environ['PYRONOVA_PORT']))
 """
 
 

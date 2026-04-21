@@ -6,7 +6,7 @@ use bytes::Bytes;
 use pyo3::prelude::*;
 
 // ---------------------------------------------------------------------------
-// PyreRequest
+// PyronovaRequest
 // ---------------------------------------------------------------------------
 
 /// Two ways to construct headers:
@@ -19,8 +19,8 @@ pub(crate) enum LazyHeaders {
     Converted(HashMap<String, String>),
 }
 
-#[pyclass(frozen, skip_from_py_object)]
-pub(crate) struct PyreRequest {
+#[pyclass(frozen, skip_from_py_object, name = "Request")]
+pub(crate) struct PyronovaRequest {
     /// Arc<str> — shared with access log, zero-cost clone.
     pub(crate) method: Arc<str>,
     /// Arc<str> — shared with access log, zero-cost clone.
@@ -41,8 +41,8 @@ pub(crate) struct PyreRequest {
     /// receiver end, shared across all clones of this request so the
     /// handler (which receives a clone from `call_handler_with_hooks`) can
     /// take ownership. The first `.stream` access wins; subsequent calls
-    /// return None. Stored as raw receiver (not `Py<PyreBodyStream>`) to
-    /// keep `drop_in_place::<PyreRequest>` free of `_Py_Dealloc` — that
+    /// return None. Stored as raw receiver (not `Py<PyronovaBodyStream>`) to
+    /// keep `drop_in_place::<PyronovaRequest>` free of `_Py_Dealloc` — that
     /// would break `cargo test` linking for the pure-Rust unit tests.
     pub(crate) body_stream_rx:
         Arc<std::sync::Mutex<Option<tokio::sync::mpsc::Receiver<crate::body_stream::ChunkMsg>>>>,
@@ -56,7 +56,7 @@ pub(crate) struct PyreRequest {
 
 /// Manual Clone: OnceLock doesn't impl Clone, so we reset the cache on clone.
 /// Cloned requests lazily recompute headers if accessed.
-impl Clone for PyreRequest {
+impl Clone for PyronovaRequest {
     fn clone(&self) -> Self {
         // body_stream_rx is a one-shot channel — it can't be cloned. Clones
         // get an empty stream slot; the original passed to the handler keeps
@@ -87,7 +87,7 @@ impl Clone for LazyHeaders {
     }
 }
 
-impl PyreRequest {
+impl PyronovaRequest {
     /// Resolve headers to HashMap (lazy for Raw, immediate for Converted).
     pub(crate) fn resolved_headers(&self) -> &HashMap<String, String> {
         self.headers_cache
@@ -99,7 +99,7 @@ impl PyreRequest {
 }
 
 #[pymethods]
-impl PyreRequest {
+impl PyronovaRequest {
     #[getter]
     fn method(&self) -> &str {
         &self.method
@@ -150,12 +150,12 @@ impl PyreRequest {
     ///     process(chunk)
     /// ```
     #[getter]
-    fn stream(&self, py: Python<'_>) -> PyResult<Option<Py<crate::body_stream::PyreBodyStream>>> {
+    fn stream(&self, py: Python<'_>) -> PyResult<Option<Py<crate::body_stream::PyronovaBodyStream>>> {
         let rx = { self.body_stream_rx.lock().unwrap().take() };
         match rx {
             Some(rx) => Ok(Some(Py::new(
                 py,
-                crate::body_stream::PyreBodyStream::new(rx),
+                crate::body_stream::PyronovaBodyStream::new(rx),
             )?)),
             None => Ok(None),
         }
@@ -194,11 +194,11 @@ impl PyreRequest {
 }
 
 // ---------------------------------------------------------------------------
-// PyreResponse
+// PyronovaResponse
 // ---------------------------------------------------------------------------
 
-#[pyclass(frozen)]
-pub(crate) struct PyreResponse {
+#[pyclass(frozen, name = "Response")]
+pub(crate) struct PyronovaResponse {
     #[pyo3(get)]
     pub(crate) body: Py<PyAny>,
     #[pyo3(get)]
@@ -210,7 +210,7 @@ pub(crate) struct PyreResponse {
 }
 
 #[pymethods]
-impl PyreResponse {
+impl PyronovaResponse {
     #[new]
     #[pyo3(signature = (body, status_code=200, content_type=None, headers=None))]
     fn new(
@@ -219,7 +219,7 @@ impl PyreResponse {
         content_type: Option<String>,
         headers: Option<HashMap<String, String>>,
     ) -> Self {
-        PyreResponse {
+        PyronovaResponse {
             body,
             status_code,
             content_type,
@@ -297,7 +297,7 @@ mod tests {
 
     #[test]
     fn query_params_parsing() {
-        let req = PyreRequest {
+        let req = PyronovaRequest {
             method: Arc::from("GET"),
             path: Arc::from("/search"),
             params: Vec::new(),
@@ -317,7 +317,7 @@ mod tests {
 
     #[test]
     fn query_params_empty() {
-        let req = PyreRequest {
+        let req = PyronovaRequest {
             method: Arc::from("GET"),
             path: Arc::from("/"),
             params: Vec::new(),
@@ -334,7 +334,7 @@ mod tests {
 
     #[test]
     fn query_params_percent_encoded() {
-        let req = PyreRequest {
+        let req = PyronovaRequest {
             method: Arc::from("GET"),
             path: Arc::from("/"),
             params: Vec::new(),

@@ -1,8 +1,8 @@
 """Test: C/C++ extensions (numpy, orjson) in sub-interpreter mode."""
 
-from pyreframework import PyreApp
+from pyronova import PyronovaApp
 
-app = PyreApp()
+app = PyronovaApp()
 
 
 def numpy_test(req):

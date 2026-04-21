@@ -1,4 +1,4 @@
-"""Pyre sub-interpreter mode example.
+"""Pyronova sub-interpreter mode example.
 
 Each worker thread gets its own Python interpreter with its own GIL.
 True parallelism without free-threaded Python.
@@ -7,13 +7,13 @@ Usage:
     python examples/hello_subinterp.py
 """
 
-from pyreframework import PyreApp
+from pyronova import PyronovaApp
 
-app = PyreApp()
+app = PyronovaApp()
 
 
 def index(req):
-    return "Hello from Pyre (sub-interpreter)!"
+    return "Hello from Pyronova (sub-interpreter)!"
 
 
 def greet(req):

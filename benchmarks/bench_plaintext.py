@@ -1,4 +1,4 @@
-"""Pyre TFB-style benchmark target.
+"""Pyronova TFB-style benchmark target.
 
 Feature-light so `just bench-record` measures pure engine cost
 (routing + request/response dispatch), not optional add-ons. The
@@ -9,9 +9,9 @@ For a feature-rich example (middleware, access log, static files,
 custom 404), see `examples/hello.py`.
 """
 
-from pyreframework import Pyre, PyreResponse
+from pyronova import Pyronova, Response
 
-app = Pyre()
+app = Pyronova()
 
 
 # ---------------------------------------------------------------------------
@@ -20,7 +20,7 @@ app = Pyre()
 
 @app.get("/")
 def index(req):
-    return "Hello from Pyre!"
+    return "Hello from Pyronova!"
 
 
 @app.get("/hello/{name}")
@@ -45,8 +45,8 @@ def search(req):
 @app.get("/html")
 def html_page(req):
     """Custom content-type."""
-    return PyreResponse(
-        body="<h1>Hello from Pyre</h1>",
+    return Response(
+        body="<h1>Hello from Pyronova</h1>",
         content_type="text/html; charset=utf-8",
     )
 
@@ -54,7 +54,7 @@ def html_page(req):
 @app.fallback
 def not_found(req):
     """Custom 404 handler."""
-    return PyreResponse(
+    return Response(
         body={"error": "not found", "path": req.path},
         status_code=404,
         content_type="application/json",

@@ -2,7 +2,7 @@
 
 Usage::
 
-    from pyreframework.context import ctx
+    from pyronova.context import ctx
 
     @app.before_request
     def tag(req):
@@ -21,7 +21,7 @@ Under the hood:
 - Backed by a ``ContextVar[dict]`` so async handlers inherit the scope
   across ``await`` boundaries without extra plumbing.
 - Each before-request hook (installed by ``reset_context_on_request``,
-  which Pyre wires automatically when you enable request-id or metrics)
+  which Pyronova wires automatically when you enable request-id or metrics)
   replaces the stored dict, so leftover keys from a recycled worker
   thread never leak.
 
@@ -36,9 +36,9 @@ from contextvars import ContextVar
 from typing import Any
 
 
-_REQUEST_ID_KEY = "__pyre_request_id__"
+_REQUEST_ID_KEY = "__pyronova_request_id__"
 
-_current: ContextVar[dict[str, Any]] = ContextVar("pyre_ctx", default={})
+_current: ContextVar[dict[str, Any]] = ContextVar("pyronova_ctx", default={})
 
 
 class _Ctx:
@@ -79,7 +79,7 @@ ctx = _Ctx()
 
 
 def _reset_for_new_request() -> None:
-    """Called by Pyre's internal before-request hook to start each
+    """Called by Pyronova's internal before-request hook to start each
     request with a fresh dict."""
     _current.set({})
 

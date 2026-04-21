@@ -1,13 +1,13 @@
 """Tests for req.client_ip — verifies client IP is populated in all modes."""
 
 import pytest
-from pyreframework import Pyre, PyreResponse
-from pyreframework.testing import TestClient
+from pyronova import Pyronova, Response
+from pyronova.testing import TestClient
 
 
 @pytest.fixture(scope="module")
 def client():
-    app = Pyre()
+    app = Pyronova()
 
     @app.get("/")
     def index(req):
@@ -35,7 +35,7 @@ def client():
 
     @app.get("/ip-in-header-response")
     def ip_echo(req):
-        return PyreResponse(
+        return Response(
             body="ok",
             headers={"x-client-ip": req.client_ip},
         )

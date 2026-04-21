@@ -1,13 +1,13 @@
-# Pyre — HTTP Arena submission
+# Pyronova — HTTP Arena submission
 
-Pyre is a Python web framework with a Rust core: hyper + tokio + rustls +
+Pyronova is a Python web framework with a Rust core: hyper + tokio + rustls +
 mimalloc, plus PEP 684 sub-interpreters for true multi-core Python. This
-submission exposes every Arena endpoint with standard Pyre decorators —
+submission exposes every Arena endpoint with standard Pyronova decorators —
 no special harness-only glue.
 
 ## Feature posture
 
-| Profile | Pyre feature |
+| Profile | Pyronova feature |
 |---|---|
 | baseline / pipelined / limited-conn | sub-interpreter dispatch, mimalloc, SO_REUSEPORT |
 | json / json-comp | Rust-side `serde_json` via `pythonize`; `app.enable_compression()` handles `Accept-Encoding` |
@@ -18,23 +18,23 @@ no special harness-only glue.
 | static | Tokio async-fs with `O_NOFOLLOW` + mime-from-extension |
 
 Everything is compiled in and runtime-toggled. A single `pip install
-pyreframework` covers every profile; no Cargo features or rebuilds.
+pyronova` covers every profile; no Cargo features or rebuilds.
 
 ## Build (local)
 
-Populate the Pyre source into the build context, then build:
+Populate the Pyronova source into the build context, then build:
 
 ```bash
-cp -r /path/to/pyre frameworks/pyre/pyre_src
-docker build -t httparena-pyre frameworks/pyre
+cp -r /path/to/pyronova frameworks/pyronova/pyronova_src
+docker build -t httparena-pyronova frameworks/pyronova
 ```
 
-Or let the Arena CI populate `pyre_src` from the official repo.
+Or let the Arena CI populate `pyronova_src` from the official repo.
 
 ## Run (manual / debug)
 
 ```bash
-./scripts/run.sh pyre
+./scripts/run.sh pyronova
 ```
 
 Exposes 8080 (plain), 8081 (TLS h1), 8443 (TLS h2). Harness probes
@@ -43,7 +43,7 @@ Exposes 8080 (plain), 8081 (TLS h1), 8443 (TLS h2). Harness probes
 ## Design notes
 
 Two processes are spawned by `launcher.py` — one for plaintext, one for
-TLS — because Pyre's `app.run()` binds a single port. Each process
+TLS — because Pyronova's `app.run()` binds a single port. Each process
 gets half the CPU budget to avoid sub-interpreter oversubscription.
 The HTTP/2 listener shares the TLS process (single listener; ALPN
 picks the protocol). This is a launcher detail, not a framework

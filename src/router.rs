@@ -37,7 +37,7 @@ pub(crate) struct RouteTable {
     pub(crate) requires_gil: Vec<bool>,
     pub(crate) is_async: Vec<bool>,
     /// Per-route streaming flag. When true, the accept loop skips the
-    /// body collect and attaches a `PyreBodyStream` to the request.
+    /// body collect and attaches a `PyronovaBodyStream` to the request.
     pub(crate) is_stream: Vec<bool>,
     pub(crate) routers: HashMap<String, Router<usize>>,
     pub(crate) ws_handlers: HashMap<String, Py<PyAny>>,

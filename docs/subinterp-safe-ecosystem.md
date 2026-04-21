@@ -1,29 +1,29 @@
 # The Sub-interpreter Safe Ecosystem
 
-Pyre achieves 220,000+ req/s by running Python handlers across multiple sub-interpreters, each with its own GIL (PEP 684). This means **true multi-core parallelism** in a single process — but it also means some traditional Python libraries won't work in sub-interpreter mode.
+Pyronova achieves 220,000+ req/s by running Python handlers across multiple sub-interpreters, each with its own GIL (PEP 684). This means **true multi-core parallelism** in a single process — but it also means some traditional Python libraries won't work in sub-interpreter mode.
 
 This guide maps out the **Golden Path**: libraries that are verified safe for sub-interpreters, delivering maximum performance with zero compatibility headaches.
 
-> **Philosophy**: Pyre doesn't force you to change, but it rewards you when you do.
+> **Philosophy**: Pyronova doesn't force you to change, but it rewards you when you do.
 
 ## Not Just Safe — Faster
 
 Switching to sub-interpreter safe libraries isn't a compromise. It's an upgrade. Benchmark results (Apple M4 Pro, 10 cores, wrk -t4 -c100 -d10s):
 
-| Test | FastAPI + Pydantic | Pyre + Golden Path | Speedup |
+| Test | FastAPI + Pydantic | Pyronova + Golden Path | Speedup |
 |------|-------------------|-------------------|---------|
 | Health Check (plain JSON) | 9,031 req/s | **214,714 req/s** | **23.8x** |
 | JSON Echo (parse + serialize) | 7,602 req/s | **209,012 req/s** | **27.5x** |
 | CPU-bound (10k moving avg) | 263 req/s | **599 req/s** | **2.3x** |
 | Validation (field checking) | 7,345 req/s | **208,439 req/s** | **28.4x** |
 
-| Metric | FastAPI + Pydantic | Pyre + Golden Path |
+| Metric | FastAPI + Pydantic | Pyronova + Golden Path |
 |--------|-------------------|-------------------|
 | Avg latency (Health) | 11.10 ms | **0.38 ms** (29x lower) |
 | Avg latency (Echo) | 13.17 ms | **0.40 ms** (33x lower) |
 | Avg latency (Validate) | 13.75 ms | **0.41 ms** (34x lower) |
 
-The traditional stack (FastAPI + Pydantic) is single-threaded — the GIL serializes all requests. Pyre with sub-interp safe libs runs 10 interpreters in parallel, each at full CPU speed. The result: **24-28x throughput** and **29-34x lower latency** for typical API workloads.
+The traditional stack (FastAPI + Pydantic) is single-threaded — the GIL serializes all requests. Pyronova with sub-interp safe libs runs 10 interpreters in parallel, each at full CPU speed. The result: **24-28x throughput** and **29-34x lower latency** for typical API workloads.
 
 Run the benchmark yourself: `bash benchmarks/run_comparison.sh`
 
@@ -45,7 +45,7 @@ Run the benchmark yourself: `bash benchmarks/run_comparison.sh`
 
 **Pure Python = Safe.** If a library is written entirely in Python (no C extensions, no `.so`/`.pyd` files), it will work in sub-interpreters.
 
-**C extensions = Use `gil=True`.** Libraries with C extensions (NumPy, Pydantic V2, SQLAlchemy C drivers) must run on the main interpreter. Pyre makes this easy:
+**C extensions = Use `gil=True`.** Libraries with C extensions (NumPy, Pydantic V2, SQLAlchemy C drivers) must run on the main interpreter. Pyronova makes this easy:
 
 ```python
 @app.get("/analytics", gil=True)  # Runs on main interpreter
@@ -105,14 +105,14 @@ def generate_report(req):
     return result.to_dicts()
 ```
 
-Why Polars is the perfect match for Pyre:
-- **Same DNA**: Polars is written in Rust, just like Pyre's core
+Why Polars is the perfect match for Pyronova:
+- **Same DNA**: Polars is written in Rust, just like Pyronova's core
 - **Apache Arrow memory model**: columnar, cache-friendly, zero-copy potential
 - **No GIL dependency**: Polars releases the GIL for all heavy operations
 - **Lazy evaluation**: query optimization before execution
 - **3-10x faster than Pandas** for most operations
 
-> **Future**: We're exploring zero-copy Arrow transfer between Pyre's Rust layer and Polars — eliminating serialization entirely for data-heavy endpoints.
+> **Future**: We're exploring zero-copy Arrow transfer between Pyronova's Rust layer and Polars — eliminating serialization entirely for data-heavy endpoints.
 
 ### 3. HTTP Client: httpx
 
@@ -139,16 +139,16 @@ def list_users(req):
         return [{"id": r[0], "name": r[1]} for r in rows]
 ```
 
-For connection pooling across sub-interpreters, use Pyre's `SharedState` to coordinate, or use an external pool like PgBouncer.
+For connection pooling across sub-interpreters, use Pyronova's `SharedState` to coordinate, or use an external pool like PgBouncer.
 
 ## Hybrid Architecture: Best of Both Worlds
 
-You don't have to choose one mode. Pyre's hybrid dispatch lets you mix sub-interpreter routes (fast, parallel) with GIL routes (full ecosystem access):
+You don't have to choose one mode. Pyronova's hybrid dispatch lets you mix sub-interpreter routes (fast, parallel) with GIL routes (full ecosystem access):
 
 ```python
-from pyreframework import Pyre
+from pyronova import Pyronova
 
-app = Pyre()
+app = Pyronova()
 
 # ⚡ Sub-interpreter: 220k req/s, pure Python only
 @app.get("/health")
@@ -193,7 +193,7 @@ if spec and spec.submodule_search_locations:
 
 ## Community-Verified Libraries
 
-✅ **Verified Safe** (pure Python, tested with Pyre sub-interpreters):
+✅ **Verified Safe** (pure Python, tested with Pyronova sub-interpreters):
 - `msgspec`, `mashumaro` — validation/serialization
 - `httpx` — HTTP client
 - `Jinja2` — templating
@@ -209,7 +209,7 @@ if spec and spec.submodule_search_locations:
 - `pandas` — depends on numpy
 - `scipy` — C/Fortran extensions
 - `orjson` — C extension
-- `uvloop` — C extension (not relevant for Pyre)
+- `uvloop` — C extension (not relevant for Pyronova)
 - `psycopg2` — C extension
 - `cryptography` — OpenSSL bindings
 - `lxml` — libxml2 bindings
@@ -221,4 +221,4 @@ if spec and spec.submodule_search_locations:
 
 ---
 
-*This document is a living guide. If you've tested a library with Pyre sub-interpreters, please open an issue or PR to update this list.*
+*This document is a living guide. If you've tested a library with Pyronova sub-interpreters, please open an issue or PR to update this list.*

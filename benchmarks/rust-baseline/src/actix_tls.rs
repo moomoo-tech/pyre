@@ -1,4 +1,4 @@
-//! Actix-web TLS head-to-head baseline vs Pyre.
+//! Actix-web TLS head-to-head baseline vs Pyronova.
 //!
 //! Same /json-fortunes payload, same rustls 0.23 backend (ring crypto),
 //! same ALPN (h2 + http/1.1), same ~3 KB JSON. No compression — this
@@ -9,7 +9,7 @@
 //!     cd benchmarks/rust-baseline && cargo build --release --bin bench-actix-tls
 //!
 //! Run:
-//!     PYRE_TLS_CERT=/path/cert.pem PYRE_TLS_KEY=/path/key.pem \
+//!     PYRONOVA_TLS_CERT=/path/cert.pem PYRONOVA_TLS_KEY=/path/key.pem \
 //!         ./target/release/bench-actix-tls
 //!
 //! Listens on 127.0.0.1:8443.
@@ -95,8 +95,8 @@ fn load_tls_config(cert_path: &str, key_path: &str) -> ServerConfig {
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    let cert = std::env::var("PYRE_TLS_CERT").expect("PYRE_TLS_CERT required");
-    let key = std::env::var("PYRE_TLS_KEY").expect("PYRE_TLS_KEY required");
+    let cert = std::env::var("PYRONOVA_TLS_CERT").expect("PYRONOVA_TLS_CERT required");
+    let key = std::env::var("PYRONOVA_TLS_KEY").expect("PYRONOVA_TLS_KEY required");
     let port: u16 = std::env::var("ACTIX_PORT")
         .ok()
         .and_then(|s| s.parse().ok())

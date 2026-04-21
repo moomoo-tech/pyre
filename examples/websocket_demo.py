@@ -1,14 +1,14 @@
 """WebSocket demo — echo server + broadcast example."""
 
-from pyreframework import Pyre
+from pyronova import Pyronova
 
-app = Pyre()
+app = Pyronova()
 
 
 @app.get("/")
 def index(req):
     return """<html><body>
-<h1>Pyre WebSocket Demo</h1>
+<h1>Pyronova WebSocket Demo</h1>
 <input id="msg" type="text" placeholder="Type a message...">
 <button onclick="send()">Send</button>
 <pre id="log"></pre>

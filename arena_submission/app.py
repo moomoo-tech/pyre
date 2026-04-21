@@ -1,18 +1,18 @@
-"""Pyre framework — HTTP Arena submission.
+"""Pyronova framework — HTTP Arena submission.
 
 Exposes the eight endpoints required by the Arena test harness, mirroring
 the Actix / FastAPI reference implementations for semantic parity.
 Route-by-route behavior is identical so head-to-head numbers are
 apples-to-apples; what varies is the server engine underneath.
 
-Pyre specifics used here:
-  * `Pyre()` — sub-interpreter-backed app (PEP 684), auto-dual pool
+Pyronova specifics used here:
+  * `Pyronova()` — sub-interpreter-backed app (PEP 684), auto-dual pool
   * `app.enable_compression()` — gzip/brotli Accept-Encoding negotiation
   * `@app.post(stream=True)` — chunked body ingest without buffering
-  * `pyreframework.db.PgPool` — async sqlx-backed PG pool shared across
+  * `pyronova.db.PgPool` — async sqlx-backed PG pool shared across
     workers via Rust-side OnceLock
   * `app.static(prefix, dir)` — async-fs-served static files
-  * TLS via `PYRE_TLS_CERT` / `PYRE_TLS_KEY` env (launcher picks up)
+  * TLS via `PYRONOVA_TLS_CERT` / `PYRONOVA_TLS_KEY` env (launcher picks up)
 
 The app is ~120 lines because the Rust engine does the heavy lifting —
 no boilerplate for workers, TLS, or compression.
@@ -21,8 +21,8 @@ no boilerplate for workers, TLS, or compression.
 import json
 import os
 
-from pyreframework import Pyre, PyreResponse
-from pyreframework.db import PgPool
+from pyronova import Pyronova, Response
+from pyronova.db import PgPool
 
 
 # ---------------------------------------------------------------------------
@@ -57,7 +57,7 @@ if DATABASE_URL:
 # App
 # ---------------------------------------------------------------------------
 
-app = Pyre()
+app = Pyronova()
 # min_size=256 skips tiny bodies (/pipeline "ok", short query params).
 # Arena's json-comp rotates through /json/1..50 with pipeline depth 25
 # and hundreds of connections — throughput is bounded by compression
@@ -96,7 +96,7 @@ def _sum_query_params(req) -> int:
 
 @app.get("/baseline11")
 def baseline11_get(req):
-    return PyreResponse(str(_sum_query_params(req)), content_type="text/plain")
+    return Response(str(_sum_query_params(req)), content_type="text/plain")
 
 
 @app.post("/baseline11")
@@ -108,12 +108,12 @@ def baseline11_post(req):
             total += int(body.decode("ascii", errors="replace").strip())
         except (ValueError, UnicodeDecodeError):
             pass
-    return PyreResponse(str(total), content_type="text/plain")
+    return Response(str(total), content_type="text/plain")
 
 
 @app.get("/baseline2")
 def baseline2(req):
-    return PyreResponse(str(_sum_query_params(req)), content_type="text/plain")
+    return Response(str(_sum_query_params(req)), content_type="text/plain")
 
 
 @app.post("/upload", gil=True, stream=True)
@@ -125,7 +125,7 @@ def upload(req):
     # the /upload profile; zero impact on streaming use cases that
     # actually want the per-chunk bytes.
     size = req.stream.drain_count()
-    return PyreResponse(str(size), content_type="text/plain")
+    return Response(str(size), content_type="text/plain")
 
 
 # Same payload shape + multiplier semantics as Actix/FastAPI reference:
@@ -133,18 +133,18 @@ def upload(req):
 # return {"items": [...], "count": N}.
 #
 # We return a plain Python dict rather than a pre-serialized bytes body.
-# Pyre's Rust response path detects dict/list returns and serializes via
+# Pyronova's Rust response path detects dict/list returns and serializes via
 # `pythonize + serde_json::to_vec` — native Rust JSON (~30μs for a
 # 50-item payload). Using Python's stdlib `json.dumps` instead costs
 # ~150μs per call on the same data. Returning the dict shaves ~100μs
 # per request on the /json profile.
 @app.get("/json/{count}")
 def json_endpoint(req):
-    # Returning a dict directly triggers Pyre's Rust-side JSON
+    # Returning a dict directly triggers Pyronova's Rust-side JSON
     # serialization path (pythonize + serde_json::to_vec). Empirically
-    # this matches or beats orjson.dumps() + PyreResponse(bytes) for
+    # this matches or beats orjson.dumps() + Response(bytes) for
     # small nested payloads — the explicit orjson path pays the C-API
-    # wrap twice (orjson → bytes, bytes → PyreResponse) while the
+    # wrap twice (orjson → bytes, bytes → Response) while the
     # dict-return path is a single Rust traversal.
     try:
         count = int(req.params["count"])
@@ -183,14 +183,14 @@ PG_SQL = (
 @app.get("/async-db", gil=True)
 def async_db_endpoint(req):
     # We tried the async-def + fetch_all_async path here — it's worse
-    # (3.9k vs 7.2k rps) on Arena's async-db profile because Pyre's GIL
+    # (3.9k vs 7.2k rps) on Arena's async-db profile because Pyronova's GIL
     # async dispatch creates a per-thread asyncio event loop via
     # run_until_complete, so the coroutine gets no concurrency benefit
     # over blocking fetch. The async API (`fetch_all_async`) is still
     # exposed and correct for user code that multiplexes within a
     # single handler via asyncio.gather; it's just not the Arena win.
     if PG_POOL is None:
-        return PyreResponse({"items": [], "count": 0}, content_type="application/json")
+        return Response({"items": [], "count": 0}, content_type="application/json")
     q = req.query_params
     try:
         min_val = int(q.get("min", "10"))
@@ -198,12 +198,12 @@ def async_db_endpoint(req):
         limit = int(q.get("limit", "50"))
         limit = max(1, min(limit, 50))
     except ValueError:
-        return PyreResponse({"items": [], "count": 0}, content_type="application/json")
+        return Response({"items": [], "count": 0}, content_type="application/json")
 
     try:
         rows = PG_POOL.fetch_all(PG_SQL, min_val, max_val, limit)
     except Exception:
-        return PyreResponse({"items": [], "count": 0}, content_type="application/json")
+        return Response({"items": [], "count": 0}, content_type="application/json")
 
     items = []
     for row in rows:
@@ -223,13 +223,13 @@ def async_db_endpoint(req):
                 "count": row["rating_count"],
             },
         })
-    return PyreResponse({"items": items, "count": len(items)}, content_type="application/json")
+    return Response({"items": items, "count": len(items)}, content_type="application/json")
 
 
 if __name__ == "__main__":
     # launcher.py decides which port + TLS config to pass via env.
-    host = os.environ.get("PYRE_HOST", "0.0.0.0")
-    port = int(os.environ.get("PYRE_PORT", "8080"))
+    host = os.environ.get("PYRONOVA_HOST", "0.0.0.0")
+    port = int(os.environ.get("PYRONOVA_PORT", "8080"))
     # Detect worker count from cgroup cpu.max (same pattern as actix's helper).
-    # Pyre's engine will fall back to num_cpus if PYRE_WORKERS isn't set.
+    # Pyronova's engine will fall back to num_cpus if PYRONOVA_WORKERS isn't set.
     app.run(host=host, port=port)

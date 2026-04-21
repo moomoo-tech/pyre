@@ -1,8 +1,8 @@
 """Test: Hybrid mode — fast routes on sub-interp, numpy routes on GIL."""
 
-from pyreframework import Pyre, PyreResponse
+from pyronova import Pyronova, Response
 
-app = Pyre()
+app = Pyronova()
 
 
 @app.get("/")

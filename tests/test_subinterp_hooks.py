@@ -1,14 +1,14 @@
 """Test: after_request hooks work in sub-interpreter mode."""
-from pyreframework import PyreApp
+from pyronova import PyronovaApp
 
-app = PyreApp()
+app = PyronovaApp()
 
 
 def add_cors(req, resp):
     """after_request hook: add CORS header."""
-    # In sub-interp, _PyreResponse is available in globals
-    # Return a _PyreResponse with extra headers
-    return _PyreResponse(
+    # In sub-interp, _Response is available in globals
+    # Return a _Response with extra headers
+    return _Response(
         body=resp.body,
         status_code=resp.status_code,
         content_type=resp.content_type,

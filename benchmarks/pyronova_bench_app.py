@@ -1,15 +1,15 @@
-"""Pyre benchmark app — sub-interpreter safe stack (msgspec + stdlib json)."""
+"""Pyronova benchmark app — sub-interpreter safe stack (msgspec + stdlib json)."""
 
-from pyreframework import Pyre
+from pyronova import Pyronova
 import json
 
-app = Pyre()
+app = Pyronova()
 
 
 # 1. Plain JSON response
 @app.get("/health")
 def health(req):
-    return {"status": "ok", "framework": "pyre"}
+    return {"status": "ok", "framework": "pyronova"}
 
 
 # 2. JSON echo (parse + serialize)

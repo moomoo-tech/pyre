@@ -1,8 +1,8 @@
-"""Pyre hybrid mode benchmark server — numpy routes on GIL, rest on sub-interp."""
-from pyreframework import Pyre
+"""Pyronova hybrid mode benchmark server — numpy routes on GIL, rest on sub-interp."""
+from pyronova import Pyronova
 import json
 
-app = Pyre()
+app = Pyronova()
 
 @app.get("/t1")
 def t1_hello(req):

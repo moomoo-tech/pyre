@@ -1,12 +1,12 @@
-# 为什么 Pyre 不做多进程模式
+# 为什么 Pyronova 不做多进程模式
 
 > 技术决策文档 — 2026-03-24
 
 ## 背景
 
-压测显示 Robyn `--fast`（22 进程）在 numpy 场景下领先 Pyre 3.7x：
+压测显示 Robyn `--fast`（22 进程）在 numpy 场景下领先 Pyronova 3.7x：
 
-| 场景 | Pyre Hybrid | Robyn --fast | 差距 |
+| 场景 | Pyronova Hybrid | Robyn --fast | 差距 |
 |------|-----------|-------------|------|
 | numpy mean(10k) | 8,507 | 31,261 | 3.7x |
 | numpy SVD 100x100 | 3,993 | 5,079 | 1.3x |
@@ -17,18 +17,18 @@
 
 ```
 Robyn --fast = 22 个 OS 进程 × 22 个独立解释器 × 22 个 GIL = 多核全开
-Pyre gil=True = 1 个进程 × 1 个主解释器 × 1 个 GIL = 单核瓶颈
+Pyronova gil=True = 1 个进程 × 1 个主解释器 × 1 个 GIL = 单核瓶颈
 ```
 
-numpy 的 `_multiarray_umath` C 模块主动拒绝在子解释器中加载（`ImportError: cannot load module more than once per process`）。所以 Pyre 的 numpy 路由只能走主解释器，单线程串行。
+numpy 的 `_multiarray_umath` C 模块主动拒绝在子解释器中加载（`ImportError: cannot load module more than once per process`）。所以 Pyronova 的 numpy 路由只能走主解释器，单线程串行。
 
 ## 为什么不加多进程
 
-### 理由一：摧毁 Pyre 的核心优势
+### 理由一：摧毁 Pyronova 的核心优势
 
-Pyre 的杀手锏是**单进程 + 多子解释器**：
+Pyronova 的杀手锏是**单进程 + 多子解释器**：
 
-| 指标 | Pyre (1 进程) | Robyn --fast (22 进程) |
+| 指标 | Pyronova (1 进程) | Robyn --fast (22 进程) |
 |------|-------------|---------------------|
 | 内存 | ~67 MB | ~451 MB |
 | 进程间通信 | 无（共享内存） | IPC 开销 |
@@ -78,7 +78,7 @@ SkyTrade 交易系统的实际架构分层：
 
 ```
 ┌─────────────────────────────────────────────────┐
-│ Pyre Web 层 (async I/O)                         │
+│ Pyronova Web 层 (async I/O)                         │
 │  · WebSocket 行情接收          ← 纯 I/O         │
 │  · REST API 订单提交           ← 纯 I/O         │
 │  · 鉴权/风控校验               ← 轻 CPU         │
@@ -104,12 +104,12 @@ SkyTrade 交易系统的实际架构分层：
 | 底层语言 | C + Python | **Rust** |
 | 多线程 | ❌ 单线程 | ✅ 自动多核 |
 | GIL 行为 | **持有 GIL** | **释放 GIL** |
-| 在 Pyre gil=True 中 | 阻塞主解释器 | 不阻塞，Pyre 可继续接请求 |
+| 在 Pyronova gil=True 中 | 阻塞主解释器 | 不阻塞，Pyronova 可继续接请求 |
 
 用 Polars 在 `gil=True` 路由中做 2 秒的数据聚合，主 GIL 会被释放，
-Pyre 仍然可以疯狂处理其他请求。完美共存。
+Pyronova 仍然可以疯狂处理其他请求。完美共存。
 
-### 理由六：numpy 的问题是 numpy 的，不是 Pyre 的
+### 理由六：numpy 的问题是 numpy 的，不是 Pyronova 的
 
 numpy 不支持子解释器（PEP 684），这是 numpy 的技术债：
 
@@ -117,7 +117,7 @@ numpy 不支持子解释器（PEP 684），这是 numpy 的技术债：
 - numpy tracking: [numpy#24003](https://github.com/numpy/numpy/issues/24003)
 
 随着 Python 3.14/3.15 推进，C 扩展生态会逐步适配多阶段初始化。
-届时 numpy 可以直接在 Pyre 子解释器中运行（10 个独立 GIL 并行），
+届时 numpy 可以直接在 Pyronova 子解释器中运行（10 个独立 GIL 并行），
 吞吐量会超过 Robyn 的多进程方案（更少开销，零 IPC）。
 
 ## 正确的投资方向：async handler
@@ -127,10 +127,10 @@ numpy 不支持子解释器（PEP 684），这是 numpy 的技术债：
 ```
 sleep(1ms) I/O 模拟:
   Robyn    77,967 req/s
-  Pyre      7,905 req/s  ← 10x 落后，因为 sync handler 阻塞 worker
+  Pyronova      7,905 req/s  ← 10x 落后，因为 sync handler 阻塞 worker
 ```
 
-实现 async handler 后，Pyre 的 I/O 并发能力将与 Robyn 持平甚至超越，
+实现 async handler 后，Pyronova 的 I/O 并发能力将与 Robyn 持平甚至超越，
 同时保持子解释器模式的 CPU 并行优势和内存优势。
 
 **最终目标：I/O + CPU + 内存 三杀 Robyn。**

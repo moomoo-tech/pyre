@@ -1,8 +1,8 @@
 """Test: SharedState across GIL routes in hybrid mode."""
 import json
-from pyreframework import Pyre
+from pyronova import Pyronova
 
-app = Pyre()
+app = Pyronova()
 
 
 @app.get("/set/{key}/{value}", gil=True)
@@ -62,7 +62,7 @@ if __name__ == "__main__":
 # Unit tests for SharedState atomic operations (incr/decr)
 # ---------------------------------------------------------------------------
 
-from pyreframework.engine import SharedState
+from pyronova.engine import SharedState
 
 
 def test_incr_creates_key():

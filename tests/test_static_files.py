@@ -3,14 +3,14 @@
 import os
 import tempfile
 import pytest
-from pyreframework import Pyre
-from pyreframework.testing import TestClient
+from pyronova import Pyronova
+from pyronova.testing import TestClient
 
 
 @pytest.fixture(scope="module")
 def static_dir():
     """Create a temp directory with test static files."""
-    d = tempfile.mkdtemp(prefix="pyre_static_")
+    d = tempfile.mkdtemp(prefix="pyronova_static_")
     with open(os.path.join(d, "index.html"), "w") as f:
         f.write("<h1>Hello</h1>")
     with open(os.path.join(d, "style.css"), "w") as f:
@@ -29,7 +29,7 @@ def static_dir():
 
 @pytest.fixture(scope="module")
 def client(static_dir):
-    app = Pyre()
+    app = Pyronova()
 
     @app.get("/")
     def index(req):
@@ -126,7 +126,7 @@ def test_static_symlink_out_of_root_refused(static_dir):
     except (OSError, NotImplementedError):
         pytest.skip("symlink not supported on this platform")
 
-    app = Pyre()
+    app = Pyronova()
 
     @app.get("/")
     def _health(req):

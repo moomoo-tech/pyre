@@ -1,6 +1,6 @@
 # Feature guide
 
-Pyre ships as **one wheel with every feature compiled in**. Turn them on
+Pyronova ships as **one wheel with every feature compiled in**. Turn them on
 with a runtime call — no recompile, no Rust toolchain, no pip extras.
 
 The one exception is `leak_detect`, a diagnostic-only Cargo feature that
@@ -20,7 +20,7 @@ adds per-object counters and is disabled in the published wheel.
 | Sub-interpreter mode | `app.run(mode="subinterp")` | on (auto) |
 | MCP server endpoint | any `@mcp.tool` decorator | off |
 | WebSocket | `@app.websocket(path)` | off |
-| SSE streaming (response) | `return PyreStream(...)` | off |
+| SSE streaming (response) | `return Stream(...)` | off |
 | `leak_detect` (diagnostic) | `maturin develop --features leak_detect` | compile-time off |
 
 All items above (except `leak_detect`) are zero-cost when disabled —
@@ -31,7 +31,7 @@ a single relaxed atomic load or a feature-flag branch that predicts away.
 ### Compression (gzip + brotli)
 
 ```python
-app = Pyre()
+app = Pyronova()
 app.enable_compression(
     min_size=512,        # don't compress responses smaller than 512 B
     gzip=True,           # enable gzip
@@ -59,7 +59,7 @@ app.run(
 Or via env var (useful for Docker / k8s):
 
 ```bash
-PYRE_TLS_CERT=/etc/ssl/cert.pem PYRE_TLS_KEY=/etc/ssl/key.pem \
+PYRONOVA_TLS_CERT=/etc/ssl/cert.pem PYRONOVA_TLS_KEY=/etc/ssl/key.pem \
     python app.py
 ```
 
@@ -100,10 +100,10 @@ app.set_cors_config(
 
 ```python
 app.enable_request_logging(True)
-# or: PYRE_LOG=1 in env
+# or: PYRONOVA_LOG=1 in env
 ```
 
-Access log goes through the `pyre::access` tracing target. Caveat:
+Access log goes through the `pyronova::access` tracing target. Caveat:
 at 400k rps the access log alone costs ~25–30% throughput. Don't
 enable it in benchmarks.
 
@@ -145,7 +145,7 @@ maturin develop --release --features leak_detect
 Read from Python:
 
 ```python
-from pyreframework.engine import leak_detect_dump
+from pyronova.engine import leak_detect_dump
 leak_detect_dump()   # prints top buckets to stderr
 ```
 
@@ -158,7 +158,7 @@ We considered it. The math didn't work:
 
 - Saves ~10 MB of wheel size per disabled feature
 - Costs: CI matrix explosion (N × build paths), PyPI wheel fragmentation,
-  and users having to memorise `pip install pyreframework[pg,redis]`
+  and users having to memorise `pip install pyronova[pg,redis]`
 - Context: one comparable framework dep (numpy) is 19 MB; pandas is 13 MB.
   A 20 MB wheel is well within norms.
 

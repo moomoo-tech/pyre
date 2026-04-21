@@ -12,9 +12,9 @@ import pytest
 PYTHON = sys.executable
 
 WS_SERVER = '''
-from pyreframework import Pyre
+from pyronova import Pyronova
 
-app = Pyre()
+app = Pyronova()
 
 @app.websocket("/echo")
 def echo(ws):
@@ -47,7 +47,7 @@ if __name__ == "__main__":
 @pytest.fixture(scope="module")
 def ws_server():
     """Start a WebSocket-capable server as a subprocess."""
-    script = "/tmp/pyre_ws_test_server.py"
+    script = "/tmp/pyronova_ws_test_server.py"
     with open(script, "w") as f:
         f.write(WS_SERVER)
 

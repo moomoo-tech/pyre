@@ -12,9 +12,9 @@ from tests.conftest import feature_server_factory
 
 SERVER = '''
 import os
-from pyreframework import Pyre, PyreResponse, redirect
+from pyronova import Pyronova, Response, redirect
 
-app = Pyre()
+app = Pyronova()
 
 @app.get("/__ping")
 def ping(req):
@@ -22,7 +22,7 @@ def ping(req):
 
 @app.get("/")
 def index(req):
-    return {"mode": os.environ["PYRE_MODE"]}
+    return {"mode": os.environ["PYRONOVA_MODE"]}
 
 @app.get("/hello/{name}")
 def hello(req):
@@ -38,7 +38,7 @@ def nested(req):
 
 @app.get("/error")
 def err(req):
-    return PyreResponse(body="nope", status_code=404)
+    return Response(body="nope", status_code=404)
 
 @app.get("/redirect")
 def rd(req):
@@ -47,8 +47,8 @@ def rd(req):
 if __name__ == "__main__":
     app.run(
         host="127.0.0.1",
-        port=int(os.environ["PYRE_PORT"]),
-        mode=os.environ["PYRE_MODE"],
+        port=int(os.environ["PYRONOVA_PORT"]),
+        mode=os.environ["PYRONOVA_MODE"],
     )
 '''
 
@@ -62,9 +62,9 @@ def test_basic_get(feature_server):
 
 
 def test_path_params(feature_server):
-    status, body, _ = feature_server.get("/hello/pyre")
+    status, body, _ = feature_server.get("/hello/pyronova")
     assert status == 200
-    assert json.loads(body)["name"] == "pyre"
+    assert json.loads(body)["name"] == "pyronova"
 
 
 def test_query_params(feature_server):

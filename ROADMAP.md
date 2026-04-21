@@ -1,4 +1,4 @@
-# Pyre Roadmap
+# Pyronova Roadmap
 
 ## Phase 1 — Skeleton (DONE ✓) — 2026-03-23
 
@@ -20,8 +20,8 @@
 
 ## Phase 3 — Developer Experience (DONE ✓) — v0.3.0, 2026-03-24
 
-- [x] `Pyre` 装饰器语法 (`@app.get("/")`)
-- [x] `PyreResponse` — 自定义 status code / headers / content-type
+- [x] `Pyronova` 装饰器语法 (`@app.get("/")`)
+- [x] `Response` — 自定义 status code / headers / content-type
 - [x] `req.headers` — 请求头读取
 - [x] `req.query_params` — 查询参数解析
 - [x] `before_request` / `after_request` 中间件
@@ -65,14 +65,14 @@ Tracking issues:
 - `PyRun_String` 执行用户脚本（过滤掉框架代码）
 - `PyDict_GetItemString` 提取 handler 函数指针
 - `PyObject_Call` 直接调用 handler
-- 纯 Python `_PyreRequest` / `_PyreResponse` 替代 PyO3 的 `#[pyclass]`
+- 纯 Python `_Request` / `_Response` 替代 PyO3 的 `#[pyclass]`
 
 风险：裸指针、手动引用计数、无 RAII，但性能极佳。
 
 #### 里程碑（已完成）
 1. ~~Fork PyO3~~ → 改为 raw FFI 方案
 2. PoC: 10 个子解释器并行处理请求 ✓
-3. 集成到 Pyre: worker pool + interpreter pool ✓
+3. 集成到 Pyronova: worker pool + interpreter pool ✓
 4. Benchmark: SubInterp 216k vs Robyn 76k (2.8x) ✓
 
 ## Phase 5 — 生产级子解释器 (DONE ✓ Step 1) — v0.3.1, 2026-03-24
@@ -84,14 +84,14 @@ Tracking issues:
 | 裸 `*mut ffi::PyObject` 指针 | 高 | ✅ 已修复 | `PyObjRef` RAII 包装，Drop 自动 DECREF |
 | 手动 `Py_INCREF/DECREF` | 高 | ✅ 已修复 | `from_owned` / `from_borrowed` / `into_raw` 安全接口 |
 | 脚本过滤是字符串匹配 | 中 | ✅ 已修复 | 改用 Python `ast.parse` + `ast.unparse`，精准过滤 |
-| `_PyreRequest` 是纯 Python 重写 | 中 | 🔄 保留 | 跟主解释器行为一致，暂无问题 |
+| `_Request` 是纯 Python 重写 | 中 | 🔄 保留 | 跟主解释器行为一致，暂无问题 |
 | 无 `Py_EndInterpreter` 清理 | 中 | ✅ 已修复 | worker 线程退出时自动 `Py_EndInterpreter` |
 | 子解释器里不能用 PyO3 扩展 | **致命** | 🔄 Step 2 | 需要 fork PyO3，见下方 |
 | 队头阻塞 (Round-robin + Mutex) | 高 | ✅ 已修复 | 改为 `crossbeam-channel` 多消费者池，真负载均衡 |
 | 静态文件目录穿越漏洞 | 高 | ✅ 已修复 | `trim_start_matches('/')` + `..` 检测 |
 | Middleware 破坏二进制响应 | 中 | ✅ 已修复 | 非 UTF-8 body 使用 `PyBytes` 而非强转空字符串 |
 
-### Step 1: 安全抽象层 `pyre-interp` (DONE ✓)
+### Step 1: 安全抽象层 `pyronova-interp` (DONE ✓)
 
 在 `pyo3::ffi` 之上包一层（`src/interp.rs`, 820 行）：
 - [x] `PyObjRef` RAII 包装引用计数（Drop 自动 DECREF）
@@ -109,13 +109,13 @@ Tracking issues:
 ```
 src/
 ├── lib.rs          18 行   ← #[pymodule] + mod 声明
-├── types.rs       116 行   ← PyreRequest, PyreResponse, extract_headers
+├── types.rs       116 行   ← Request, Response, extract_headers
 ├── json.rs         44 行   ← py_to_json_value (Rust-side JSON 序列化)
 ├── router.rs       70 行   ← RouteTable, SharedRoutes
 ├── response.rs    164 行   ← extract_response_data, build/error/404 response
 ├── handlers.rs    218 行   ← handle_request (GIL), handle_request_subinterp
 ├── static_fs.rs    69 行   ← try_static_file, mime_from_ext
-├── app.rs         342 行   ← PyreApp, run_gil(), run_subinterp()
+├── app.rs         342 行   ← PyronovaApp, run_gil(), run_subinterp()
 └── interp.rs      820 行   ← PyObjRef RAII, channel pool, AST filter
 ```
 
@@ -128,8 +128,8 @@ Benchmark: SubInterp 215k (channel pool, -0.5% vs mutex), GIL 104k (+3%), Robyn 
 2. `#[pymodule]` 的 `static` 状态 — 迁移到 `PyModule_GetState`（per-interpreter 隔离）
 
 改完后：
-- Pyre 自己的 `#[pymodule]` 能在子解释器中加载
-- `PyreRequest` 等 `#[pyclass]` 可以直接传入子解释器，不再需要 `_PyreRequest` 纯 Python 替身
+- Pyronova 自己的 `#[pymodule]` 能在子解释器中加载
+- `Request` 等 `#[pyclass]` 可以直接传入子解释器，不再需要 `_Request` 纯 Python 替身
 - 声明了 `Py_MOD_PER_INTERPRETER_GIL_SUPPORTED` 的第三方 C 扩展也能用（numpy、orjson 等正在逐步加这个声明）
 
 ### Step 3: 等待/贡献上游（长期）
@@ -175,7 +175,7 @@ Client ←WebSocket→ Tokio (async) ←channels→ Python handler thread (sync)
 ```
 
 - 每个 WebSocket 连接分配一个 OS 线程运行 Python handler
-- `PyreWebSocket` pyclass 提供 `recv()` (阻塞) / `send(msg)` / `close()` 接口
+- `WebSocket` pyclass 提供 `recv()` (阻塞) / `send(msg)` / `close()` 接口
 - 自动处理 Ping/Pong、连接关闭
 - 与 HTTP 路由共存，同一端口同时服务 HTTP + WebSocket
 - GIL 模式和 Hybrid 模式均支持
@@ -209,7 +209,7 @@ AI Agent 核心基础设施：token-by-token 流式输出。
 ```python
 @app.get("/stream", gil=True)
 def stream(req):
-    s = PyreStream()
+    s = Stream()
     def generate():
         for token in llm.generate(prompt):
             s.send_event(token)
@@ -220,13 +220,13 @@ def stream(req):
 
 **架构：**
 ```
-Python handler thread → PyreStream.send_event()
+Python handler thread → Stream.send_event()
                        → mpsc::UnboundedSender
                        → Tokio StreamBody (chunked transfer)
                        → HTTP client (EventSource)
 ```
 
-- `PyreStream` pyclass: `send(data)` / `send_event(data, event, id)` / `close()`
+- `Stream` pyclass: `send(data)` / `send_event(data, event, id)` / `close()`
 - 通道在 `__init__` 时创建，`send()` 立即可用（无需等待 connect）
 - `BoxBody` 统一响应类型（`Either<Full, StreamBody>`）
 - SSE 格式：`event: xxx\ndata: xxx\n\n`
@@ -234,7 +234,7 @@ Python handler thread → PyreStream.send_event()
 ### 已完成
 - [x] MCP Server 装饰器（`@app.mcp.tool()`、`@app.mcp.resource()`、`@app.mcp.prompt()`）
 - [x] WebSocket 二进制消息支持
-- [x] AST 过滤替换为环境变量方案 (`PYRE_WORKER=1`)
+- [x] AST 过滤替换为环境变量方案 (`PYRONOVA_WORKER=1`)
 - [x] Pydantic 自动绑定 (`model=` 参数)
 
 ### 待完成
@@ -254,7 +254,7 @@ Python handler thread → PyreStream.send_event()
 
 ### Phase 7.2: Native Async Bridge (DONE ✓)
 
-- [x] C-FFI bridge (`pyre_recv`/`pyre_send`) 释放 GIL 在 channel wait 期间
+- [x] C-FFI bridge (`pyronova_recv`/`pyronova_send`) 释放 GIL 在 channel wait 期间
 - [x] Dual worker pool: sync workers + async workers 自动检测分配
 - [x] 133k req/s on I/O-bound (sleep 1ms) — 超越 Robyn 92k
 
@@ -303,7 +303,7 @@ def auth(req):
     try:
         return json.loads(app.state[f"session:{req.params['user']}"])
     except KeyError:
-        return PyreResponse(body={"error": "unauthorized"}, status_code=401)
+        return Response(body={"error": "unauthorized"}, status_code=401)
 ```
 
 **跨路由数据共享（numpy 计算结果 → 其他路由读取）：**
@@ -339,7 +339,7 @@ def hit_counter(req):
 
 ### 架构优势 vs Redis
 
-| 维度 | Pyre SharedState | Redis |
+| 维度 | Pyronova SharedState | Redis |
 |------|-----------------|-------|
 | 延迟 | **纳秒级** (内存直读) | 毫秒级 (网络 I/O) |
 | 部署 | 零依赖 | 需要独立 Redis 进程 |
@@ -358,7 +358,7 @@ def hit_counter(req):
 ### 代码质量
 - [x] Bootstrap 脚本从 Rust 字符串抽离到 `_bootstrap.py` (via `include_str!`)
 - [x] 删除 `filter_script_ast` 死代码
-- [x] CORS/logging 从全局静态变量迁移到 `PyreApp` 实例字段
+- [x] CORS/logging 从全局静态变量迁移到 `PyronovaApp` 实例字段
 - [x] `PyObjRef::Drop` 加 `debug_assert!(PyGILState_Check())` GIL 安全断言
 - [x] `InterpreterPool::Drop` join worker threads (修复 Ctrl+C segfault)
 - [x] `cargo fmt` 全量格式化 + `cargo clippy` 32 个 warning 清零
@@ -416,6 +416,6 @@ def hit_counter(req):
 | 2026-03-24 | v0.4.0 | 215k | 104k | 83k | Phase 6: Native WebSocket + Hybrid GIL + 全面压测(54场景) |
 | 2026-03-24 | v0.4.0+ | 217k | 78k(47k IO) | 81k | spawn_blocking + 背压 + TCP_NODELAY, GIL IO +535%, 胜10/14场景 |
 | 2026-03-24 | v0.5.0 | — | 74k state | — | Phase 7 async + Phase 8 SharedState + DX (.pyi, async detect) |
-| 2026-03-24 | v0.5.0+ | — | — | — | Phase 6: SSE streaming (PyreStream) for AI Agent token output |
+| 2026-03-24 | v0.5.0+ | — | — | — | Phase 6: SSE streaming (Stream) for AI Agent token output |
 | 2026-03-24 | v0.5.0 | 217k/67MB | 53k/GIL=0μs | 81k/~440MB | GIL Watchdog + 内存监控, SubInterp GIL=0μs 验证, 内存 6.6x 优势 |
 | **2026-03-25** | **v1.2.0** | **215k/752KB** | — | — | **Phase 9: 64M req stability, 97 tests, zero clippy warnings** |

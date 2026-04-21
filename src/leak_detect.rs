@@ -7,7 +7,7 @@
 //!   The v1.4.5 investigation (see
 //!   docs/memory-leak-investigation-2026-04-19.md) turned on the fact
 //!   that CPython sub-interpreters under PEP 684 OWN_GIL do NOT run
-//!   Python-level finalizers. Every request's `_PyreRequest` dropped
+//!   Python-level finalizers. Every request's `_Request` dropped
 //!   with refcount 0 but its headers/params dicts stayed alive at
 //!   refcount >= 2 forever. A "refcount histogram at drop time" probe
 //!   exposed the fingerprint:
@@ -17,7 +17,7 @@
 //!
 //! How it works:
 //!   The hot path samples every `PyObjRef::Drop` call into a
-//!   `metrics::counter!("pyre_drop_rc", "type" => T, "rc" => N)`.
+//!   `metrics::counter!("pyronova_drop_rc", "type" => T, "rc" => N)`.
 //!   The `metrics` facade compiles the per-label counter down to a
 //!   single pointer chase into a `DebuggingRecorder`-owned atomic — no
 //!   mutex, no HashMap lookup, no string allocation on the hot path
@@ -28,21 +28,21 @@
 //!   maturin develop --release --features leak_detect
 //!   python examples/hello.py &
 //!   wrk -t4 -c100 -d10s http://127.0.0.1:8000/
-//!   python -c 'from pyreframework.engine import leak_detect_dump; leak_detect_dump()'
+//!   python -c 'from pyronova.engine import leak_detect_dump; leak_detect_dump()'
 //!
 //! or, inline in a test:
 //!
 //!   @app.get("/leak_dump")
 //!   def leak_dump(req):
-//!       from pyreframework.engine import leak_detect_dump
+//!       from pyronova.engine import leak_detect_dump
 //!       leak_detect_dump()
 //!       return "dumped"
 //!
 //! Output (stderr):
 //!
-//!   [leak_detect] pyre_drop_rc{type="dict",rc="2"} = 8_500_000
-//!   [leak_detect] pyre_drop_rc{type="str",rc="1"} = 15_200_000
-//!   [leak_detect] pyre_drop_rc{type="_PyreRequest",rc="1"} = 2_000_000
+//!   [leak_detect] pyronova_drop_rc{type="dict",rc="2"} = 8_500_000
+//!   [leak_detect] pyronova_drop_rc{type="str",rc="1"} = 15_200_000
+//!   [leak_detect] pyronova_drop_rc{type="_Request",rc="1"} = 2_000_000
 //!
 //! A type consistently showing at rc>=2 (other than values stored as
 //! instance attributes where that's expected) is the leak.
@@ -116,11 +116,11 @@ pub unsafe fn record_drop(ptr: *mut ffi::PyObject) {
     };
 
     let rc_label = rc_label(rc);
-    metrics::counter!("pyre_drop_rc", "type" => type_name, "rc" => rc_label).increment(1);
+    metrics::counter!("pyronova_drop_rc", "type" => type_name, "rc" => rc_label).increment(1);
 }
 
-/// Print a snapshot of the `pyre_drop_rc` counters to stderr. Called
-/// from Python via `pyreframework.engine.leak_detect_dump()` (the
+/// Print a snapshot of the `pyronova_drop_rc` counters to stderr. Called
+/// from Python via `pyronova.engine.leak_detect_dump()` (the
 /// function is registered in `lib.rs` only when this feature is on).
 pub fn dump_to_stderr() {
     let Some(snap) = SNAPSHOTTER.get() else {
@@ -138,7 +138,7 @@ pub fn dump_to_stderr() {
             };
             let _ = kind; // we only emit counters
             let name = key.key().name();
-            if name != "pyre_drop_rc" {
+            if name != "pyronova_drop_rc" {
                 return None;
             }
             let labels: Vec<String> = key
@@ -150,7 +150,7 @@ pub fn dump_to_stderr() {
         })
         .collect();
     rows.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
-    eprintln!("[leak_detect] --- pyre_drop_rc snapshot (top 30) ---");
+    eprintln!("[leak_detect] --- pyronova_drop_rc snapshot (top 30) ---");
     for (label, n) in rows.iter().take(30) {
         eprintln!("[leak_detect]   {label} = {n}");
     }

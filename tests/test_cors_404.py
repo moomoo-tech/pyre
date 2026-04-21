@@ -9,8 +9,8 @@ opaque CORS policy error.
 
 import urllib.request
 
-from pyreframework import Pyre
-from pyreframework.testing import TestClient
+from pyronova import Pyronova
+from pyronova.testing import TestClient
 
 
 def _request_with_cors(base: str, path: str, method: str = "GET"):
@@ -27,7 +27,7 @@ def _request_with_cors(base: str, path: str, method: str = "GET"):
 
 
 def test_404_carries_cors_headers():
-    app = Pyre()
+    app = Pyronova()
     app.enable_cors(
         allow_origins="https://app.example.com",
         allow_methods="GET, POST, OPTIONS",
@@ -50,7 +50,7 @@ def test_404_carries_cors_headers():
 def test_options_preflight_on_unknown_path_not_blocked():
     """Simulates a real CORS preflight for a path the dev forgot to register
     an OPTIONS handler for. The browser will see allow-origin and proceed."""
-    app = Pyre()
+    app = Pyronova()
     app.enable_cors(
         allow_origins="https://app.example.com",
         allow_methods="GET, POST, OPTIONS",
@@ -86,7 +86,7 @@ def test_static_file_hit_carries_cors():
         with open(css, "w") as f:
             f.write("body { margin: 0 }")
 
-        app = Pyre()
+        app = Pyronova()
         app.enable_cors(allow_origins="https://app.example.com")
         app.static("/static", tmpdir)
 

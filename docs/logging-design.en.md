@@ -1,8 +1,8 @@
-# Pyre Logging System Design
+# Pyronova Logging System Design
 
 ## Overview
 
-Pyre's logging system is built on two principles:
+Pyronova's logging system is built on two principles:
 1. **All I/O sinks to Rust** — Python never touches stdout/stderr directly for logs
 2. **Zero-cost when off** — `tracing` macros compile to an atomic level-check; when filtered out, no string formatting, no syscalls, no overhead
 
@@ -14,16 +14,16 @@ Pyre's logging system is built on two principles:
                     ┌─────────────────────────────────────┐
                     │         Rust tracing-subscriber      │
                     │   (EnvFilter + fmt::Layer)           │
-                    │   targets: pyre::server              │
-                    │            pyre::access              │
-                    │            pyre::app                 │
+                    │   targets: pyronova::server              │
+                    │            pyronova::access              │
+                    │            pyronova::app                 │
                     └──────┬─────────┬──────────┬──────────┘
                            │         │          │
               ┌────────────┘         │          └────────────┐
               │                      │                       │
      ┌────────▼────────┐   ┌────────▼────────┐    ┌────────▼────────┐
      │  Server Log     │   │  Access Log     │    │  App Log        │
-     │  pyre::server   │   │  pyre::access   │    │  pyre::app      │
+     │  pyronova::server   │   │  pyronova::access   │    │  pyronova::app      │
      │                 │   │                 │    │                 │
      │  - Startup      │   │  - method       │    │  - Python       │
      │  - Shutdown     │   │  - path         │    │    logging.*    │
@@ -38,36 +38,36 @@ Pyre's logging system is built on two principles:
 
 ## Three Log Targets
 
-### 1. `pyre::server` — Server Lifecycle
+### 1. `pyronova::server` — Server Lifecycle
 
 Startup, shutdown, watchdog alerts, connection errors.
 
 ```
-INFO  pyre::server Pyre started version="1.2.0" mode="hybrid" addr=127.0.0.1:8000
-INFO  pyre::server Shutting down gracefully...
-WARN  pyre::server GIL watchdog: main GIL congested latency_ms=52
-WARN  pyre::server Connection error error="connection reset by peer"
-ERROR pyre::server WebSocket upgrade error error="..."
+INFO  pyronova::server Pyronova started version="1.2.0" mode="hybrid" addr=127.0.0.1:8000
+INFO  pyronova::server Shutting down gracefully...
+WARN  pyronova::server GIL watchdog: main GIL congested latency_ms=52
+WARN  pyronova::server Connection error error="connection reset by peer"
+ERROR pyronova::server WebSocket upgrade error error="..."
 ```
 
-### 2. `pyre::access` — Request Access Log
+### 2. `pyronova::access` — Request Access Log
 
 Every HTTP request with method, path, status, latency, and execution mode.
 
 ```
-INFO  pyre::access Request handled method=GET path=/ status=200 latency_us=198 mode="subinterp"
-INFO  pyre::access Request handled method=POST path=/api/users status=201 latency_us=1542 mode="gil"
-WARN  pyre::access Client error method=GET path=/missing status=404 latency_us=12
-ERROR pyre::access Request failed method=POST path=/crash status=500 latency_us=892
+INFO  pyronova::access Request handled method=GET path=/ status=200 latency_us=198 mode="subinterp"
+INFO  pyronova::access Request handled method=POST path=/api/users status=201 latency_us=1542 mode="gil"
+WARN  pyronova::access Client error method=GET path=/missing status=404 latency_us=12
+ERROR pyronova::access Request failed method=POST path=/crash status=500 latency_us=892
 ```
 
-### 3. `pyre::app` — Python Application Logs
+### 3. `pyronova::app` — Python Application Logs
 
 User code `logging.info()` calls bridged from Python to Rust via FFI.
 
 ```
-INFO  pyre::app Fetching users from DB worker=3 logger=myapp file=app.py line=42
-ERROR pyre::app Database connection failed worker=7 logger=db file=models.py line=88
+INFO  pyronova::app Fetching users from DB worker=3 logger=myapp file=app.py line=42
+ERROR pyronova::app Database connection failed worker=7 logger=db file=models.py line=88
 ```
 
 ---
@@ -75,26 +75,26 @@ ERROR pyre::app Database connection failed worker=7 logger=db file=models.py lin
 ## Configuration API
 
 ```python
-from pyreframework import Pyre
+from pyronova import Pyronova
 
 # 1. Debug mode — full output, human-readable text
-app = Pyre(debug=True)
+app = Pyronova(debug=True)
 
 # 2. Production — errors only, JSON for ELK/Datadog
-app = Pyre()  # defaults: level=ERROR, access_log=False, format=json
+app = Pyronova()  # defaults: level=ERROR, access_log=False, format=json
 
 # 3. Custom — fine-grained control
-app = Pyre(log_config={
+app = Pyronova(log_config={
     "level": "INFO",        # OFF, ERROR, WARN, INFO, DEBUG, TRACE
     "access_log": True,     # enable per-request logging
     "format": "json",       # json | text
 })
 
 # 4. Silent mode — absolute zero overhead for benchmarks
-app = Pyre(log_config={"level": "OFF"})
+app = Pyronova(log_config={"level": "OFF"})
 
 # 5. enable_logging() — activates access log + Python hook output
-app = Pyre()
+app = Pyronova()
 app.enable_logging()       # upgrades level to INFO, enables access_log
 ```
 
@@ -102,8 +102,8 @@ app.enable_logging()       # upgrades level to INFO, enables access_log
 
 | Variable | Effect |
 |---|---|
-| `PYRE_LOG=1` | Auto-enable logging (equivalent to `app.enable_logging()`) |
-| `PYRE_METRICS=1` | Enable GIL watchdog (10ms probe interval) |
+| `PYRONOVA_LOG=1` | Auto-enable logging (equivalent to `app.enable_logging()`) |
+| `PYRONOVA_METRICS=1` | Enable GIL watchdog (10ms probe interval) |
 
 ---
 
@@ -115,11 +115,11 @@ Python's default `logging.StreamHandler` does synchronous `write()` to stderr wh
 
 ### Solution
 
-Pyre hijacks Python's root logger in both the main interpreter and every sub-interpreter:
+Pyronova hijacks Python's root logger in both the main interpreter and every sub-interpreter:
 
 **Main interpreter** (`app.py`):
 ```python
-class PyreRustHandler(logging.Handler):
+class PyronovaRustHandler(logging.Handler):
     def emit(self, record):
         emit_python_log(           # PyO3 FFI → Rust
             level=record.levelname,
@@ -132,9 +132,9 @@ class PyreRustHandler(logging.Handler):
 
 **Sub-interpreters** (`_bootstrap.py`):
 ```python
-class _PyreRustHandler(logging.Handler):
+class _PyronovaRustHandler(logging.Handler):
     def emit(self, record):
-        _pyre_emit_log(            # C-FFI → Rust (registered like pyre_recv/pyre_send)
+        _pyronova_emit_log(            # C-FFI → Rust (registered like pyronova_recv/pyronova_send)
             record.levelname,
             record.name,
             record.getMessage(),
@@ -167,7 +167,7 @@ class _PyreRustHandler(logging.Handler):
 | `src/lib.rs` | Registered `logging` module + functions |
 | `src/app.rs` | Startup/shutdown → `tracing::info!`, conn errors → `tracing::warn!` |
 | `src/handlers.rs` | Access log with `latency_us`, `method`, `path`, `status`, `mode` |
-| `src/interp.rs` | `pyre_emit_log_cfunc` C-FFI, registered in all sub-interpreters |
+| `src/interp.rs` | `pyronova_emit_log_cfunc` C-FFI, registered in all sub-interpreters |
 | `src/monitor.rs` | GIL watchdog → `tracing::warn!` |
 | `src/websocket.rs` | WS errors → `tracing::error!`/`tracing::warn!` |
 
@@ -175,13 +175,13 @@ class _PyreRustHandler(logging.Handler):
 
 1. **`EnvFilter` for zero-cost OFF** — When level is OFF or filtered, `tracing::info!` compiles to a single atomic load + branch. CPU branch predictor hits 100% after warmup.
 
-2. **Separate `pyre::access` target** — Allows users to disable access log while keeping server/app logs, or vice versa. Controlled by `access_log` config flag mapped to `pyre::access=off` directive.
+2. **Separate `pyronova::access` target** — Allows users to disable access log while keeping server/app logs, or vice versa. Controlled by `access_log` config flag mapped to `pyronova::access=off` directive.
 
-3. **C-FFI bridge for sub-interpreters** — Sub-interpreters can't import PyO3 extension modules. `_pyre_emit_log` is registered as a C-FFI built-in function (like `pyre_recv`/`pyre_send`), injected into globals before bootstrap runs.
+3. **C-FFI bridge for sub-interpreters** — Sub-interpreters can't import PyO3 extension modules. `_pyronova_emit_log` is registered as a C-FFI built-in function (like `pyronova_recv`/`pyronova_send`), injected into globals before bootstrap runs.
 
 4. **Deferred `init_logger` to `run()`** — Allows `enable_logging()` to modify log config before the tracing subscriber is locked in. `tracing-subscriber` only allows one initialization per process.
 
-5. **`println!` retained for startup banner** — The human-readable startup banner (`Pyre v1.2.0 [hybrid mode]...`) is kept as `println!` alongside `tracing::info!` because it's always-visible DX, not filterable log output.
+5. **`println!` retained for startup banner** — The human-readable startup banner (`Pyronova v1.2.0 [hybrid mode]...`) is kept as `println!` alongside `tracing::info!` because it's always-visible DX, not filterable log output.
 
 ---
 

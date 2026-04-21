@@ -15,8 +15,8 @@ use crate::response::{
 };
 use crate::router::FrozenRoutes;
 use crate::static_fs::try_static_file;
-use crate::stream::PyreStream;
-use crate::types::{extract_headers, PyreRequest, PyreResponse, ResponseData};
+use crate::stream::PyronovaStream;
+use crate::types::{extract_headers, PyronovaRequest, PyronovaResponse, ResponseData};
 
 type SharedPool = Arc<interp::InterpreterPool>;
 
@@ -37,8 +37,8 @@ fn max_body_size() -> usize {
 
 /// Result from handler: either a normal response or a stream.
 enum HandlerResult {
-    Response(Result<ResponseData, String>),
-    Stream(StreamInfo),
+    PyronovaResponse(Result<ResponseData, String>),
+    PyronovaStream(StreamInfo),
 }
 
 struct StreamInfo {
@@ -97,7 +97,7 @@ fn resolve_coroutine(py: Python<'_>, obj: Py<PyAny>) -> Result<Py<PyAny>, String
     // The canonical Python way — `inspect.isawaitable(obj)` — dispatches
     // through the inspect module, costing ~μs per call (import + attr
     // lookup + method call + refcount dance). On a hot per-request
-    // middleware path at 400k rps that's measurable — Pyre v1.4.5
+    // middleware path at 400k rps that's measurable — Pyronova v1.4.5
     // bench saw ~5% throughput loss from this single check.
     //
     // Instead, read the type's `tp_as_async->am_await` slot directly.
@@ -214,7 +214,7 @@ fn build_fast_response(
 }
 
 /// Feeder task for `stream=True` routes. Reads one hyper body frame at a
-/// time and pushes each data chunk into the `PyreBodyStream`'s mpsc channel.
+/// time and pushes each data chunk into the `PyronovaBodyStream`'s mpsc channel.
 /// Enforces `max_size` as a running total (defense against malicious
 /// unbounded uploads) and per-frame read timeout (Slowloris defense, same
 /// 30 s budget as the buffered path).
@@ -314,7 +314,7 @@ pub(crate) async fn handle_request(
 
     // Lazy headers: store raw HeaderMap, convert only if Python accesses req.headers.
     let raw_headers = req.headers().clone();
-    // Capture Accept-Encoding before raw_headers is moved into the PyreRequest.
+    // Capture Accept-Encoding before raw_headers is moved into the PyronovaRequest.
     let accept_encoding = raw_headers
         .get(hyper::header::ACCEPT_ENCODING)
         .and_then(|v| v.to_str().ok())
@@ -393,7 +393,7 @@ pub(crate) async fn handle_request(
 
     let method_log = Arc::clone(&method);
     let path_log = Arc::clone(&path);
-    let sky_req = PyreRequest {
+    let sky_req = PyronovaRequest {
         method,
         path,
         params,
@@ -412,16 +412,16 @@ pub(crate) async fn handle_request(
         call_handler_with_hooks(routes_ref, handler_idx, sky_req)
     })
     .await
-    .unwrap_or_else(|_| HandlerResult::Response(Err("handler thread panicked".to_string())));
+    .unwrap_or_else(|_| HandlerResult::PyronovaResponse(Err("handler thread panicked".to_string())));
 
     let mut resp = match handler_result {
-        HandlerResult::Response(mut result) => {
+        HandlerResult::PyronovaResponse(mut result) => {
             if let Ok(data) = result.as_mut() {
                 crate::compression::maybe_compress(data, &accept_encoding);
             }
             full_body(build_response(result)?)
         }
-        HandlerResult::Stream(info) => build_stream_response(info),
+        HandlerResult::PyronovaStream(info) => build_stream_response(info),
     };
 
     apply_cors(&mut resp, routes.cors_config.as_ref());
@@ -429,13 +429,13 @@ pub(crate) async fn handle_request(
     let status = resp.status().as_u16();
     if routes.request_logging {
         tracing::info!(
-            target: "pyre::access",
+            target: "pyronova::access",
             method = %method_log,
             path = %path_log,
             status,
             latency_us,
             mode = "gil",
-            "Request handled"
+            "PyronovaRequest handled"
         );
     }
     Ok(resp)
@@ -448,7 +448,7 @@ pub(crate) async fn handle_request(
 fn call_handler_with_hooks(
     routes: FrozenRoutes,
     handler_idx: usize,
-    sky_req: PyreRequest,
+    sky_req: PyronovaRequest,
 ) -> HandlerResult {
     use std::sync::atomic::Ordering::Relaxed;
 
@@ -489,18 +489,18 @@ fn call_handler_with_hooks(
                     let result = match resolve_coroutine(py, result) {
                         Ok(r) => r,
                         Err(e) => {
-                            return HandlerResult::Response(Err(format!(
+                            return HandlerResult::PyronovaResponse(Err(format!(
                                 "before_request hook error: {e}"
                             )))
                         }
                     };
                     let bound = result.bind(py);
                     if !bound.is_none() {
-                        return HandlerResult::Response(extract_response_data(py, bound.clone()));
+                        return HandlerResult::PyronovaResponse(extract_response_data(py, bound.clone()));
                     }
                 }
                 Err(e) => {
-                    return HandlerResult::Response(Err(format!("before_request hook error: {e}")))
+                    return HandlerResult::PyronovaResponse(Err(format!("before_request hook error: {e}")))
                 }
             }
         }
@@ -511,22 +511,22 @@ fn call_handler_with_hooks(
                 // If handler returned a coroutine (async def), run it via asyncio
                 let obj = match resolve_coroutine(py, obj) {
                     Ok(o) => o,
-                    Err(e) => return HandlerResult::Response(Err(e)),
+                    Err(e) => return HandlerResult::PyronovaResponse(Err(e)),
                 };
 
-                // Check if handler returned a PyreStream (SSE)
+                // Check if handler returned a PyronovaStream (SSE)
                 // Use is_instance_of — single C pointer compare, no string alloc.
                 let bound = obj.bind(py);
-                if bound.is_instance_of::<PyreStream>() {
-                    let stream_ref = match bound.cast::<PyreStream>() {
+                if bound.is_instance_of::<PyronovaStream>() {
+                    let stream_ref = match bound.cast::<PyronovaStream>() {
                         Ok(s) => s.get(),
-                        Err(e) => return HandlerResult::Response(Err(e.to_string())),
+                        Err(e) => return HandlerResult::PyronovaResponse(Err(e.to_string())),
                     };
                     let rx = match stream_ref.take_rx() {
                         Some(r) => r,
                         None => {
-                            return HandlerResult::Response(Err(
-                                "PyreStream already consumed".to_string()
+                            return HandlerResult::PyronovaResponse(Err(
+                                "PyronovaStream already consumed".to_string()
                             ))
                         }
                     };
@@ -534,7 +534,7 @@ fn call_handler_with_hooks(
                     let status = stream_ref.status_code;
                     let hdrs = stream_ref.headers.clone();
 
-                    return HandlerResult::Stream(StreamInfo {
+                    return HandlerResult::PyronovaStream(StreamInfo {
                         rx,
                         content_type,
                         status,
@@ -555,14 +555,14 @@ fn call_handler_with_hooks(
                         };
                         let current_resp = Py::new(
                             py,
-                            PyreResponse {
+                            PyronovaResponse {
                                 body: body_py,
                                 status_code: resp_data.status,
                                 content_type: Some(resp_data.content_type.clone()),
                                 headers: resp_data.headers.clone(),
                             },
                         )
-                        .map_err(|e| format!("failed to create PyreResponse: {e}"))?;
+                        .map_err(|e| format!("failed to create PyronovaResponse: {e}"))?;
                         match hook.call1(py, (sky_req.clone(), current_resp)) {
                             Ok(result) => {
                                 // Resolve awaitables from async after_request
@@ -580,7 +580,7 @@ fn call_handler_with_hooks(
 
                     Ok(resp_data)
                 })();
-                HandlerResult::Response(resp)
+                HandlerResult::PyronovaResponse(resp)
             }
             Err(e) => {
                 // Log the full PyErr (includes traceback via PyErr_Print
@@ -588,14 +588,14 @@ fn call_handler_with_hooks(
                 // Previously `{e}` forwarded a one-line repr back to the
                 // client with zero operator-visible traceback AND leaked
                 // internal paths to the caller. Keep the client response
-                // generic; the real diagnostic lives in pyre::server logs.
+                // generic; the real diagnostic lives in pyronova::server logs.
                 e.display(py);
                 tracing::error!(
-                    target: "pyre::server",
+                    target: "pyronova::server",
                     error = %e,
                     "handler raised an exception",
                 );
-                HandlerResult::Response(Err("handler error".to_string()))
+                HandlerResult::PyronovaResponse(Err("handler error".to_string()))
             }
         };
 
@@ -820,7 +820,7 @@ pub(crate) async fn handle_request_subinterp(
         } else {
             body_bytes
         };
-        let sky_req = PyreRequest {
+        let sky_req = PyronovaRequest {
             method,
             path,
             params,
@@ -838,29 +838,29 @@ pub(crate) async fn handle_request_subinterp(
             call_handler_with_hooks(routes_ref, handler_idx, sky_req)
         })
         .await
-        .unwrap_or_else(|_| HandlerResult::Response(Err("handler thread panicked".to_string())));
+        .unwrap_or_else(|_| HandlerResult::PyronovaResponse(Err("handler thread panicked".to_string())));
 
         let mut resp = match handler_result {
-            HandlerResult::Response(mut result) => {
+            HandlerResult::PyronovaResponse(mut result) => {
                 if let Ok(data) = result.as_mut() {
                     crate::compression::maybe_compress(data, &accept_encoding);
                 }
                 full_body(build_response(result)?)
             }
-            HandlerResult::Stream(info) => build_stream_response(info),
+            HandlerResult::PyronovaStream(info) => build_stream_response(info),
         };
         apply_cors(&mut resp, routes.cors_config.as_ref());
         let latency_us = start.elapsed().as_micros() as u64;
         let status = resp.status().as_u16();
         if routes.request_logging {
             tracing::info!(
-                target: "pyre::access",
+                target: "pyronova::access",
                 method = %method_log,
                 path = %path_log,
                 status,
                 latency_us,
                 mode = "gil",
-                "Request handled"
+                "PyronovaRequest handled"
             );
         }
         return Ok(resp);
@@ -941,13 +941,13 @@ pub(crate) async fn handle_request_subinterp(
     let status = http_resp.status().as_u16();
     if routes.request_logging {
         tracing::info!(
-            target: "pyre::access",
+            target: "pyronova::access",
             method = %method_log,
             path = %path_log,
             status,
             latency_us,
             mode = "subinterp",
-            "Request handled"
+            "PyronovaRequest handled"
         );
     }
     Ok(http_resp)

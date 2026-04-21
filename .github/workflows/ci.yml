@@ -89,7 +89,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # pyo3-ffi gates PyThreadState_GetUnchecked on cfg(Py_3_13); Pyre
+      # pyo3-ffi gates PyThreadState_GetUnchecked on cfg(Py_3_13); Pyronova
       # requires it. Without pinning an interpreter, the runner's
       # default python3 (typically 3.11/3.12) is picked up and clippy
       # fails with E0425 on a missing ffi symbol.

@@ -47,7 +47,7 @@ fn runtime() -> &'static Runtime {
     PG_RUNTIME.get_or_init(|| {
         tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
-            .thread_name("pyre-db")
+            .thread_name("pyronova-db")
             .enable_all()
             .build()
             .expect("failed to build pg runtime")
@@ -188,7 +188,7 @@ fn column_to_py(py: Python<'_>, value: PgValueRef<'_>) -> PyResult<Py<PyAny>> {
         // types like UUID (16-byte big-endian), TIMESTAMP (8-byte micros),
         // INET (tagged variable), etc. — sqlx returns a decode error and
         // the whole query bubbles up as PyRuntimeError, so any table with
-        // a UUID column became un-queryable via Pyre.
+        // a UUID column became un-queryable via Pyronova.
         //
         // New fallback: try String first (covers extensions like citext,
         // ltree, tsvector that really are text), and on failure return the
@@ -389,7 +389,7 @@ impl PgPool {
         }
     }
 
-    /// Stream rows one at a time via an iterator cursor — keeps memory
+    /// PyronovaStream rows one at a time via an iterator cursor — keeps memory
     /// O(1) instead of fetch_all's O(2N) peak (Rust Vec<PgRow> plus
     /// Python list<dict> both alive simultaneously during conversion).
     ///

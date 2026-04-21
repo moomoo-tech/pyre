@@ -2,7 +2,7 @@
 
 Usage::
 
-    from pyreframework.uploads import parse_multipart
+    from pyronova.uploads import parse_multipart
 
     @app.post("/upload")
     def upload(req):

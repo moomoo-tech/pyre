@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Pyre Logging Performance Benchmark
+# Pyronova Logging Performance Benchmark
 # Compares 4 logging configurations under identical load:
 #   1. No logging (level=OFF) — baseline
 #   2. Server log only (level=ERROR) — default production
@@ -33,7 +33,7 @@ trap cleanup EXIT
 cleanup 2>/dev/null
 
 echo "============================================================"
-echo "  Pyre Logging Performance Benchmark"
+echo "  Pyronova Logging Performance Benchmark"
 echo "  wrk -t${THREADS} -c${CONNECTIONS} -d${DURATION}"
 echo "  $(date '+%Y-%m-%d %H:%M:%S')"
 echo "============================================================"
@@ -41,9 +41,9 @@ echo "============================================================"
 # --- Generate 4 server scripts ---
 
 # 1. No logging (level=OFF)
-cat > /tmp/pyre_bench_log_off.py << 'PYEOF'
-from pyreframework import Pyre
-app = Pyre(log_config={"level": "OFF"})
+cat > /tmp/pyronova_bench_log_off.py << 'PYEOF'
+from pyronova import Pyronova
+app = Pyronova(log_config={"level": "OFF"})
 
 @app.get("/")
 def index(req): return {"status": "ok"}
@@ -52,9 +52,9 @@ app.run(host="127.0.0.1", port=18889)
 PYEOF
 
 # 2. Server log only (level=ERROR, no access log) — default production
-cat > /tmp/pyre_bench_log_error.py << 'PYEOF'
-from pyreframework import Pyre
-app = Pyre()  # defaults: level=ERROR, access_log=False
+cat > /tmp/pyronova_bench_log_error.py << 'PYEOF'
+from pyronova import Pyronova
+app = Pyronova()  # defaults: level=ERROR, access_log=False
 
 @app.get("/")
 def index(req): return {"status": "ok"}
@@ -63,9 +63,9 @@ app.run(host="127.0.0.1", port=18889)
 PYEOF
 
 # 3. Access log enabled (tracing access log on every request)
-cat > /tmp/pyre_bench_log_access.py << 'PYEOF'
-from pyreframework import Pyre
-app = Pyre(log_config={"level": "INFO", "access_log": True, "format": "text"})
+cat > /tmp/pyronova_bench_log_access.py << 'PYEOF'
+from pyronova import Pyronova
+app = Pyronova(log_config={"level": "INFO", "access_log": True, "format": "text"})
 
 @app.get("/")
 def index(req): return {"status": "ok"}
@@ -74,12 +74,12 @@ app.run(host="127.0.0.1", port=18889)
 PYEOF
 
 # 4. User logging (Python logging.info() in every request handler)
-cat > /tmp/pyre_bench_log_user.py << 'PYEOF'
+cat > /tmp/pyronova_bench_log_user.py << 'PYEOF'
 import logging
 logger = logging.getLogger("bench")
 
-from pyreframework import Pyre
-app = Pyre(log_config={"level": "INFO", "access_log": True, "format": "text"})
+from pyronova import Pyronova
+app = Pyronova(log_config={"level": "INFO", "access_log": True, "format": "text"})
 
 @app.get("/")
 def index(req):
@@ -147,28 +147,28 @@ echo "============================================================"
 echo "  Config 1: No Logging (level=OFF)"
 echo "  Zero-cost baseline — tracing macros skip entirely"
 echo "============================================================"
-run_bench "OFF" /tmp/pyre_bench_log_off.py
+run_bench "OFF" /tmp/pyronova_bench_log_off.py
 
 echo ""
 echo "============================================================"
 echo "  Config 2: Server Log Only (level=ERROR)"
 echo "  Default production — only errors reach the writer"
 echo "============================================================"
-run_bench "ERROR" /tmp/pyre_bench_log_error.py
+run_bench "ERROR" /tmp/pyronova_bench_log_error.py
 
 echo ""
 echo "============================================================"
 echo "  Config 3: Access Log Enabled (level=INFO + access_log)"
 echo "  Every request logged: method, path, status, latency_us"
 echo "============================================================"
-run_bench "ACCESS" /tmp/pyre_bench_log_access.py
+run_bench "ACCESS" /tmp/pyronova_bench_log_access.py
 
 echo ""
 echo "============================================================"
 echo "  Config 4: Access Log + User Logging (Python logging.info)"
 echo "  Access log + one logging.info() call per request via FFI"
 echo "============================================================"
-run_bench "USER_LOG" /tmp/pyre_bench_log_user.py
+run_bench "USER_LOG" /tmp/pyronova_bench_log_user.py
 
 echo ""
 echo "============================================================"

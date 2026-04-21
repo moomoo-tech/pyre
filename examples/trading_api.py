@@ -1,5 +1,5 @@
 """
-Trading Data API — demonstrates Pyre for quantitative finance.
+Trading Data API — demonstrates Pyronova for quantitative finance.
 
 Features used:
   - numpy + pandas computation (gil=True hybrid dispatch)
@@ -30,8 +30,8 @@ Test:
 
   # RPC call
   python -c "
-  from pyreframework import PyreRPCClient
-  with PyreRPCClient('http://127.0.0.1:8000') as c:
+  from pyronova import RPCClient
+  with RPCClient('http://127.0.0.1:8000') as c:
       print(c.get_signals(tickers=['AAPL', 'TSLA']))
   "
 """
@@ -41,9 +41,9 @@ import time
 import random
 import threading
 from pydantic import BaseModel, Field
-from pyreframework import Pyre, PyreResponse
+from pyronova import Pyronova, Response
 
-app = Pyre()
+app = Pyronova()
 app.enable_cors()
 app.enable_logging()
 
@@ -106,7 +106,7 @@ def init_market_data():
 @app.get("/")
 def index(req):
     return {
-        "service": "Pyre Trading API",
+        "service": "Pyronova Trading API",
         "tickers": TICKERS,
         "endpoints": [
             "GET /market/{ticker} — live price quote",

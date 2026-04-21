@@ -1,4 +1,4 @@
-//! Pyre logging engine — zero-cost tracing with non-blocking I/O.
+//! Pyronova logging engine — zero-cost tracing with non-blocking I/O.
 //!
 //! Provides:
 //! - `init_logger`: configures tracing-subscriber with non-blocking writer
@@ -32,10 +32,10 @@ struct LoggerState {
 
 static LOGGER: OnceLock<LoggerState> = OnceLock::new();
 
-/// Initialize the Rust tracing engine. Called once at Pyre startup.
+/// Initialize the Rust tracing engine. Called once at Pyronova startup.
 ///
 /// - `level`: filter string — "OFF", "ERROR", "WARN", "INFO", "DEBUG", "TRACE"
-/// - `access_log`: if false, suppresses all `pyre::access` target logs
+/// - `access_log`: if false, suppresses all `pyronova::access` target logs
 /// - `format`: "json" for structured output, anything else for human-readable text
 #[pyfunction]
 #[pyo3(signature = (level, access_log, format))]
@@ -44,7 +44,7 @@ pub fn init_logger(level: String, access_log: bool, format: String) -> PyResult<
 
     // Suppress access log target when disabled
     if !access_log {
-        if let Ok(directive) = "pyre::access=off".parse() {
+        if let Ok(directive) = "pyronova::access=off".parse() {
             filter = filter.add_directive(directive);
         }
     }
@@ -87,11 +87,11 @@ pub fn init_logger(level: String, access_log: bool, format: String) -> PyResult<
 
     if result.is_ok() {
         tracing::info!(
-            target: "pyre::server",
+            target: "pyronova::server",
             level = %level,
             access_log = access_log,
             format = %format,
-            "Pyre tracing engine initialized"
+            "Pyronova tracing engine initialized"
         );
     }
     // Silently ignore if already initialized (hot reload, tests)
@@ -101,7 +101,7 @@ pub fn init_logger(level: String, access_log: bool, format: String) -> PyResult<
 
 /// Receive a Python logging record and route it through Rust tracing.
 ///
-/// Called from `PyreRustHandler.emit()` in each interpreter (main + sub-interpreters).
+/// Called from `PyronovaRustHandler.emit()` in each interpreter (main + sub-interpreters).
 /// The actual filtering is done by `EnvFilter` — Python side sets level=DEBUG
 /// to let everything through, Rust decides what to keep.
 #[pyfunction]
@@ -121,7 +121,7 @@ pub fn emit_python_log(
     match level.as_str() {
         "DEBUG" => {
             tracing::debug!(
-                target: "pyre::app",
+                target: "pyronova::app",
                 worker = wid,
                 logger = %name,
                 file = %pathname,
@@ -131,7 +131,7 @@ pub fn emit_python_log(
         }
         "INFO" => {
             tracing::info!(
-                target: "pyre::app",
+                target: "pyronova::app",
                 worker = wid,
                 logger = %name,
                 file = %pathname,
@@ -141,7 +141,7 @@ pub fn emit_python_log(
         }
         "WARNING" => {
             tracing::warn!(
-                target: "pyre::app",
+                target: "pyronova::app",
                 worker = wid,
                 logger = %name,
                 file = %pathname,
@@ -151,7 +151,7 @@ pub fn emit_python_log(
         }
         "ERROR" | "CRITICAL" => {
             tracing::error!(
-                target: "pyre::app",
+                target: "pyronova::app",
                 worker = wid,
                 logger = %name,
                 file = %pathname,
@@ -161,7 +161,7 @@ pub fn emit_python_log(
         }
         _ => {
             tracing::trace!(
-                target: "pyre::app",
+                target: "pyronova::app",
                 worker = wid,
                 logger = %name,
                 file = %pathname,

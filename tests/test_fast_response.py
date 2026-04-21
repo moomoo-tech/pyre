@@ -2,12 +2,12 @@
 entirely from the Rust accept loop, no Python dispatch.
 """
 
-from pyreframework import Pyre
-from pyreframework.testing import TestClient
+from pyronova import Pyronova
+from pyronova.testing import TestClient
 
 
 def test_fast_plain():
-    app = Pyre()
+    app = Pyronova()
 
     @app.get("/")
     def root(req):
@@ -35,7 +35,7 @@ def test_fast_plain():
 
 
 def test_fast_status_and_headers():
-    app = Pyre()
+    app = Pyronova()
 
     @app.get("/")
     def root(req):
@@ -59,7 +59,7 @@ def test_fast_status_and_headers():
 def test_fast_does_not_interfere_with_dynamic():
     """A fast response on one path must not shadow a dynamic handler
     on a different path of the same method."""
-    app = Pyre()
+    app = Pyronova()
 
     @app.get("/")
     def root(req):
@@ -78,7 +78,7 @@ def test_fast_does_not_interfere_with_dynamic():
 
 def test_fast_exact_match_only():
     """Fast responses match (method, path) exactly — no path globbing."""
-    app = Pyre()
+    app = Pyronova()
 
     @app.get("/")
     def root(req):
@@ -98,13 +98,13 @@ def test_fast_exact_match_only():
         assert c.post("/health", body=b"").body == b"posted"
 
 
-def test_bytes_body_fast_path_in_pyre_response():
-    """PyreResponse with a bytes body takes the fast cast::<PyBytes>
+def test_bytes_body_fast_path_in_pyronova_response():
+    """Response with a bytes body takes the fast cast::<PyBytes>
     path instead of Vec<u8> extraction. Smoke test: the response still
     round-trips correctly."""
-    from pyreframework import PyreResponse
+    from pyronova import Response
 
-    app = Pyre()
+    app = Pyronova()
 
     @app.get("/")
     def root(req):
@@ -112,7 +112,7 @@ def test_bytes_body_fast_path_in_pyre_response():
 
     @app.get("/raw")
     def raw(req):
-        return PyreResponse(b"\x00\x01\x02\xff", content_type="application/octet-stream")
+        return Response(b"\x00\x01\x02\xff", content_type="application/octet-stream")
 
     with TestClient(app, port=None) as c:
         r = c.get("/raw")

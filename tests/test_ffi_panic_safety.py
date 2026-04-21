@@ -2,7 +2,7 @@
 
 Since Rust 1.81 a panic crossing an `extern "C"` boundary aborts the
 process (was UB before). Either way: a .unwrap() on a poisoned Mutex
-or an unexpected None in pyre_recv / pyre_send / pyre_emit_log would
+or an unexpected None in pyronova_recv / pyronova_send / pyronova_emit_log would
 take the whole server down at the worst possible moment.
 
 Fix: each FFI entry point is now a one-line `extern "C"` wrapper that
@@ -39,8 +39,8 @@ def test_ffi_catch_unwind_helper_defined():
 def test_all_three_ffi_entry_points_guarded():
     src = pathlib.Path("src/interp.rs").read_text()
     # The 3 functions registered into sub-interpreter globals as
-    # _pyre_recv / _pyre_send / _pyre_emit_log.
-    ffi_fns = ["pyre_recv_cfunc", "pyre_send_cfunc", "pyre_emit_log_cfunc"]
+    # _pyronova_recv / _pyronova_send / _pyronova_emit_log.
+    ffi_fns = ["pyronova_recv_cfunc", "pyronova_send_cfunc", "pyronova_emit_log_cfunc"]
     for fn in ffi_fns:
         idx = src.find(f'unsafe extern "C" fn {fn}')
         assert idx != -1, f"entry point {fn} not found"

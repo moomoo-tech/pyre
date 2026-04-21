@@ -30,9 +30,9 @@ def plot_throughput_comparison(results: list, output_dir: Path):
             scenarios.append(r["scenario_id"])
 
     colors = {
-        "pyre_subinterp": "#2196F3",
-        "pyre_hybrid": "#4CAF50",
-        "pyre_gil": "#FF9800",
+        "pyronova_subinterp": "#2196F3",
+        "pyronova_hybrid": "#4CAF50",
+        "pyronova_gil": "#FF9800",
         "robyn": "#F44336",
     }
 
@@ -77,9 +77,9 @@ def plot_latency_comparison(results: list, output_dir: Path):
             scenarios.append(r["scenario_id"])
 
     colors = {
-        "pyre_subinterp": "#2196F3",
-        "pyre_hybrid": "#4CAF50",
-        "pyre_gil": "#FF9800",
+        "pyronova_subinterp": "#2196F3",
+        "pyronova_hybrid": "#4CAF50",
+        "pyronova_gil": "#FF9800",
         "robyn": "#F44336",
     }
 
@@ -114,25 +114,25 @@ def plot_latency_comparison(results: list, output_dir: Path):
     print(f"  Chart: {output_dir / 'latency.png'}")
 
 
-def plot_pyre_radar(results: list, output_dir: Path):
-    """Pyre vs Robyn win/loss summary."""
-    pyre_best = {}  # scenario → best pyre req/s
+def plot_pyronova_radar(results: list, output_dir: Path):
+    """Pyronova vs Robyn win/loss summary."""
+    pyronova_best = {}  # scenario → best pyronova req/s
     robyn_vals = {}
 
     for r in results:
         sid = r["scenario_id"]
         rps = r["high_concurrency"]["req_per_sec"]
-        if r["framework"].startswith("pyre"):
-            if sid not in pyre_best or rps > pyre_best[sid]:
-                pyre_best[sid] = rps
+        if r["framework"].startswith("pyronova"):
+            if sid not in pyronova_best or rps > pyronova_best[sid]:
+                pyronova_best[sid] = rps
         elif r["framework"] == "robyn":
             robyn_vals[sid] = rps
 
-    common = sorted(set(pyre_best) & set(robyn_vals))
+    common = sorted(set(pyronova_best) & set(robyn_vals))
     if not common:
         return
 
-    ratios = [pyre_best[s] / max(robyn_vals[s], 1) for s in common]
+    ratios = [pyronova_best[s] / max(robyn_vals[s], 1) for s in common]
     names = []
     for sid in common:
         match = [r for r in results if r["scenario_id"] == sid]
@@ -142,8 +142,8 @@ def plot_pyre_radar(results: list, output_dir: Path):
     colors_bar = ["#4CAF50" if r >= 1.0 else "#F44336" for r in ratios]
     bars = ax.barh(names, ratios, color=colors_bar)
     ax.axvline(x=1.0, color="black", linewidth=1, linestyle="--", label="Parity (1.0x)")
-    ax.set_xlabel("Pyre / Robyn Ratio")
-    ax.set_title("Pyre vs Robyn — Per-Scenario Speedup")
+    ax.set_xlabel("Pyronova / Robyn Ratio")
+    ax.set_title("Pyronova vs Robyn — Per-Scenario Speedup")
 
     for bar, ratio in zip(bars, ratios):
         ax.text(bar.get_width() + 0.05, bar.get_y() + bar.get_height() / 2,
@@ -151,9 +151,9 @@ def plot_pyre_radar(results: list, output_dir: Path):
 
     ax.legend()
     plt.tight_layout()
-    plt.savefig(output_dir / "pyre_vs_robyn.png", dpi=150)
+    plt.savefig(output_dir / "pyronova_vs_robyn.png", dpi=150)
     plt.close()
-    print(f"  Chart: {output_dir / 'pyre_vs_robyn.png'}")
+    print(f"  Chart: {output_dir / 'pyronova_vs_robyn.png'}")
 
 
 def generate_charts(results_dir: str | Path):
@@ -167,7 +167,7 @@ def generate_charts(results_dir: str | Path):
     print(f"\n  Generating charts in {charts_dir}/")
     plot_throughput_comparison(results, charts_dir)
     plot_latency_comparison(results, charts_dir)
-    plot_pyre_radar(results, charts_dir)
+    plot_pyronova_radar(results, charts_dir)
     print(f"  Done! {len(list(charts_dir.glob('*.png')))} charts generated.\n")
 
 

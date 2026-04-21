@@ -87,14 +87,14 @@ async fn handle_accept_error(e: &std::io::Error) {
     let backoff_ms = match e.raw_os_error() {
         Some(libc::EMFILE) | Some(libc::ENFILE) | Some(libc::ENOBUFS) | Some(libc::ENOMEM) => {
             tracing::error!(
-                target: "pyre::server",
+                target: "pyronova::server",
                 error = %e,
                 "accept() resource exhaustion — backing off 250ms",
             );
             250
         }
         _ => {
-            tracing::warn!(target: "pyre::server", error = %e, "accept() error");
+            tracing::warn!(target: "pyronova::server", error = %e, "accept() error");
             10
         }
     };
@@ -102,7 +102,7 @@ async fn handle_accept_error(e: &std::io::Error) {
 }
 
 #[pyclass]
-pub(crate) struct PyreApp {
+pub(crate) struct PyronovaApp {
     routes: MutableRoutes,
     script_path: Option<String>,
     shared_state: Arc<dashmap::DashMap<String, bytes::Bytes>>,
@@ -113,10 +113,10 @@ pub(crate) struct PyreApp {
 }
 
 #[pymethods]
-impl PyreApp {
+impl PyronovaApp {
     #[new]
     fn new() -> Self {
-        PyreApp {
+        PyronovaApp {
             routes: Arc::new(parking_lot::RwLock::new(RouteTable::new())),
             script_path: None,
             shared_state: Arc::new(dashmap::DashMap::new()),
@@ -159,7 +159,7 @@ impl PyreApp {
         // looks first.
         if allow_credentials && origin.trim() == "*" {
             tracing::warn!(
-                target: "pyre::server",
+                target: "pyronova::server",
                 "CORS misconfiguration: origin=\"*\" with allow_credentials=true is rejected by all \
                  major browsers (W3C Fetch spec). Configure a concrete origin (e.g. \"https://app.example.com\") \
                  when credentials are enabled."
@@ -384,15 +384,15 @@ impl PyreApp {
         tls_cert: Option<&str>,
         tls_key: Option<&str>,
     ) -> PyResult<()> {
-        // Start RSS sampler (once, opt-in via PYRE_METRICS=1).
+        // Start RSS sampler (once, opt-in via PYRONOVA_METRICS=1).
         // GIL contention is now measured passively on the request path —
         // no active watchdog thread needed (zero observer-effect overhead).
         use std::sync::Once;
         static METRICS_INIT: Once = Once::new();
         METRICS_INIT.call_once(|| {
-            if std::env::var("PYRE_METRICS").unwrap_or_default() == "1" {
+            if std::env::var("PYRONOVA_METRICS").unwrap_or_default() == "1" {
                 crate::monitor::spawn_rss_sampler();
-                tracing::info!(target: "pyre::server", "Metrics enabled (PYRE_METRICS=1): passive GIL monitor + RSS sampler");
+                tracing::info!(target: "pyronova::server", "Metrics enabled (PYRONOVA_METRICS=1): passive GIL monitor + RSS sampler");
             }
         });
 
@@ -475,7 +475,7 @@ impl PyreApp {
     }
 }
 
-impl PyreApp {
+impl PyronovaApp {
     #[allow(clippy::too_many_arguments)]
     fn add_route(
         &mut self,
@@ -539,16 +539,16 @@ impl PyreApp {
             "http"
         };
         tracing::info!(
-            target: "pyre::server",
+            target: "pyronova::server",
             version = env!("CARGO_PKG_VERSION"),
             %addr,
             io_workers,
             cpus = num_cpus,
             mode = "gil",
             tls = tls_acceptor.is_some(),
-            "Pyre started"
+            "Pyronova started"
         );
-        println!("\n  Pyre v{}", env!("CARGO_PKG_VERSION"));
+        println!("\n  Pyronova v{}", env!("CARGO_PKG_VERSION"));
         println!("  Listening on {scheme}://{addr}");
         println!("  IO workers: {io_workers} (CPUs: {num_cpus})\n");
 
@@ -618,7 +618,7 @@ impl PyreApp {
                                             Some(acc) => match crate::tls::wrap_tls(&acc, stream).await {
                                                 Ok(s) => s,
                                                 Err(e) => {
-                                                    tracing::warn!(target: "pyre::server", error = %e, "TLS handshake failed");
+                                                    tracing::warn!(target: "pyronova::server", error = %e, "TLS handshake failed");
                                                     return;
                                                 }
                                             },
@@ -649,7 +649,7 @@ impl PyreApp {
                                                             && !msg.contains("reset by peer")
                                                             && !msg.contains("broken pipe")
                                                         {
-                                                            tracing::warn!(target: "pyre::server", error = %e, "Connection error");
+                                                            tracing::warn!(target: "pyronova::server", error = %e, "Connection error");
                                                         }
                                                     }
                                                     break;
@@ -673,7 +673,7 @@ impl PyreApp {
                 }
 
                 signal::ctrl_c().await.ok();
-                tracing::info!(target: "pyre::server", "Shutting down gracefully...");
+                tracing::info!(target: "pyronova::server", "Shutting down gracefully...");
                 println!("\n  Shutting down gracefully...");
                 crate::monitor::stop_rss_sampler();
                 shutdown_token.cancel();
@@ -685,7 +685,7 @@ impl PyreApp {
                 const DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
                 if tokio::time::timeout(DRAIN_TIMEOUT, conn_tracker.wait()).await.is_err() {
                     tracing::warn!(
-                        target: "pyre::server",
+                        target: "pyronova::server",
                         "{} in-flight connections did not drain within {:?} — exiting anyway",
                         conn_tracker.len(),
                         DRAIN_TIMEOUT,
@@ -738,7 +738,7 @@ impl PyreApp {
         let has_async = async_count_routes > 0;
         let mode_label = if has_async { "hybrid-async" } else { "hybrid" };
         tracing::info!(
-            target: "pyre::server",
+            target: "pyronova::server",
             version = env!("CARGO_PKG_VERSION"),
             mode = mode_label,
             %addr,
@@ -747,10 +747,10 @@ impl PyreApp {
             subinterp_routes = subinterp_count,
             gil_routes = gil_count,
             async_routes = async_count_routes,
-            "Pyre started"
+            "Pyronova started"
         );
         println!(
-            "\n  Pyre v{} [{mode_label} mode]",
+            "\n  Pyronova v{} [{mode_label} mode]",
             env!("CARGO_PKG_VERSION")
         );
         let scheme = if tls_acceptor.is_some() {
@@ -847,7 +847,7 @@ impl PyreApp {
                                             Some(acc) => match crate::tls::wrap_tls(&acc, stream).await {
                                                 Ok(s) => s,
                                                 Err(e) => {
-                                                    tracing::warn!(target: "pyre::server", error = %e, "TLS handshake failed");
+                                                    tracing::warn!(target: "pyronova::server", error = %e, "TLS handshake failed");
                                                     return;
                                                 }
                                             },
@@ -879,7 +879,7 @@ impl PyreApp {
                                                             && !msg.contains("reset by peer")
                                                             && !msg.contains("broken pipe")
                                                         {
-                                                            tracing::warn!(target: "pyre::server", error = %e, "Connection error");
+                                                            tracing::warn!(target: "pyronova::server", error = %e, "Connection error");
                                                         }
                                                     }
                                                     break;
@@ -899,7 +899,7 @@ impl PyreApp {
                 }
 
                 signal::ctrl_c().await.ok();
-                tracing::info!(target: "pyre::server", "Shutting down gracefully...");
+                tracing::info!(target: "pyronova::server", "Shutting down gracefully...");
                 println!("\n  Shutting down gracefully...");
                 crate::monitor::stop_rss_sampler();
                 shutdown_token.cancel();
@@ -907,7 +907,7 @@ impl PyreApp {
                 const DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
                 if tokio::time::timeout(DRAIN_TIMEOUT, conn_tracker.wait()).await.is_err() {
                     tracing::warn!(
-                        target: "pyre::server",
+                        target: "pyronova::server",
                         "{} in-flight connections did not drain within {:?} — exiting anyway",
                         conn_tracker.len(),
                         DRAIN_TIMEOUT,

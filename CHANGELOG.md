@@ -1,5 +1,61 @@
 # Changelog
 
+## v2.0.0 (2026-04-21) — Rename to Pyronova
+
+Project rename — `pyreframework` → `pyronova`, brand `Pyre` → `Pyronova`.
+Clean break, no alias. All downstream users must update imports. This is
+a rename-only release — no behavioral changes.
+
+### Why
+
+"Pyre" collided with Meta's widely-used Pyre type checker. After a round
+of name-collision research (PyPI availability + GitHub hit count), we
+settled on **Pyronova** — retains the fire theme, encodes "Python +
+Rust + nova (explosive newness)", single GitHub collision, free on
+PyPI. See the rename PR description for the full candidate shortlist.
+
+### Breaking — import surface
+
+- PyPI package: `pip install pyronova` (was `pyreframework`).
+- Main class: `from pyronova import Pyronova` (was `from pyreframework
+  import Pyre`).
+- Type names switch to unprefixed ("FastAPI style"): `Request`,
+  `Response`, `WebSocket`, `Stream`, `BodyStream`, `RPCClient`,
+  `Settings`. The `PyreRequest` / `PyreResponse` / … prefixed forms
+  are gone.
+- CLI: `pyronova run/dev/routes` (was `pyre ...`).
+- Env vars: `PYRONOVA_HOST`, `PYRONOVA_PORT`, `PYRONOVA_LOG`,
+  `PYRONOVA_WORKERS`, `PYRONOVA_IO_WORKERS`, `PYRONOVA_TLS_CERT`,
+  `PYRONOVA_TLS_KEY`, `PYRONOVA_RELOAD`, `PYRONOVA_LOG_LEVEL`,
+  `PYRONOVA_TEST_PG_DSN`.
+- Rust crate: `pyronova-engine`, lib name `pyronova_engine` (was
+  `pyreframework-engine` / `pyreframework_engine`).
+- Rust FFI symbols injected into sub-interpreter globals: `_pyronova_recv`,
+  `_pyronova_send`, `_pyronova_emit_log`, `_pyronova_pool_id`.
+- Log target names: `pyronova::server`, `pyronova::access`,
+  `pyronova::app`.
+
+### Migration
+
+Mechanical — two find-and-replace passes handle the common shape:
+
+```bash
+git grep -l pyreframework | xargs sed -i 's/pyreframework/pyronova/g'
+git grep -l '\bPyre\b' | xargs sed -i 's/\bPyre\b/Pyronova/g'
+# Type names lost their prefix — handle per-class:
+git grep -l PyreRequest | xargs sed -i 's/PyreRequest/Request/g'
+git grep -l PyreResponse | xargs sed -i 's/PyreResponse/Response/g'
+# …and the same for WebSocket, Stream, BodyStream, RPCClient, Settings.
+# Env vars:
+git grep -l PYRE_ | xargs sed -i 's/PYRE_/PYRONOVA_/g'
+```
+
+Historical release notes, benchmark reports, and incident post-mortems
+under `benchmarks/benchmark-*.md`, `docs/memory-leak-investigation-*.md`,
+`docs/advisor-triage-*.md` were deliberately left unrenamed — the
+framework was called Pyre when those events happened, and rewriting the
+history is dishonest.
+
 ## v1.5.0 (2026-04-19)
 
 Memory-leak root cause fix + hardening pass. Minor-bump because Python

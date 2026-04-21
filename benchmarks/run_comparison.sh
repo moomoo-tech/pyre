@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Head-to-head: Pyre vs FastAPI
+# Head-to-head: Pyronova vs FastAPI
 # Usage: bash benchmarks/run_comparison.sh
 set -e
 
@@ -16,7 +16,7 @@ CONNECTIONS=100
 ORDER_JSON='{"symbol":"AAPL","quantity":100,"price":185.50,"side":"buy"}'
 
 echo "╔══════════════════════════════════════════════════════════╗"
-echo "║        Pyre vs FastAPI — Head-to-Head Benchmark         ║"
+echo "║        Pyronova vs FastAPI — Head-to-Head Benchmark         ║"
 echo "╚══════════════════════════════════════════════════════════╝"
 echo ""
 echo "Config: ${THREADS} threads, ${CONNECTIONS} connections, ${DURATION} per test"
@@ -56,7 +56,7 @@ run_test() {
 
     echo "── $test_name ──"
     run_wrk "FastAPI" "http://127.0.0.1:8000${path}" "$method" "$body"
-    run_wrk "Pyre" "http://127.0.0.1:8001${path}" "$method" "$body"
+    run_wrk "Pyronova" "http://127.0.0.1:8001${path}" "$method" "$body"
     echo ""
 }
 
@@ -65,15 +65,15 @@ echo "Starting FastAPI on :8000..."
 uvicorn benchmarks.fastapi_bench_app:app --host 127.0.0.1 --port 8000 --workers 1 --log-level error &
 FASTAPI_PID=$!
 
-echo "Starting Pyre on :8001..."
-python benchmarks/pyre_bench_app.py &
-PYRE_PID=$!
+echo "Starting Pyronova on :8001..."
+python benchmarks/pyronova_bench_app.py &
+PYRONOVA_PID=$!
 
 sleep 3
 
 # Verify both are running
-curl -sf http://127.0.0.1:8000/health > /dev/null || { echo "❌ FastAPI not running"; kill $PYRE_PID 2>/dev/null; exit 1; }
-curl -sf http://127.0.0.1:8001/health > /dev/null || { echo "❌ Pyre not running"; kill $FASTAPI_PID 2>/dev/null; exit 1; }
+curl -sf http://127.0.0.1:8000/health > /dev/null || { echo "❌ FastAPI not running"; kill $PYRONOVA_PID 2>/dev/null; exit 1; }
+curl -sf http://127.0.0.1:8001/health > /dev/null || { echo "❌ Pyronova not running"; kill $FASTAPI_PID 2>/dev/null; exit 1; }
 
 echo "Both servers running. Starting benchmarks..."
 echo ""
@@ -87,13 +87,13 @@ run_test "4. Validation" "/validate" "POST" "$ORDER_JSON"
 # ─── Memory comparison ──────────────────────────────────────
 echo "── Memory Usage ──"
 FASTAPI_MEM=$(ps -o rss= -p $FASTAPI_PID 2>/dev/null | awk '{printf "%.1f", $1/1024}')
-PYRE_MEM=$(ps -o rss= -p $PYRE_PID 2>/dev/null | awk '{printf "%.1f", $1/1024}')
+PYRONOVA_MEM=$(ps -o rss= -p $PYRONOVA_PID 2>/dev/null | awk '{printf "%.1f", $1/1024}')
 printf "  %-12s │ %s MB\n" "FastAPI" "$FASTAPI_MEM"
-printf "  %-12s │ %s MB\n" "Pyre" "$PYRE_MEM"
+printf "  %-12s │ %s MB\n" "Pyronova" "$PYRONOVA_MEM"
 
 # ─── Cleanup ─────────────────────────────────────────────────
-kill $FASTAPI_PID $PYRE_PID 2>/dev/null
-wait $FASTAPI_PID $PYRE_PID 2>/dev/null
+kill $FASTAPI_PID $PYRONOVA_PID 2>/dev/null
+wait $FASTAPI_PID $PYRONOVA_PID 2>/dev/null
 
 echo ""
 echo "Done."

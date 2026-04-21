@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ╔══════════════════════════════════════════════════════════════════╗
-# ║  Pyre v1.4.0 Full Benchmark Suite — Multi-phase + Latency Bins ║
+# ║  Pyronova v1.4.0 Full Benchmark Suite — Multi-phase + Latency Bins ║
 # ╚══════════════════════════════════════════════════════════════════╝
 #
 # Usage:
@@ -56,20 +56,20 @@ trap cleanup EXIT
 cleanup 2>/dev/null
 
 # ─── Write bench server ─────────────────────────────────────────
-BENCH_SERVER=$(mktemp /tmp/pyre_bench_XXXXXX.py)
+BENCH_SERVER=$(mktemp /tmp/pyronova_bench_XXXXXX.py)
 WORKER_ARGS=""
 [[ -n "$WORKERS" ]] && WORKER_ARGS="workers=$WORKERS, "
 [[ -n "$IO_WORKERS" ]] && WORKER_ARGS="${WORKER_ARGS}io_workers=$IO_WORKERS, "
 
 cat > "$BENCH_SERVER" << PYEOF
-from pyreframework import Pyre, PyreResponse
+from pyronova import Pyronova, Response
 import json
 
-app = Pyre()
+app = Pyronova()
 
 @app.get("/")
 def index(req):
-    return "Hello from Pyre!"
+    return "Hello from Pyronova!"
 
 @app.get("/json")
 def json_route(req):
@@ -178,7 +178,7 @@ run_bench() {
 # ─── Start server ────────────────────────────────────────────────
 echo ""
 echo "╔══════════════════════════════════════════════════════════╗"
-echo "║       Pyre v1.4.0 — Full Benchmark Suite                ║"
+echo "║       Pyronova v1.4.0 — Full Benchmark Suite                ║"
 echo "╠══════════════════════════════════════════════════════════╣"
 printf "║  OS: %-49s║\n" "$OS_NAME ($(uname -m))"
 printf "║  CPUs: %-47s║\n" "$NUM_CPUS"
@@ -190,7 +190,7 @@ printf "║  Long: %-47s║\n" "$LONG_DURATION"
 echo "╚══════════════════════════════════════════════════════════╝"
 
 echo ""
-echo "Starting Pyre on :$PORT ..."
+echo "Starting Pyronova on :$PORT ..."
 python "$BENCH_SERVER" &
 SERVER_PID=$!
 sleep 2
@@ -266,7 +266,7 @@ MEM_FINAL=$(ps -o rss= -p $SERVER_PID 2>/dev/null | awk '{printf "%.1f", $1/1024
 
 print_header "Summary"
 echo ""
-printf "  Server:     Pyre v1.4.0 (%s)\n" "$OS_NAME"
+printf "  Server:     Pyronova v1.4.0 (%s)\n" "$OS_NAME"
 printf "  Memory:     %s MB (final)\n" "$MEM_FINAL"
 printf "  Process:    alive ✅\n"
 

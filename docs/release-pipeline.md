@@ -1,6 +1,6 @@
 # Release pipeline design
 
-Goal: every shipped version of Pyre has been
+Goal: every shipped version of Pyronova has been
 **(a)** compiled in all supported configurations,
 **(b)** exercised under both unit tests and a real load generator,
 **(c)** validated against a recorded performance baseline, and
@@ -91,7 +91,7 @@ req/s, dumps the histogram, and fails if ANY of:
 
 1. A type not in the **expected-co-owner whitelist** has rc≥2 samples
    growing (i.e., count increases between t=1m and t=5m snapshots).
-2. The total `dict` or `_PyreRequest` rc=1 drop count is less than
+2. The total `dict` or `_Request` rc=1 drop count is less than
    the request count ×0.9 (meaning we're losing instances before they
    even reach the Drop path).
 3. RSS growth across the 5-minute soak is more than 100 KB (catch

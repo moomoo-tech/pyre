@@ -1,4 +1,4 @@
-//! WebSocket support — async Tokio ↔ sync Python bridge via channels.
+//! PyronovaWebSocket support — async Tokio ↔ sync Python bridge via channels.
 
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
@@ -21,17 +21,17 @@ enum WsMsg {
 }
 
 // ---------------------------------------------------------------------------
-// PyreWebSocket — Python-facing WebSocket connection object
+// PyronovaWebSocket — Python-facing PyronovaWebSocket connection object
 // ---------------------------------------------------------------------------
 
-#[pyclass]
-pub(crate) struct PyreWebSocket {
+#[pyclass(name = "WebSocket")]
+pub(crate) struct PyronovaWebSocket {
     incoming_rx: std::sync::Mutex<std::sync::mpsc::Receiver<WsMsg>>,
     outgoing_tx: std::sync::Mutex<Option<tokio::sync::mpsc::Sender<WsMsg>>>,
 }
 
 #[pymethods]
-impl PyreWebSocket {
+impl PyronovaWebSocket {
     /// Receive next text message. Returns None if connection closed.
     ///
     /// Releases the GIL while blocking on the channel so other Python
@@ -101,34 +101,34 @@ impl PyreWebSocket {
         self.try_send_outgoing(WsMsg::Binary(data))
     }
 
-    /// Close the WebSocket connection.
+    /// Close the PyronovaWebSocket connection.
     fn close(&self) {
         let mut tx = self.outgoing_tx.lock().unwrap();
         *tx = None;
     }
 }
 
-impl PyreWebSocket {
+impl PyronovaWebSocket {
     fn try_send_outgoing(&self, msg: WsMsg) -> PyResult<()> {
         use tokio::sync::mpsc::error::TrySendError;
         let guard = self.outgoing_tx.lock().unwrap();
         let tx = guard
             .as_ref()
-            .ok_or_else(|| pyo3::exceptions::PyConnectionError::new_err("WebSocket closed"))?;
+            .ok_or_else(|| pyo3::exceptions::PyConnectionError::new_err("PyronovaWebSocket closed"))?;
         match tx.try_send(msg) {
             Ok(()) => Ok(()),
             Err(TrySendError::Full(_)) => Err(pyo3::exceptions::PyBlockingIOError::new_err(
-                "WebSocket send buffer full (client is slow); retry after a brief pause",
+                "PyronovaWebSocket send buffer full (client is slow); retry after a brief pause",
             )),
             Err(TrySendError::Closed(_)) => Err(pyo3::exceptions::PyConnectionError::new_err(
-                "WebSocket closed",
+                "PyronovaWebSocket closed",
             )),
         }
     }
 }
 
 // ---------------------------------------------------------------------------
-// WebSocket upgrade detection
+// PyronovaWebSocket upgrade detection
 // ---------------------------------------------------------------------------
 
 pub(crate) fn is_websocket_upgrade(req: &Request<Incoming>) -> bool {
@@ -138,7 +138,7 @@ pub(crate) fn is_websocket_upgrade(req: &Request<Incoming>) -> bool {
         .unwrap_or(false)
 }
 
-/// Build the 101 Switching Protocols response for WebSocket upgrade.
+/// Build the 101 Switching Protocols response for PyronovaWebSocket upgrade.
 fn ws_upgrade_response(key: &[u8]) -> Response<Full<Bytes>> {
     let accept = tungstenite::handshake::derive_accept_key(key);
 
@@ -152,7 +152,7 @@ fn ws_upgrade_response(key: &[u8]) -> Response<Full<Bytes>> {
 }
 
 // ---------------------------------------------------------------------------
-// Handle WebSocket upgrade + message pump
+// Handle PyronovaWebSocket upgrade + message pump
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn handle_websocket(
@@ -161,7 +161,7 @@ pub(crate) async fn handle_websocket(
 ) -> Result<Response<crate::handlers::BoxBody>, hyper::Error> {
     let path = req.uri().path().to_string();
 
-    // Look up WebSocket handler (need GIL to clone Py<PyAny>)
+    // Look up PyronovaWebSocket handler (need GIL to clone Py<PyAny>)
     let handler = Python::attach(|py| routes.ws_handlers.get(&path).map(|h| h.clone_ref(py)));
 
     let handler = match handler {
@@ -192,7 +192,7 @@ pub(crate) async fn handle_websocket(
     // Set up the upgrade
     let upgrade = hyper::upgrade::on(&mut req);
 
-    // Spawn the WebSocket handler task
+    // Spawn the PyronovaWebSocket handler task
     tokio::spawn(async move {
         match upgrade.await {
             Ok(upgraded) => {
@@ -206,7 +206,7 @@ pub(crate) async fn handle_websocket(
                 run_ws_connection(ws_stream, handler).await;
             }
             Err(e) => {
-                tracing::error!(target: "pyre::server", error = %e, "WebSocket upgrade error");
+                tracing::error!(target: "pyronova::server", error = %e, "PyronovaWebSocket upgrade error");
             }
         }
     });
@@ -215,7 +215,7 @@ pub(crate) async fn handle_websocket(
     Ok(crate::handlers::full_body(ws_upgrade_response(&key)))
 }
 
-/// Run a WebSocket connection — bridges async Tokio with sync Python handler.
+/// Run a PyronovaWebSocket connection — bridges async Tokio with sync Python handler.
 async fn run_ws_connection<S>(ws_stream: WebSocketStream<S>, handler: Py<PyAny>)
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
@@ -231,14 +231,14 @@ where
     const OUTGOING_CAP: usize = 1024;
     let (outgoing_tx, mut outgoing_rx) = tokio::sync::mpsc::channel::<WsMsg>(OUTGOING_CAP);
 
-    let sky_ws = PyreWebSocket {
+    let sky_ws = PyronovaWebSocket {
         incoming_rx: std::sync::Mutex::new(incoming_rx),
         outgoing_tx: std::sync::Mutex::new(Some(outgoing_tx)),
     };
 
     // Spawn a thread for the Python handler (blocks on ws.recv()).
     //
-    // Contract: WebSocket handlers live in the main interpreter (they
+    // Contract: PyronovaWebSocket handlers live in the main interpreter (they
     // are registered via `@app.websocket(...)` at import time, which
     // runs in the main interp). `Python::attach` on a fresh OS thread
     // binds to the main interp's tstate, which matches. This is NOT a
@@ -249,7 +249,7 @@ where
             let ws_obj = match Py::new(py, sky_ws) {
                 Ok(o) => o,
                 Err(e) => {
-                    tracing::error!(target: "pyre::server", error = %e, "PyreWebSocket alloc failed");
+                    tracing::error!(target: "pyronova::server", error = %e, "PyronovaWebSocket alloc failed");
                     // Drop handler under GIL before returning.
                     drop(handler);
                     return;
@@ -274,9 +274,9 @@ where
                             .and_then(|f| f.call1((&result,)))
                         {
                             tracing::error!(
-                                target: "pyre::server",
+                                target: "pyronova::server",
                                 error = %e,
-                                "WebSocket async handler error",
+                                "PyronovaWebSocket async handler error",
                             );
                         }
                     }
@@ -284,7 +284,7 @@ where
                     drop(result);
                 }
                 Err(e) => {
-                    tracing::error!(target: "pyre::server", error = %e, "WebSocket handler error");
+                    tracing::error!(target: "pyronova::server", error = %e, "PyronovaWebSocket handler error");
                 }
             }
             // Drop handler explicitly under GIL. Without this, the
@@ -295,7 +295,7 @@ where
         });
     });
 
-    // Message pump: forward between WebSocket and Python channels
+    // Message pump: forward between PyronovaWebSocket and Python channels
     loop {
         tokio::select! {
             // Client → Python (via incoming_tx)
@@ -320,7 +320,7 @@ where
                         let _ = ws_sink.send(Message::Pong(data)).await;
                     }
                     Some(Err(e)) => {
-                        tracing::warn!(target: "pyre::server", error = %e, "WebSocket read error");
+                        tracing::warn!(target: "pyronova::server", error = %e, "PyronovaWebSocket read error");
                         break;
                     }
                     _ => {} // Pong
@@ -350,7 +350,7 @@ where
     // Drop incoming_tx to unblock Python's ws.recv() → returns None
     drop(incoming_tx);
 
-    // Close WebSocket
+    // Close PyronovaWebSocket
     let _ = ws_sink.close().await;
 
     // Wait for Python handler thread. `JoinHandle::join()` blocks, so

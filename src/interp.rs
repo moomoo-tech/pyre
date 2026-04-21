@@ -17,7 +17,7 @@ use pyo3::prelude::*;
 // ---------------------------------------------------------------------------
 
 // Per-pool configuration (replaces former global statics).
-// These are set on PyreApp before run() and propagated to InterpreterPool.
+// These are set on PyronovaApp before run() and propagated to InterpreterPool.
 use std::sync::atomic::AtomicBool;
 
 /// Per-worker state accessible from C-FFI functions (no closure environment).
@@ -37,8 +37,8 @@ struct WorkerState {
 
 /// Monotonic counter for pool instance IDs. Each call to
 /// `InterpreterPool::new()` consumes one. This exists exclusively so
-/// `pyre_recv` / `pyre_send` can detect cross-pool calls — see
-/// `WorkerState::pool_id` and the guard in `pyre_recv_cfunc`.
+/// `pyronova_recv` / `pyronova_send` can detect cross-pool calls — see
+/// `WorkerState::pool_id` and the guard in `pyronova_recv_cfunc`.
 static POOL_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 /// Global registry of worker states, indexed by worker_id.
@@ -76,7 +76,7 @@ fn get_worker_state(worker_id: usize) -> Option<Arc<WorkerState>> {
 ///      warning,
 ///   3. return NULL.
 ///
-/// Callers whose semantics are "None == no data" (e.g. `pyre_recv`
+/// Callers whose semantics are "None == no data" (e.g. `pyronova_recv`
 /// returns `None` when the channel is closed) should NOT use this
 /// for normal signaling — that's a return value of `Py_None` via
 /// `Py_INCREF`. This helper's NULL-return is strictly for the panic
@@ -96,7 +96,7 @@ where
                 "<non-string panic payload>".to_string()
             };
             tracing::error!(
-                target: "pyre::server",
+                target: "pyronova::server",
                 context,
                 panic = %msg,
                 "Rust panic caught at FFI boundary"
@@ -111,7 +111,7 @@ where
     }
 }
 
-/// pyre_recv(worker_id, pool_id) → (req_id, handler_idx, method, path, params, query, body, headers, client_ip) or None
+/// pyronova_recv(worker_id, pool_id) → (req_id, handler_idx, method, path, params, query, body, headers, client_ip) or None
 /// RELEASES GIL during blocking recv — lets asyncio loop run freely.
 ///
 /// `pool_id` is the worker's "birth certificate". If the state currently
@@ -119,20 +119,20 @@ where
 /// zombie from a prior `app.run()` that finally woke up), we return None
 /// so the zombie's caller sees EOF and exits rather than stealing
 /// requests from the live pool.
-unsafe extern "C" fn pyre_recv_cfunc(
+unsafe extern "C" fn pyronova_recv_cfunc(
     _self: *mut ffi::PyObject,
     args: *mut ffi::PyObject,
 ) -> *mut ffi::PyObject {
     ffi_catch_unwind(
-        "pyre_recv",
-        std::panic::AssertUnwindSafe(|| pyre_recv_inner(args)),
+        "pyronova_recv",
+        std::panic::AssertUnwindSafe(|| pyronova_recv_inner(args)),
     )
 }
 
-/// Body of pyre_recv — panic-catchable. Separated so the outer
+/// Body of pyronova_recv — panic-catchable. Separated so the outer
 /// `extern "C"` is just a catch_unwind wrapper and we avoid propagating
 /// Rust panics into CPython's stack.
-unsafe fn pyre_recv_inner(args: *mut ffi::PyObject) -> *mut ffi::PyObject {
+unsafe fn pyronova_recv_inner(args: *mut ffi::PyObject) -> *mut ffi::PyObject {
     let mut worker_id: isize = 0;
     let mut pool_id: u64 = 0;
     if ffi::PyArg_ParseTuple(args, c"nK".as_ptr(), &mut worker_id, &mut pool_id) == 0 {
@@ -253,22 +253,22 @@ unsafe fn pyre_recv_inner(args: *mut ffi::PyObject) -> *mut ffi::PyObject {
     }
 }
 
-/// pyre_send(worker_id, pool_id, req_id, status, content_type, body_bytes)
+/// pyronova_send(worker_id, pool_id, req_id, status, content_type, body_bytes)
 /// Wakes up Tokio via oneshot channel. The `pool_id` is checked against the
 /// installed state to guard against zombie-worker cross-pool writes —
-/// see `pyre_recv_cfunc` docstring for the rationale.
-unsafe extern "C" fn pyre_send_cfunc(
+/// see `pyronova_recv_cfunc` docstring for the rationale.
+unsafe extern "C" fn pyronova_send_cfunc(
     _self: *mut ffi::PyObject,
     args: *mut ffi::PyObject,
 ) -> *mut ffi::PyObject {
     ffi_catch_unwind(
-        "pyre_send",
-        std::panic::AssertUnwindSafe(|| pyre_send_inner(args)),
+        "pyronova_send",
+        std::panic::AssertUnwindSafe(|| pyronova_send_inner(args)),
     )
 }
 
-/// See `pyre_recv_inner` — same rationale.
-unsafe fn pyre_send_inner(args: *mut ffi::PyObject) -> *mut ffi::PyObject {
+/// See `pyronova_recv_inner` — same rationale.
+unsafe fn pyronova_send_inner(args: *mut ffi::PyObject) -> *mut ffi::PyObject {
     let mut worker_id: isize = 0;
     let mut pool_id: u64 = 0;
     let mut req_id: u64 = 0;
@@ -314,7 +314,7 @@ unsafe fn pyre_send_inner(args: *mut ffi::PyObject) -> *mut ffi::PyObject {
         Vec::new()
     };
 
-    // Same pool-id guard as pyre_recv. Dropping the send here rather
+    // Same pool-id guard as pyronova_recv. Dropping the send here rather
     // than just skipping means the tokio side times out naturally (504)
     // instead of getting a response from the wrong pool.
     if let Some(state) = get_worker_state(worker_id as usize).filter(|s| s.pool_id == pool_id) {
@@ -324,7 +324,7 @@ unsafe fn pyre_send_inner(args: *mut ffi::PyObject) -> *mut ffi::PyObject {
             // If closed, skip the send — the response would be discarded anyway.
             if tx.is_closed() {
                 tracing::debug!(
-                    target: "pyre::server",
+                    target: "pyronova::server",
                     req_id,
                     worker_id,
                     "response_map: receiver gone (client timed out), dropping result"
@@ -341,7 +341,7 @@ unsafe fn pyre_send_inner(args: *mut ffi::PyObject) -> *mut ffi::PyObject {
             }
         } else {
             tracing::debug!(
-                target: "pyre::server",
+                target: "pyronova::server",
                 req_id,
                 worker_id,
                 "response_map miss — client already timed out (504)"
@@ -350,7 +350,7 @@ unsafe fn pyre_send_inner(args: *mut ffi::PyObject) -> *mut ffi::PyObject {
 
         // Periodic orphan sweep: when the map grows large, purge entries whose
         // receivers have been dropped (Rust side timed out). Prevents unbounded
-        // memory growth from handlers that crash after pyre_recv but before pyre_send.
+        // memory growth from handlers that crash after pyronova_recv but before pyronova_send.
         if map.len() > 64 {
             map.retain(|_id, tx| !tx.is_closed());
         }
@@ -364,20 +364,20 @@ unsafe fn pyre_send_inner(args: *mut ffi::PyObject) -> *mut ffi::PyObject {
 // C-FFI bridge: emit_python_log for sub-interpreter logging
 // ---------------------------------------------------------------------------
 
-/// _pyre_emit_log(level, name, message, pathname, lineno, worker_id)
+/// _pyronova_emit_log(level, name, message, pathname, lineno, worker_id)
 /// Routes Python logging.Handler.emit() calls through Rust tracing.
 /// Minimal GIL hold time — extract strings, dispatch to tracing, return.
-unsafe extern "C" fn pyre_emit_log_cfunc(
+unsafe extern "C" fn pyronova_emit_log_cfunc(
     _self: *mut ffi::PyObject,
     args: *mut ffi::PyObject,
 ) -> *mut ffi::PyObject {
     ffi_catch_unwind(
-        "pyre_emit_log",
-        std::panic::AssertUnwindSafe(|| pyre_emit_log_inner(args)),
+        "pyronova_emit_log",
+        std::panic::AssertUnwindSafe(|| pyronova_emit_log_inner(args)),
     )
 }
 
-unsafe fn pyre_emit_log_inner(args: *mut ffi::PyObject) -> *mut ffi::PyObject {
+unsafe fn pyronova_emit_log_inner(args: *mut ffi::PyObject) -> *mut ffi::PyObject {
     let mut level_ptr: *const std::os::raw::c_char = std::ptr::null();
     let mut name_ptr: *const std::os::raw::c_char = std::ptr::null();
     let mut msg_ptr: *const std::os::raw::c_char = std::ptr::null();
@@ -433,7 +433,7 @@ unsafe fn pyre_emit_log_inner(args: *mut ffi::PyObject) -> *mut ffi::PyObject {
     match level {
         "DEBUG" => {
             tracing::debug!(
-                target: "pyre::app",
+                target: "pyronova::app",
                 worker = wid,
                 logger = %name,
                 file = %pathname,
@@ -443,7 +443,7 @@ unsafe fn pyre_emit_log_inner(args: *mut ffi::PyObject) -> *mut ffi::PyObject {
         }
         "INFO" => {
             tracing::info!(
-                target: "pyre::app",
+                target: "pyronova::app",
                 worker = wid,
                 logger = %name,
                 file = %pathname,
@@ -453,7 +453,7 @@ unsafe fn pyre_emit_log_inner(args: *mut ffi::PyObject) -> *mut ffi::PyObject {
         }
         "WARNING" => {
             tracing::warn!(
-                target: "pyre::app",
+                target: "pyronova::app",
                 worker = wid,
                 logger = %name,
                 file = %pathname,
@@ -463,7 +463,7 @@ unsafe fn pyre_emit_log_inner(args: *mut ffi::PyObject) -> *mut ffi::PyObject {
         }
         "ERROR" | "CRITICAL" => {
             tracing::error!(
-                target: "pyre::app",
+                target: "pyronova::app",
                 worker = wid,
                 logger = %name,
                 file = %pathname,
@@ -473,7 +473,7 @@ unsafe fn pyre_emit_log_inner(args: *mut ffi::PyObject) -> *mut ffi::PyObject {
         }
         _ => {
             tracing::trace!(
-                target: "pyre::app",
+                target: "pyronova::app",
                 worker = wid,
                 logger = %name,
                 file = %pathname,
@@ -574,7 +574,7 @@ impl Drop for PyObjRef {
                         .unwrap_or_else(|| format!("{:?}", std::thread::current().id()));
                     let bt = std::backtrace::Backtrace::capture();
                     tracing::error!(
-                        target: "pyre::server",
+                        target: "pyronova::server",
                         ptr = ?self.ptr,
                         type_name = %type_name,
                         thread = %thread_name,
@@ -657,7 +657,7 @@ pub(crate) unsafe fn log_and_clear_py_exception(context: &str) {
     };
 
     ffi::Py_DECREF(exc);
-    tracing::error!(target: "pyre::server", %context, error = %msg, "Python exception");
+    tracing::error!(target: "pyronova::server", %context, error = %msg, "Python exception");
 }
 
 pub(crate) unsafe fn py_str_dict(map: &HashMap<String, String>) -> Option<PyObjRef> {
@@ -790,21 +790,21 @@ struct SubInterpreterWorker {
     globals: *mut ffi::PyObject,
     /// Cached: json.dumps function pointer (avoids per-request import)
     json_dumps_func: *mut ffi::PyObject,
-    /// Cached: `_PyreRequest` **type object** (raw C-API heap type,
-    /// defined in `pyre_request_type.rs`). Built per sub-interp via
+    /// Cached: `_Request` **type object** (raw C-API heap type,
+    /// defined in `pyronova_request_type.rs`). Built per sub-interp via
     /// `PyType_FromSpec` so its custom `tp_dealloc` can synchronously
     /// DECREF all slot fields — workaround for PEP 684's broken
     /// per-instance dealloc path on `__slots__` Python classes.
     sky_request_cls: *mut ffi::PyObject,
-    /// Cached: _PyreResponse class pointer
+    /// Cached: _Response class pointer
     sky_response_cls: *mut ffi::PyObject,
     /// Cached: persistent asyncio event loop for this sub-interpreter
     _asyncio_loop: *mut ffi::PyObject,
     /// Cached: loop.run_until_complete method
     loop_run_func: *mut ffi::PyObject,
     /// Pool instance id (see `POOL_ID_COUNTER`). Exposed to the async
-    /// engine as `_pyre_pool_id` so it can be passed into every
-    /// `_pyre_recv` / `_pyre_send` call for the zombie-worker guard.
+    /// engine as `_pyronova_pool_id` so it can be passed into every
+    /// `_pyronova_recv` / `_pyronova_send` call for the zombie-worker guard.
     pool_id: u64,
 }
 
@@ -873,7 +873,7 @@ impl SubInterpreterWorker {
         pool_id: u64,
     ) -> Result<Self, String> {
         // Run the bootstrap (from external .py file) + user script.
-        let bootstrap_src = include_str!("../python/pyreframework/_bootstrap.py");
+        let bootstrap_src = include_str!("../python/pyronova/_bootstrap.py");
         let bootstrap = format!("{bootstrap_src}\n# Execute full user script\n{script}");
 
         let globals =
@@ -881,12 +881,12 @@ impl SubInterpreterWorker {
         let builtins = ffi::PyEval_GetBuiltins(); // borrowed ref
         ffi::PyDict_SetItemString(globals.as_ptr(), c"__builtins__".as_ptr(), builtins);
 
-        // Register _pyre_emit_log C-FFI function for Python logging bridge
+        // Register _pyronova_emit_log C-FFI function for Python logging bridge
         #[allow(clippy::missing_transmute_annotations)]
         let emit_log_def = Box::into_raw(Box::new(ffi::PyMethodDef {
-            ml_name: c"_pyre_emit_log".as_ptr(),
+            ml_name: c"_pyronova_emit_log".as_ptr(),
             ml_meth: ffi::PyMethodDefPointer {
-                PyCFunctionWithKeywords: std::mem::transmute(pyre_emit_log_cfunc as *const ()),
+                PyCFunctionWithKeywords: std::mem::transmute(pyronova_emit_log_cfunc as *const ()),
             },
             ml_flags: ffi::METH_VARARGS,
             ml_doc: std::ptr::null(),
@@ -894,7 +894,7 @@ impl SubInterpreterWorker {
         let emit_log_func =
             ffi::PyCFunction_NewEx(emit_log_def, std::ptr::null_mut(), std::ptr::null_mut());
         if !emit_log_func.is_null() {
-            ffi::PyDict_SetItemString(globals.as_ptr(), c"_pyre_emit_log".as_ptr(), emit_log_func);
+            ffi::PyDict_SetItemString(globals.as_ptr(), c"_pyronova_emit_log".as_ptr(), emit_log_func);
             ffi::Py_DECREF(emit_log_func);
         }
 
@@ -935,7 +935,7 @@ impl SubInterpreterWorker {
             }
         }
 
-        // Build the raw C-API `_PyreRequest` type for THIS sub-interp
+        // Build the raw C-API `_Request` type for THIS sub-interp
         // (custom tp_dealloc that synchronously DECREFs every slot —
         // workaround for PEP 684's broken heap-type finalizer). One
         // type per sub-interp: PyTypeObject state is per-interp.
@@ -945,25 +945,25 @@ impl SubInterpreterWorker {
         // Python subclass. A subclass triggers CPython's subtype_dealloc
         // fallback and bypasses our custom tp_dealloc, restoring the
         // full-instance leak we're trying to fix.
-        let rust_ty = crate::pyre_request_type::register_type()?;
-        let req_cls_name = std::ffi::CString::new("_PyreRequest").unwrap();
+        let rust_ty = crate::pyronova_request_type::register_type()?;
+        let req_cls_name = std::ffi::CString::new("_Request").unwrap();
         if ffi::PyDict_SetItemString(globals.as_ptr(), req_cls_name.as_ptr(), rust_ty) != 0 {
             ffi::PyErr_Print();
-            return Err("failed to inject _PyreRequest into sub-interp globals".to_string());
+            return Err("failed to inject _Request into sub-interp globals".to_string());
         }
 
         // Attach helper methods directly on the type (mutable by
         // virtue of Py_TPFLAGS_HEAPTYPE). Users can do
         // `req.text()` / `req.json()` / `req.body` / `req.query_params`.
         //
-        // Also rebind the mock module attributes (`pyreframework.PyreRequest`
-        // and `pyreframework.engine.PyreRequest`) to this Rust type —
+        // Also rebind the mock module attributes (`pyronova.PyronovaRequest`
+        // and `pyronova.engine.PyronovaRequest`) to this Rust type —
         // `_bootstrap.py` sets them to None as placeholders because it
         // runs BEFORE this injection. User code doing
-        // `from pyreframework import PyreRequest` or
-        // `isinstance(req, PyreRequest)` then gets the real type.
+        // `from pyronova import PyronovaRequest` or
+        // `isinstance(req, PyronovaRequest)` then gets the real type.
         let helpers_src = c"\
-def _attach_pyre_request_helpers(t):\n    from urllib.parse import parse_qs\n    import json as _json\n    t.body = property(lambda self: self.body_bytes)\n    t.query_params = property(lambda self: {k: v[0] for k, v in parse_qs(self.query).items()})\n    t.text = lambda self: self.body_bytes.decode('utf-8') if isinstance(self.body_bytes, (bytes, bytearray)) else str(self.body_bytes)\n    t.json = lambda self: _json.loads(self.text())\n_attach_pyre_request_helpers(_PyreRequest)\nimport sys as _sys\n_m = _sys.modules.get('pyreframework.engine')\nif _m is not None:\n    _m.PyreRequest = _PyreRequest\n_p = _sys.modules.get('pyreframework')\nif _p is not None:\n    _p.PyreRequest = _PyreRequest\n";
+def _attach_pyronova_request_helpers(t):\n    from urllib.parse import parse_qs\n    import json as _json\n    t.body = property(lambda self: self.body_bytes)\n    t.query_params = property(lambda self: {k: v[0] for k, v in parse_qs(self.query).items()})\n    t.text = lambda self: self.body_bytes.decode('utf-8') if isinstance(self.body_bytes, (bytes, bytearray)) else str(self.body_bytes)\n    t.json = lambda self: _json.loads(self.text())\n_attach_pyronova_request_helpers(_Request)\nimport sys as _sys\n_m = _sys.modules.get('pyronova.engine')\nif _m is not None:\n    _m.PyronovaRequest = _Request\n_p = _sys.modules.get('pyronova')\nif _p is not None:\n    _p.PyronovaRequest = _Request\n";
         let helpers_result = ffi::PyRun_String(
             helpers_src.as_ptr(),
             ffi::Py_file_input,
@@ -972,14 +972,14 @@ def _attach_pyre_request_helpers(t):\n    from urllib.parse import parse_qs\n   
         );
         if helpers_result.is_null() {
             ffi::PyErr_Print();
-            return Err("failed to attach _PyreRequest helper methods".to_string());
+            return Err("failed to attach _Request helper methods".to_string());
         }
         ffi::Py_DECREF(helpers_result);
 
         let sky_request_cls = rust_ty;
         ffi::Py_INCREF(sky_request_cls);
 
-        let resp_cls_name = std::ffi::CString::new("_PyreResponse").unwrap();
+        let resp_cls_name = std::ffi::CString::new("_Response").unwrap();
         let sky_response_cls = ffi::PyDict_GetItemString(globals.as_ptr(), resp_cls_name.as_ptr());
         if !sky_response_cls.is_null() {
             ffi::Py_INCREF(sky_response_cls);
@@ -1056,7 +1056,7 @@ def _attach_pyre_request_helpers(t):\n    from urllib.parse import parse_qs\n   
         })
     }
 
-    /// Build a fresh `_PyreRequest` instance for this request.
+    /// Build a fresh `_Request` instance for this request.
     ///
     /// Returns a NEW owned reference (caller must DECREF). The
     /// instance's `tp_dealloc` synchronously DECREFs all slot fields,
@@ -1076,12 +1076,12 @@ def _attach_pyre_request_helpers(t):\n    from urllib.parse import parse_qs\n   
         client_ip: &str,
     ) -> Result<*mut ffi::PyObject, String> {
         // ── Leak-hunt bisection of slot constructors (leak_detect only) ──
-        // PYRE_BISECT_SLOT=<name> replaces that slot's value with Py_None:
+        // PYRONOVA_BISECT_SLOT=<name> replaces that slot's value with Py_None:
         //   method | path | params | query | body | headers | client_ip
         //   all    — every slot becomes None (alloc shell only)
         //   none   — normal (default)
         #[cfg(feature = "leak_detect")]
-        let slot_mode = std::env::var("PYRE_BISECT_SLOT").ok();
+        let slot_mode = std::env::var("PYRONOVA_BISECT_SLOT").ok();
         #[cfg(not(feature = "leak_detect"))]
         let slot_mode: Option<String> = None;
         let skip = |name: &str| -> bool {
@@ -1130,13 +1130,13 @@ def _attach_pyre_request_helpers(t):\n    from urllib.parse import parse_qs\n   
         };
 
         if self.sky_request_cls.is_null() {
-            return Err("_PyreRequest type not registered".to_string());
+            return Err("_Request type not registered".to_string());
         }
 
         // Transfer ownership of each new ref into the instance.
         // `alloc_and_init` DECREFs them on failure — so we must NOT
         // rely on PyObjRef::Drop after `into_raw()`.
-        crate::pyre_request_type::alloc_and_init(
+        crate::pyronova_request_type::alloc_and_init(
             self.sky_request_cls,
             py_method.into_raw(),
             py_path.into_raw(),
@@ -1155,7 +1155,7 @@ def _attach_pyre_request_helpers(t):\n    from urllib.parse import parse_qs\n   
     unsafe fn parse_result(&self, result_obj: PyObjRef) -> Result<SubInterpResponse, String> {
         let ptr = result_obj.as_ptr();
 
-        // Check if it's a _PyreResponse or any response-like object
+        // Check if it's a _Response or any response-like object
         // (duck typing: has status_code + body attributes).
         //
         // PyObject_IsInstance returns 1 (true), 0 (false), or -1 (error
@@ -1226,10 +1226,10 @@ def _attach_pyre_request_helpers(t):\n    from urllib.parse import parse_qs\n   
         })
     }
 
-    /// Build a _PyreResponse Python object from a SubInterpResponse.
+    /// Build a _Response Python object from a SubInterpResponse.
     unsafe fn build_sky_response(&self, resp: &SubInterpResponse) -> Result<PyObjRef, String> {
         if self.sky_response_cls.is_null() {
-            return Err("_PyreResponse class not available".to_string());
+            return Err("_Response class not available".to_string());
         }
 
         // Convert body to Python object — use bytes for binary, str for text
@@ -1252,7 +1252,7 @@ def _attach_pyre_request_helpers(t):\n    from urllib.parse import parse_qs\n   
         };
         let py_headers = py_str_dict(&resp.headers).ok_or("failed to create headers dict")?;
 
-        // _PyreResponse(body, status_code, content_type, headers)
+        // _Response(body, status_code, content_type, headers)
         let args = PyObjRef::from_owned(ffi::PyTuple_New(0)).ok_or("failed to create args")?;
         let kwargs = PyObjRef::from_owned(ffi::PyDict_New()).ok_or("failed to create kwargs")?;
 
@@ -1267,8 +1267,8 @@ def _attach_pyre_request_helpers(t):\n    from urllib.parse import parse_qs\n   
             kwargs.as_ptr(),
         ))
         .ok_or_else(|| {
-            log_and_clear_py_exception("_PyreResponse construction");
-            "failed to create _PyreResponse".to_string()
+            log_and_clear_py_exception("_Response construction");
+            "failed to create _Response".to_string()
         })
     }
 
@@ -1357,7 +1357,7 @@ def _attach_pyre_request_helpers(t):\n    from urllib.parse import parse_qs\n   
         }
     }
 
-    /// Parse a _PyreResponse Python object.
+    /// Parse a _Response Python object.
     unsafe fn parse_sky_response(&self, obj: PyObjRef) -> Result<SubInterpResponse, String> {
         let ptr = obj.as_ptr();
 
@@ -1449,7 +1449,7 @@ def _attach_pyre_request_helpers(t):\n    from urllib.parse import parse_qs\n   
                             Ok(s) => (s.into_bytes(), true),
                             Err(e) => {
                                 tracing::error!(
-                                    target: "pyre::server",
+                                    target: "pyronova::server",
                                     error = %e,
                                     "JSON serialization failed for response body dict"
                                 );
@@ -1532,12 +1532,12 @@ def _attach_pyre_request_helpers(t):\n    from urllib.parse import parse_qs\n   
             .get(handler_name)
             .ok_or_else(|| format!("handler '{}' not found", handler_name))?;
 
-        // Fresh `_PyreRequest` (new owned ref). The Rust-backed type's
+        // Fresh `_Request` (new owned ref). The Rust-backed type's
         // `tp_dealloc` synchronously DECREFs all slot fields when this
         // PyObjRef drops at scope end — no SlotClearer / instance
         // recycling needed, no PEP 684 finalizer bug to work around.
         // ── Leak-hunt bisection hook (leak_detect feature only) ──────
-        // PYRE_BISECT values:
+        // PYRONOVA_BISECT values:
         //   "skip_all"     — no build_request, no handler call; return a
         //                    fixed SubInterpResponse. Exercises hyper +
         //                    channel only. If this still leaks, the
@@ -1551,7 +1551,7 @@ def _attach_pyre_request_helpers(t):\n    from urllib.parse import parse_qs\n   
         //                    ignores its arg, e.g. `def h(req): return "ok"`).
         // Unset / any other value: normal execution.
         #[cfg(feature = "leak_detect")]
-        let bisect_mode = std::env::var("PYRE_BISECT").ok();
+        let bisect_mode = std::env::var("PYRONOVA_BISECT").ok();
         #[cfg(not(feature = "leak_detect"))]
         let bisect_mode: Option<String> = None;
 
@@ -1663,7 +1663,7 @@ def _attach_pyre_request_helpers(t):\n    from urllib.parse import parse_qs\n   
         if has_after_hooks {
             for hook_name in after_hook_names {
                 if let Some(&hook_func) = self.handlers.get(hook_name) {
-                    // Build _PyreResponse from current response
+                    // Build _Response from current response
                     let resp_obj = self.build_sky_response(&response)?;
 
                     let hook_args = PyObjRef::from_owned(ffi::PyTuple_New(2))
@@ -1765,7 +1765,7 @@ impl Drop for InterpreterPool {
                     let _ = t.join();
                 } else {
                     tracing::warn!(
-                        target: "pyre::server",
+                        target: "pyronova::server",
                         "worker thread did not exit within {:?} — abandoning (process shutdown in progress)",
                         JOIN_TIMEOUT,
                     );
@@ -1800,9 +1800,9 @@ impl InterpreterPool {
         request_logging: bool,
     ) -> Result<Self, String> {
         let has_any_async = is_async_handler.iter().any(|&a| a);
-        // Set PYRE_WORKER=1 so user's app.run() becomes a no-op in sub-interpreters.
+        // Set PYRONOVA_WORKER=1 so user's app.run() becomes a no-op in sub-interpreters.
         // This replaces the fragile AST-based script filtering.
-        std::env::set_var("PYRE_WORKER", "1");
+        std::env::set_var("PYRONOVA_WORKER", "1");
 
         let raw_script = std::fs::read_to_string(script_path)
             .map_err(|e| format!("Failed to read script: {e}"))?;
@@ -1883,7 +1883,7 @@ impl InterpreterPool {
             let handle = if i >= sync_count && has_any_async {
                 // Async worker
                 std::thread::Builder::new()
-                    .name(format!("pyre-async-worker-{i}"))
+                    .name(format!("pyronova-async-worker-{i}"))
                     .spawn(move || {
                         worker_thread_loop_async(worker, &handler_names_clone, i);
                     })
@@ -1892,7 +1892,7 @@ impl InterpreterPool {
                 // Sync worker
                 let rx = sync_work_rx.clone();
                 std::thread::Builder::new()
-                    .name(format!("pyre-worker-{i}"))
+                    .name(format!("pyronova-worker-{i}"))
                     .spawn(move || {
                         worker_thread_loop(
                             worker,
@@ -2030,7 +2030,7 @@ impl Drop for SubInterpGilGuard<'_> {
 /// `PyEval_RestoreThread` / `PyEval_SaveThread` per request.
 ///
 /// This pattern works — but leaks ~1 KB per request under sustained
-/// load. Measured with a pure-C reproducer (no Rust, no Pyre,
+/// load. Measured with a pure-C reproducer (no Rust, no Pyronova,
 /// no hyper, just PyDict alloc/decref + attach/detach loop):
 ///
 ///   variant=0 (SHARED tstate across threads)   B/iter = 997
@@ -2141,15 +2141,15 @@ fn worker_thread_loop(
             };
             if status >= 500 {
                 tracing::error!(
-                    target: "pyre::access",
+                    target: "pyronova::access",
                     method = %req.method,
                     path = %req.path,
                     status,
-                    "Request failed"
+                    "PyronovaRequest failed"
                 );
             } else if status >= 400 {
                 tracing::warn!(
-                    target: "pyre::access",
+                    target: "pyronova::access",
                     method = %req.method,
                     path = %req.path,
                     status,
@@ -2157,11 +2157,11 @@ fn worker_thread_loop(
                 );
             } else {
                 tracing::info!(
-                    target: "pyre::access",
+                    target: "pyronova::access",
                     method = %req.method,
                     path = %req.path,
                     status,
-                    "Request handled"
+                    "PyronovaRequest handled"
                 );
             }
         }
@@ -2203,7 +2203,7 @@ fn worker_thread_loop_async(
         .join(", ");
 
     // Load async engine from external Python file (syntax highlighting + maintainability)
-    let engine_template = include_str!("../python/pyreframework/_async_engine.py");
+    let engine_template = include_str!("../python/pyronova/_async_engine.py");
     let engine_script =
         format!("WORKER_ID = {worker_idx}\nHANDLER_NAMES = [{handlers_array}]\n{engine_template}");
 
@@ -2220,18 +2220,18 @@ fn worker_thread_loop_async(
         // safe because METH_VARARGS ignores the third (kwargs) parameter.
         #[allow(clippy::missing_transmute_annotations)]
         let recv_def = Box::into_raw(Box::new(ffi::PyMethodDef {
-            ml_name: c"_pyre_recv".as_ptr(),
+            ml_name: c"_pyronova_recv".as_ptr(),
             ml_meth: ffi::PyMethodDefPointer {
-                PyCFunctionWithKeywords: std::mem::transmute(pyre_recv_cfunc as *const ()),
+                PyCFunctionWithKeywords: std::mem::transmute(pyronova_recv_cfunc as *const ()),
             },
             ml_flags: ffi::METH_VARARGS,
             ml_doc: std::ptr::null(),
         }));
         #[allow(clippy::missing_transmute_annotations)]
         let send_def = Box::into_raw(Box::new(ffi::PyMethodDef {
-            ml_name: c"_pyre_send".as_ptr(),
+            ml_name: c"_pyronova_send".as_ptr(),
             ml_meth: ffi::PyMethodDefPointer {
-                PyCFunctionWithKeywords: std::mem::transmute(pyre_send_cfunc as *const ()),
+                PyCFunctionWithKeywords: std::mem::transmute(pyronova_send_cfunc as *const ()),
             },
             ml_flags: ffi::METH_VARARGS,
             ml_doc: std::ptr::null(),
@@ -2242,30 +2242,30 @@ fn worker_thread_loop_async(
         let send_func =
             ffi::PyCFunction_NewEx(send_def, std::ptr::null_mut(), std::ptr::null_mut());
 
-        ffi::PyDict_SetItemString(worker.globals, c"_pyre_recv".as_ptr(), recv_func);
-        ffi::PyDict_SetItemString(worker.globals, c"_pyre_send".as_ptr(), send_func);
+        ffi::PyDict_SetItemString(worker.globals, c"_pyronova_recv".as_ptr(), recv_func);
+        ffi::PyDict_SetItemString(worker.globals, c"_pyronova_send".as_ptr(), send_func);
         ffi::Py_DECREF(recv_func);
         ffi::Py_DECREF(send_func);
 
         // Zombie-guard: each sub-interpreter stamps its pool_id as a
         // module-level constant. The async engine reads it once and
-        // passes it as the second arg to every _pyre_recv / _pyre_send
+        // passes it as the second arg to every _pyronova_recv / _pyronova_send
         // call. If a later pool's WorkerState has replaced our slot,
         // the C-FFI bridge detects the id mismatch and returns None
         // (sentinel for "your pool is gone, clean up and exit") so
         // this worker can't receive requests meant for the live pool.
         let pool_id_obj = ffi::PyLong_FromUnsignedLongLong(worker.pool_id);
         if !pool_id_obj.is_null() {
-            ffi::PyDict_SetItemString(worker.globals, c"_pyre_pool_id".as_ptr(), pool_id_obj);
+            ffi::PyDict_SetItemString(worker.globals, c"_pyronova_pool_id".as_ptr(), pool_id_obj);
             ffi::Py_DECREF(pool_id_obj);
         }
 
-        // Register _pyre_emit_log for async worker logging bridge
+        // Register _pyronova_emit_log for async worker logging bridge
         #[allow(clippy::missing_transmute_annotations)]
         let emit_log_def = Box::into_raw(Box::new(ffi::PyMethodDef {
-            ml_name: c"_pyre_emit_log".as_ptr(),
+            ml_name: c"_pyronova_emit_log".as_ptr(),
             ml_meth: ffi::PyMethodDefPointer {
-                PyCFunctionWithKeywords: std::mem::transmute(pyre_emit_log_cfunc as *const ()),
+                PyCFunctionWithKeywords: std::mem::transmute(pyronova_emit_log_cfunc as *const ()),
             },
             ml_flags: ffi::METH_VARARGS,
             ml_doc: std::ptr::null(),
@@ -2273,7 +2273,7 @@ fn worker_thread_loop_async(
         let emit_log_func =
             ffi::PyCFunction_NewEx(emit_log_def, std::ptr::null_mut(), std::ptr::null_mut());
         if !emit_log_func.is_null() {
-            ffi::PyDict_SetItemString(worker.globals, c"_pyre_emit_log".as_ptr(), emit_log_func);
+            ffi::PyDict_SetItemString(worker.globals, c"_pyronova_emit_log".as_ptr(), emit_log_func);
             ffi::Py_DECREF(emit_log_func);
         }
 
@@ -2391,7 +2391,7 @@ mod tests {
     /// up its state. Without the `pool_id` guard it would silently receive
     /// from Pool B's channel — stealing a live request.
     ///
-    /// The guard: `pyre_recv_cfunc` / `pyre_send_cfunc` accept a pool_id
+    /// The guard: `pyronova_recv_cfunc` / `pyronova_send_cfunc` accept a pool_id
     /// arg and short-circuit to None on mismatch. We exercise the guard
     /// at the Rust level (the C-FFI wrappers just do PyArg_ParseTuple
     /// then call this same path) to keep the test free of pyo3 test-rig

@@ -4,7 +4,7 @@
 
 ## 目标
 
-让 Pyre 具备工业级可观测性（Observability）：
+让 Pyronova 具备工业级可观测性（Observability）：
 1. 看到每个 worker 的 GIL 持有/等待时间
 2. 看到内存使用趋势
 3. 看到子解释器 event loop 是否被阻塞
@@ -14,7 +14,7 @@
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│                    Pyre Runtime                         │
+│                    Pyronova Runtime                         │
 │                                                         │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  │
 │  │ GIL Watchdog │  │ Memory Probe │  │ Loop Monitor │  │
@@ -27,7 +27,7 @@
 │  └──────────────────────┬───────────────────────────┘   │
 │                         │                               │
 │                         ▼                               │
-│               GET /__pyre__/metrics                     │
+│               GET /__pyronova__/metrics                     │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -118,7 +118,7 @@ pub static GIL_TOTAL_WAIT_US: AtomicU64 = AtomicU64::new(0);
 
 fn spawn_gil_watchdog() {
     std::thread::Builder::new()
-        .name("pyre-gil-watchdog".to_string())
+        .name("pyronova-gil-watchdog".to_string())
         .spawn(|| {
             loop {
                 let start = Instant::now();
@@ -169,7 +169,7 @@ async def _event_loop_monitor():
         lag = (time.perf_counter() - t0 - 0.01) * 1000
         if lag > 50:
             print(f"⚠️ [WORKER {WORKER_ID}] Event loop blocked {lag:.1f}ms")
-        # 可选：通过 _pyre_send 把 lag 数据发回 Rust 汇总
+        # 可选：通过 _pyronova_send 把 lag 数据发回 Rust 汇总
 ```
 
 **当前模式（串行 run_until_complete）的替代指标：**
@@ -203,7 +203,7 @@ let gil_hold_us = t_gil_acquire.elapsed().as_micros();
 
 ## 3. Metrics 端点设计
 
-### 路由：`GET /__pyre__/metrics`
+### 路由：`GET /__pyronova__/metrics`
 
 内置系统路由，在 `handle_request` 中优先匹配（不经过用户路由表）。
 
@@ -247,20 +247,20 @@ let gil_hold_us = t_gil_acquire.elapsed().as_micros();
 ### Prometheus 兼容格式（可选）
 
 ```
-GET /__pyre__/metrics?format=prometheus
+GET /__pyronova__/metrics?format=prometheus
 
-# HELP pyre_memory_rss_bytes Resident memory
-# TYPE pyre_memory_rss_bytes gauge
-pyre_memory_rss_bytes 70451200
+# HELP pyronova_memory_rss_bytes Resident memory
+# TYPE pyronova_memory_rss_bytes gauge
+pyronova_memory_rss_bytes 70451200
 
-# HELP pyre_gil_latency_us GIL acquisition latency
-# TYPE pyre_gil_latency_us gauge
-pyre_gil_latency_us 12
+# HELP pyronova_gil_latency_us GIL acquisition latency
+# TYPE pyronova_gil_latency_us gauge
+pyronova_gil_latency_us 12
 
-# HELP pyre_requests_total Total requests processed
-# TYPE pyre_requests_total counter
-pyre_requests_total{worker="0"} 2150000
-pyre_requests_total{worker="1"} 2148000
+# HELP pyronova_requests_total Total requests processed
+# TYPE pyronova_requests_total counter
+pyronova_requests_total{worker="0"} 2150000
+pyronova_requests_total{worker="1"} 2148000
 ```
 
 ## 4. 压测集成
@@ -270,11 +270,11 @@ pyre_requests_total{worker="1"} 2148000
 ```python
 # 在每个 benchmark scenario 运行期间
 # 1. 后台线程每秒采样 RSS
-# 2. 结束时请求 /__pyre__/metrics 获取 GIL 统计
+# 2. 结束时请求 /__pyronova__/metrics 获取 GIL 统计
 # 3. 写入 results/raw.json
 
 result = {
-    "framework": "pyre_subinterp",
+    "framework": "pyronova_subinterp",
     "scenario": "t1",
     "req_per_sec": 215000,
     "avg_latency_ms": 0.94,
@@ -293,7 +293,7 @@ result = {
 | **Stage 1** | 内存采样（psutil in runner.py） | 低 | `runner.py` |
 | **Stage 2** | per-request 耗时埋点（AtomicU64） | 低 | `interp.rs` |
 | **Stage 3** | GIL watchdog 探针线程 | 中 | `app.rs` 或新 `monitor.rs` |
-| **Stage 4** | `/__pyre__/metrics` 端点 | 中 | `handlers.rs` |
+| **Stage 4** | `/__pyronova__/metrics` 端点 | 中 | `handlers.rs` |
 | **Stage 5** | Event loop lag 监控 | 与 Phase 7.2 合并 | `interp.rs` bootstrap |
 
 ### 优先级

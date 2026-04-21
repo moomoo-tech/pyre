@@ -1,11 +1,11 @@
 //! SSE (Server-Sent Events) streaming response support.
 //!
-//! Handler returns a `PyreStream` object, then calls `stream.send("data")`
+//! Handler returns a `PyronovaStream` object, then calls `stream.send("data")`
 //! in a loop. Each send pushes a chunk to the HTTP response body.
 //!
 //! Resource lifecycle: `close()` performs deterministic channel teardown,
 //! independent of Python GC timing. This prevents zombie TCP connections
-//! when PyreStream is held by long-lived Python references.
+//! when PyronovaStream is held by long-lived Python references.
 
 use bytes::Bytes;
 use pyo3::prelude::*;
@@ -21,8 +21,8 @@ const STREAM_CHANNEL_CAP: usize = 1024;
 type StreamItem = Result<Bytes, std::convert::Infallible>;
 
 /// Python-facing stream object. Handler calls send()/send_event()/close().
-#[pyclass(frozen)]
-pub(crate) struct PyreStream {
+#[pyclass(frozen, name = "Stream")]
+pub(crate) struct PyronovaStream {
     // Wrapped in Option so close() can deterministically drop the Sender,
     // decoupling channel lifetime from Python GC (Haskell bracket pattern).
     tx: std::sync::Mutex<Option<mpsc::Sender<StreamItem>>>,
@@ -37,7 +37,7 @@ pub(crate) struct PyreStream {
 }
 
 #[pymethods]
-impl PyreStream {
+impl PyronovaStream {
     /// Create a new SSE stream. Channel is created immediately so send() works right away.
     #[new]
     #[pyo3(signature = (content_type=None, status_code=200, headers=None))]
@@ -47,7 +47,7 @@ impl PyreStream {
         headers: Option<std::collections::HashMap<String, String>>,
     ) -> Self {
         let (tx, rx) = mpsc::channel(STREAM_CHANNEL_CAP);
-        PyreStream {
+        PyronovaStream {
             tx: std::sync::Mutex::new(Some(tx)),
             rx: std::sync::Mutex::new(Some(rx)),
             content_type: content_type.unwrap_or_else(|| "text/event-stream".to_string()),
@@ -111,7 +111,7 @@ impl PyreStream {
     }
 }
 
-impl PyreStream {
+impl PyronovaStream {
     /// Take the receiver (called once by Rust handler to start streaming).
     pub(crate) fn take_rx(&self) -> Option<mpsc::Receiver<StreamItem>> {
         self.rx.lock().unwrap().take()

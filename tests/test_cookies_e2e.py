@@ -8,10 +8,10 @@ from tests.conftest import feature_server_factory
 
 SERVER = '''
 import os, json
-from pyreframework import Pyre, PyreResponse
-from pyreframework.cookies import get_cookie, set_cookie
+from pyronova import Pyronova, Response
+from pyronova.cookies import get_cookie, set_cookie
 
-app = Pyre()
+app = Pyronova()
 
 @app.get("/__ping")
 def ping(req):
@@ -19,7 +19,7 @@ def ping(req):
 
 @app.get("/set")
 def set_route(req):
-    return set_cookie(PyreResponse(body="ok"), "sid", "abc123", httponly=True)
+    return set_cookie(Response(body="ok"), "sid", "abc123", httponly=True)
 
 @app.get("/get")
 def get_route(req):
@@ -28,8 +28,8 @@ def get_route(req):
 if __name__ == "__main__":
     app.run(
         host="127.0.0.1",
-        port=int(os.environ["PYRE_PORT"]),
-        mode=os.environ["PYRE_MODE"],
+        port=int(os.environ["PYRONOVA_PORT"]),
+        mode=os.environ["PYRONOVA_MODE"],
     )
 '''
 

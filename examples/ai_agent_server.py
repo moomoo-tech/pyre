@@ -1,5 +1,5 @@
 """
-AI Agent Server — demonstrates Pyre for agentic AI applications.
+AI Agent Server — demonstrates Pyronova for agentic AI applications.
 
 Features used:
   - MCP Server (AI tool discovery)
@@ -32,9 +32,9 @@ import json
 import time
 import threading
 from pydantic import BaseModel
-from pyreframework import Pyre, PyreResponse, PyreStream
+from pyronova import Pyronova, Response, Stream
 
-app = Pyre()
+app = Pyronova()
 app.enable_cors()
 app.enable_logging()
 
@@ -57,7 +57,7 @@ def fake_llm_generate(prompt: str, max_tokens: int = 50):
     """Simulate LLM token generation with realistic latency."""
     response = f"I received your question about '{prompt}'. "
     response += "Here is a thoughtful response that demonstrates "
-    response += "streaming capabilities of the Pyre framework. "
+    response += "streaming capabilities of the Pyronova framework. "
     response += "Each token is sent individually with realistic delays."
 
     words = response.split()
@@ -109,7 +109,7 @@ def list_sessions():
 @app.get("/")
 def index(req):
     return {
-        "service": "Pyre AI Agent Server",
+        "service": "Pyronova AI Agent Server",
         "endpoints": [
             "POST /chat — chat with AI (JSON response)",
             "GET /stream?prompt=... — streaming SSE response",
@@ -145,7 +145,7 @@ def stream_chat(req):
     prompt = req.query_params.get("prompt", "hello")
     session_id = req.query_params.get("session_id", "default")
 
-    stream = PyreStream()
+    stream = Stream()
 
     def generate():
         full_response = []

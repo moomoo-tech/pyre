@@ -1,7 +1,7 @@
 """Test: Phase 7.2 async bridge — sleep(1ms) should break the 8k ceiling."""
-from pyreframework import PyreApp
+from pyronova import PyronovaApp
 
-app = PyreApp()
+app = PyronovaApp()
 
 
 def hello(req):

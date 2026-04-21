@@ -1,4 +1,4 @@
-//! `_PyreRequest` as a raw C-API heap type.
+//! `_Request` as a raw C-API heap type.
 //!
 //! PEP 684 sub-interpreters have a bug where a normal Python-class
 //! `tp_dealloc` does not reliably DECREF `__slots__` members —
@@ -12,7 +12,7 @@
 //! a custom `tp_dealloc` that synchronously `Py_XDECREF`s every slot.
 //!
 //! One type object is created per sub-interpreter (types are per-interp
-//! state) and injected into the sub-interp's globals as `_PyreRequest`.
+//! state) and injected into the sub-interp's globals as `_Request`.
 //!
 //! **Defensive invariant: NEVER add `Py_TPFLAGS_BASETYPE` to the flags.**
 //! If Python can subclass this type, CPython's `subtype_dealloc` takes
@@ -90,12 +90,12 @@ pub fn slot_rc_report() -> String {
     s
 }
 
-/// C-layout storage backing a `_PyreRequest` instance.
+/// C-layout storage backing a `_Request` instance.
 ///
 /// All seven slot pointers carry a strong reference. They are set
-/// non-null by `alloc_and_init` and Py_XDECREF'd by `pyre_request_dealloc`.
+/// non-null by `alloc_and_init` and Py_XDECREF'd by `pyronova_request_dealloc`.
 #[repr(C)]
-pub(crate) struct PyreRequestInner {
+pub(crate) struct RequestInner {
     pub ob_base: ffi::PyObject,
     pub method: *mut ffi::PyObject,
     pub path: *mut ffi::PyObject,
@@ -121,11 +121,11 @@ pub(crate) struct PyreRequestInner {
 // (each request's tp_dealloc is synchronous). So we opt out of GC
 // tracking entirely and rely on explicit Py_XDECREF + PyDict_Clear.
 
-unsafe extern "C" fn pyre_request_dealloc(obj: *mut ffi::PyObject) {
+unsafe extern "C" fn pyronova_request_dealloc(obj: *mut ffi::PyObject) {
     #[cfg(feature = "leak_detect")]
     DEALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
 
-    let inner = obj as *mut PyreRequestInner;
+    let inner = obj as *mut RequestInner;
     // Take the type BEFORE tp_free — tp_free may invalidate Py_TYPE(obj).
     let tp = ffi::Py_TYPE(obj);
 
@@ -169,21 +169,21 @@ unsafe extern "C" fn pyre_request_dealloc(obj: *mut ffi::PyObject) {
 
 // --- tp_init ------------------------------------------------------------
 //
-// Accepts the same 7 positional args the old Python `_PyreRequest.__init__`
+// Accepts the same 7 positional args the old Python `_Request.__init__`
 // did: (method, path, params, query, body_bytes, headers, client_ip).
-// Needed so Python code that constructs `_PyreRequest(...)` directly
+// Needed so Python code that constructs `_Request(...)` directly
 // (e.g. the async engine bridge in `_async_engine.py`) keeps working.
 // The fast path in Rust `build_request` skips this entirely — it fills
 // the struct via `alloc_and_init` with zero Python-side argument
 // marshalling — so this init path only pays the cost when user / async
 // code explicitly instantiates from Python.
 
-unsafe extern "C" fn pyre_request_init(
+unsafe extern "C" fn pyronova_request_init(
     self_: *mut ffi::PyObject,
     args: *mut ffi::PyObject,
     _kwargs: *mut ffi::PyObject,
 ) -> c_int {
-    let inner = self_ as *mut PyreRequestInner;
+    let inner = self_ as *mut RequestInner;
     let mut method: *mut ffi::PyObject = std::ptr::null_mut();
     let mut path: *mut ffi::PyObject = std::ptr::null_mut();
     let mut params: *mut ffi::PyObject = std::ptr::null_mut();
@@ -257,49 +257,49 @@ fn members_table() -> [ffi::PyMemberDef; 8] {
         ffi::PyMemberDef {
             name: MEMBER_NAME_METHOD.as_ptr() as *const c_char,
             type_code: TYPE_OBJECT_EX,
-            offset: offset_of!(PyreRequestInner, method) as ffi::Py_ssize_t,
+            offset: offset_of!(RequestInner, method) as ffi::Py_ssize_t,
             flags: READONLY,
             doc: std::ptr::null(),
         },
         ffi::PyMemberDef {
             name: MEMBER_NAME_PATH.as_ptr() as *const c_char,
             type_code: TYPE_OBJECT_EX,
-            offset: offset_of!(PyreRequestInner, path) as ffi::Py_ssize_t,
+            offset: offset_of!(RequestInner, path) as ffi::Py_ssize_t,
             flags: READONLY,
             doc: std::ptr::null(),
         },
         ffi::PyMemberDef {
             name: MEMBER_NAME_PARAMS.as_ptr() as *const c_char,
             type_code: TYPE_OBJECT_EX,
-            offset: offset_of!(PyreRequestInner, params) as ffi::Py_ssize_t,
+            offset: offset_of!(RequestInner, params) as ffi::Py_ssize_t,
             flags: READONLY,
             doc: std::ptr::null(),
         },
         ffi::PyMemberDef {
             name: MEMBER_NAME_QUERY.as_ptr() as *const c_char,
             type_code: TYPE_OBJECT_EX,
-            offset: offset_of!(PyreRequestInner, query) as ffi::Py_ssize_t,
+            offset: offset_of!(RequestInner, query) as ffi::Py_ssize_t,
             flags: READONLY,
             doc: std::ptr::null(),
         },
         ffi::PyMemberDef {
             name: MEMBER_NAME_BODY_BYTES.as_ptr() as *const c_char,
             type_code: TYPE_OBJECT_EX,
-            offset: offset_of!(PyreRequestInner, body_bytes) as ffi::Py_ssize_t,
+            offset: offset_of!(RequestInner, body_bytes) as ffi::Py_ssize_t,
             flags: READONLY,
             doc: std::ptr::null(),
         },
         ffi::PyMemberDef {
             name: MEMBER_NAME_HEADERS.as_ptr() as *const c_char,
             type_code: TYPE_OBJECT_EX,
-            offset: offset_of!(PyreRequestInner, headers) as ffi::Py_ssize_t,
+            offset: offset_of!(RequestInner, headers) as ffi::Py_ssize_t,
             flags: READONLY,
             doc: std::ptr::null(),
         },
         ffi::PyMemberDef {
             name: MEMBER_NAME_CLIENT_IP.as_ptr() as *const c_char,
             type_code: TYPE_OBJECT_EX,
-            offset: offset_of!(PyreRequestInner, client_ip) as ffi::Py_ssize_t,
+            offset: offset_of!(RequestInner, client_ip) as ffi::Py_ssize_t,
             flags: READONLY,
             doc: std::ptr::null(),
         },
@@ -316,13 +316,13 @@ fn members_table() -> [ffi::PyMemberDef; 8] {
 
 // --- Type registration --------------------------------------------------
 
-static TYPE_NAME: &[u8] = b"pyreframework._PyreRequest\0";
+static TYPE_NAME: &[u8] = b"pyronova._Request\0";
 
-/// Build the `_PyreRequest` type for the current sub-interpreter.
+/// Build the `_Request` type for the current sub-interpreter.
 ///
 /// Returns a new owned reference to the type object. Caller is expected
 /// to install it in the sub-interp's globals under the name
-/// `_PyreRequest` (the Python bootstrap script uses this name).
+/// `_Request` (the Python bootstrap script uses this name).
 ///
 /// # Safety
 /// Must be called with the current sub-interpreter's GIL held.
@@ -337,11 +337,11 @@ pub(crate) unsafe fn register_type() -> Result<*mut ffi::PyObject, String> {
     let slots = Box::leak(Box::new([
         ffi::PyType_Slot {
             slot: ffi::Py_tp_dealloc,
-            pfunc: pyre_request_dealloc as *mut c_void,
+            pfunc: pyronova_request_dealloc as *mut c_void,
         },
         ffi::PyType_Slot {
             slot: ffi::Py_tp_init,
-            pfunc: pyre_request_init as *mut c_void,
+            pfunc: pyronova_request_init as *mut c_void,
         },
         ffi::PyType_Slot {
             slot: ffi::Py_tp_members,
@@ -355,7 +355,7 @@ pub(crate) unsafe fn register_type() -> Result<*mut ffi::PyObject, String> {
 
     let spec = Box::leak(Box::new(ffi::PyType_Spec {
         name: TYPE_NAME.as_ptr() as *const c_char,
-        basicsize: std::mem::size_of::<PyreRequestInner>() as c_int,
+        basicsize: std::mem::size_of::<RequestInner>() as c_int,
         itemsize: 0,
         // Intentionally NO Py_TPFLAGS_BASETYPE — see module docstring.
         // Intentionally NO Py_TPFLAGS_HAVE_GC — see tp_dealloc comment.
@@ -365,12 +365,12 @@ pub(crate) unsafe fn register_type() -> Result<*mut ffi::PyObject, String> {
 
     let ty = ffi::PyType_FromSpec(spec as *mut ffi::PyType_Spec);
     if ty.is_null() {
-        return Err("PyType_FromSpec(_PyreRequest) failed".to_string());
+        return Err("PyType_FromSpec(_Request) failed".to_string());
     }
     Ok(ty)
 }
 
-/// Allocate a fresh `_PyreRequest` instance with the given slot values.
+/// Allocate a fresh `_Request` instance with the given slot values.
 ///
 /// Each `*mut PyObject` argument is a **new owned reference** whose
 /// ownership is transferred into the slot. The caller must NOT DECREF
@@ -407,9 +407,9 @@ pub(crate) unsafe fn alloc_and_init(
         ffi::Py_XDECREF(body_bytes);
         ffi::Py_XDECREF(headers);
         ffi::Py_XDECREF(client_ip);
-        return Err("PyType_GenericAlloc(_PyreRequest) failed".to_string());
+        return Err("PyType_GenericAlloc(_Request) failed".to_string());
     }
-    let inner = obj as *mut PyreRequestInner;
+    let inner = obj as *mut RequestInner;
     // PyType_GenericAlloc zero-initializes the basicsize region, so
     // the seven pointers are already NULL. Overwrite with owned refs.
     (*inner).method = method;

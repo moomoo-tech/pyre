@@ -1,11 +1,11 @@
-"""End-to-end tests for `pyreframework.crud.register_crud`.
+"""End-to-end tests for `pyronova.crud.register_crud`.
 
-Same gating as `test_db_pg.py`: requires `PYRE_TEST_PG_DSN` to point at a
+Same gating as `test_db_pg.py`: requires `PYRONOVA_TEST_PG_DSN` to point at a
 live Postgres. Locally::
 
-    docker run --rm -d --name pyre-pg -p 5433:5432 \\
-        -e POSTGRES_PASSWORD=pyre -e POSTGRES_DB=pyretest postgres:17-alpine
-    export PYRE_TEST_PG_DSN="postgres://postgres:pyre@127.0.0.1:5433/pyretest"
+    docker run --rm -d --name pyronova-pg -p 5433:5432 \\
+        -e POSTGRES_PASSWORD=pyronova -e POSTGRES_DB=pyronovatest postgres:17-alpine
+    export PYRONOVA_TEST_PG_DSN="postgres://postgres:pyronova@127.0.0.1:5433/pyronovatest"
     pytest tests/test_crud.py
 """
 
@@ -13,17 +13,17 @@ import os
 
 import pytest
 
-from pyreframework import Pyre
-from pyreframework.crud import register_crud
-from pyreframework.db import PgPool
-from pyreframework.testing import TestClient
+from pyronova import Pyronova
+from pyronova.crud import register_crud
+from pyronova.db import PgPool
+from pyronova.testing import TestClient
 
 
-PG_DSN = os.environ.get("PYRE_TEST_PG_DSN")
+PG_DSN = os.environ.get("PYRONOVA_TEST_PG_DSN")
 
 pytestmark = pytest.mark.skipif(
     PG_DSN is None,
-    reason="PYRE_TEST_PG_DSN not set — skipping Postgres integration tests",
+    reason="PYRONOVA_TEST_PG_DSN not set — skipping Postgres integration tests",
 )
 
 
@@ -34,20 +34,20 @@ def client():
     pool = PgPool.connect(PG_DSN, max_connections=4)
 
     # Fresh schema per module.
-    pool.execute("DROP TABLE IF EXISTS pyre_crud_items")
+    pool.execute("DROP TABLE IF EXISTS pyronova_crud_items")
     pool.execute("""
-        CREATE TABLE pyre_crud_items (
+        CREATE TABLE pyronova_crud_items (
             id SERIAL PRIMARY KEY,
             name TEXT NOT NULL,
             quantity INTEGER
         )
     """)
 
-    app = Pyre()
+    app = Pyronova()
     register_crud(
         app, pool,
         prefix="/items",
-        table="pyre_crud_items",
+        table="pyronova_crud_items",
         columns=["id", "name", "quantity"],
         id_column="id",
         id_type=int,
@@ -60,7 +60,7 @@ def client():
     with TestClient(app, port=None) as c:
         yield c
 
-    pool.execute("DROP TABLE IF EXISTS pyre_crud_items")
+    pool.execute("DROP TABLE IF EXISTS pyronova_crud_items")
 
 
 # ---------------------------------------------------------------------------
@@ -68,7 +68,7 @@ def client():
 # ---------------------------------------------------------------------------
 
 def test_register_rejects_bad_identifiers():
-    app = Pyre()
+    app = Pyronova()
     # No max_connections here (and below): the process-wide pool binds
     # the value from the first connect() call; pinning it to 1 starves
     # later tests that need multiple concurrent connections.
@@ -83,25 +83,25 @@ def test_register_rejects_bad_identifiers():
 
 
 def test_register_requires_id_in_columns():
-    app = Pyre()
+    app = Pyronova()
     pool = PgPool.connect(PG_DSN)
     with pytest.raises(ValueError, match="must be included in columns"):
         register_crud(
             app, pool,
             prefix="/x",
-            table="pyre_crud_items",
+            table="pyronova_crud_items",
             columns=["name"],
             id_column="id",
         )
 
 
 def test_register_rejects_bad_prefix():
-    app = Pyre()
+    app = Pyronova()
     pool = PgPool.connect(PG_DSN)
     with pytest.raises(ValueError, match="must start with"):
-        register_crud(app, pool, prefix="no-slash", table="pyre_crud_items", columns=["id"])
+        register_crud(app, pool, prefix="no-slash", table="pyronova_crud_items", columns=["id"])
     with pytest.raises(ValueError, match="must not end with"):
-        register_crud(app, pool, prefix="/trailing/", table="pyre_crud_items", columns=["id"])
+        register_crud(app, pool, prefix="/trailing/", table="pyronova_crud_items", columns=["id"])
 
 
 # ---------------------------------------------------------------------------

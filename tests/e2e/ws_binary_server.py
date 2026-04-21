@@ -1,7 +1,7 @@
 """WebSocket binary test server."""
-from pyreframework import Pyre
+from pyronova import Pyronova
 
-app = Pyre()
+app = Pyronova()
 
 @app.websocket("/echo")
 def echo(ws):

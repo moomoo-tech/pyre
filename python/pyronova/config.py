@@ -1,10 +1,10 @@
-"""Pydantic-settings base for Pyre apps.
+"""Pydantic-settings base for Pyronova apps.
 
-Thin wrapper that adds Pyre-friendly defaults so user code stays short::
+Thin wrapper that adds Pyronova-friendly defaults so user code stays short::
 
-    from pyreframework.config import PyreSettings
+    from pyronova.config import Settings
 
-    class Settings(PyreSettings):
+    class Settings(Settings):
         database_url: str
         log_level: str = "INFO"
 
@@ -19,7 +19,7 @@ Defaults:
 
 Subclasses override any of these via the usual ``model_config``::
 
-    class Settings(PyreSettings):
+    class Settings(Settings):
         model_config = SettingsConfigDict(env_prefix="APP_")
         port: int = 8000
 
@@ -35,7 +35,7 @@ def _load_pydantic_settings():
         from pydantic_settings import BaseSettings, SettingsConfigDict
     except ImportError as e:  # pragma: no cover — clear install guidance
         raise ImportError(
-            "pyreframework.config requires pydantic-settings. Install with:\n"
+            "pyronova.config requires pydantic-settings. Install with:\n"
             "    pip install 'pydantic-settings>=2'"
         ) from e
     return BaseSettings, SettingsConfigDict
@@ -45,13 +45,13 @@ _BaseSettings, _SettingsConfigDict = None, None
 
 
 def __getattr__(name: str):
-    """Lazy-import pydantic_settings only when PyreSettings is touched."""
+    """Lazy-import pydantic_settings only when Settings is touched."""
     global _BaseSettings, _SettingsConfigDict
-    if name == "PyreSettings":
+    if name == "Settings":
         if _BaseSettings is None:
             _BaseSettings, _SettingsConfigDict = _load_pydantic_settings()
 
-        class PyreSettings(_BaseSettings):
+        class Settings(_BaseSettings):
             model_config = _SettingsConfigDict(
                 env_file=".env",
                 env_file_encoding="utf-8",
@@ -59,8 +59,8 @@ def __getattr__(name: str):
                 case_sensitive=False,
             )
 
-        return PyreSettings
-    raise AttributeError(f"module 'pyreframework.config' has no attribute {name!r}")
+        return Settings
+    raise AttributeError(f"module 'pyronova.config' has no attribute {name!r}")
 
 
-__all__ = ["PyreSettings"]
+__all__ = ["Settings"]

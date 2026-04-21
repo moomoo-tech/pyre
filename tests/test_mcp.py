@@ -2,7 +2,7 @@
 
 import json
 import pytest
-from pyreframework.mcp import MCPServer, _extract_schema
+from pyronova.mcp import MCPServer, _extract_schema
 
 
 # -- Schema extraction tests --------------------------------------------------

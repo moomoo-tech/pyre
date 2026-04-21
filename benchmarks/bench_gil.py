@@ -1,13 +1,13 @@
 """Benchmark: GIL mode with decorator syntax + middleware + fallback (no logging)."""
 
-from pyreframework import Pyre, PyreResponse
+from pyronova import Pyronova, Response
 
-app = Pyre()
+app = Pyronova()
 
 
 @app.after_request
 def add_cors(req, resp):
-    return PyreResponse(
+    return Response(
         body=resp.body,
         status_code=resp.status_code,
         content_type=resp.content_type,
@@ -17,7 +17,7 @@ def add_cors(req, resp):
 
 @app.get("/")
 def index(req):
-    return "Hello from Pyre!"
+    return "Hello from Pyronova!"
 
 
 @app.get("/hello/{name}")
@@ -35,7 +35,7 @@ def search(req):
 
 @app.fallback
 def not_found(req):
-    return PyreResponse(
+    return Response(
         body={"error": "not found", "path": req.path},
         status_code=404,
         content_type="application/json",

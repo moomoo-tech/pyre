@@ -1,7 +1,7 @@
 FROM python:3.13-slim AS build
 WORKDIR /build
 
-# Rust toolchain + maturin for the Pyre engine build.
+# Rust toolchain + maturin for the Pyronova engine build.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         curl ca-certificates build-essential pkg-config libssl-dev git \
     && rm -rf /var/lib/apt/lists/*
@@ -10,17 +10,17 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
 ENV PATH="/root/.cargo/bin:${PATH}"
 RUN pip install --no-cache-dir maturin
 
-# Source copied from the build context — expects a `pyre_src/` subdirectory
+# Source copied from the build context — expects a `pyronova_src/` subdirectory
 # in this framework folder. For local iteration:
 #
-#   cp -r /path/to/pyre frameworks/pyre/pyre_src
-#   docker build -t httparena-pyre frameworks/pyre
+#   cp -r /path/to/pyronova frameworks/pyronova/pyronova_src
+#   docker build -t httparena-pyronova frameworks/pyronova
 #
-# Reference builds (Arena CI) can populate pyre_src via a submodule or
+# Reference builds (Arena CI) can populate pyronova_src via a submodule or
 # `git clone`. The Dockerfile doesn't clone on its own so the image pins
 # to exactly what's in the build context, byte-for-byte reproducible.
-COPY pyre_src /build/pyre
-RUN cd /build/pyre \
+COPY pyronova_src /build/pyronova
+RUN cd /build/pyronova \
     && RUSTFLAGS="-C target-cpu=native" \
        maturin build --release --out /wheels --compatibility linux
 

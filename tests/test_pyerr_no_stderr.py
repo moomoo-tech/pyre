@@ -27,7 +27,7 @@ def test_log_helper_present_and_wired():
     src = pathlib.Path("src/interp.rs").read_text()
     assert "fn log_and_clear_py_exception" in src
     # Hot-path call sites: handler errors, hook errors, json.dumps,
-    # run_until_complete, _PyreResponse construction, async engine exec.
+    # run_until_complete, _Response construction, async engine exec.
     assert src.count("log_and_clear_py_exception(") >= 5, (
         "expected the new logger to cover every per-request exception "
         "path; fewer than 5 call sites means we missed a PyErr_Print"
@@ -40,7 +40,7 @@ def test_log_helper_present_and_wired():
         "before_request hook {hook_name",
         "loop.run_until_complete() failed",
         "json.dumps failed",
-        "failed to create _PyreResponse",
+        "failed to create _Response",
     ]
     for marker in hot_paths:
         # Each marker is paired with log_and_clear_py_exception, not PyErr_Print.
@@ -54,23 +54,23 @@ def test_log_helper_present_and_wired():
 
 
 def test_raising_handler_does_not_spam_stderr():
-    """Run a child Pyre process that serves a route which raises, hit
+    """Run a child Pyronova process that serves a route which raises, hit
     it once, and verify stderr stays quiet. The child runs with
     `mode="subinterp"` so the PyErr_Print path is the one that would
     have been hit before the fix.
 
-    Tolerance: we don't require *zero* stderr bytes — Pyre's startup
+    Tolerance: we don't require *zero* stderr bytes — Pyronova's startup
     prints a banner and the tracing subscriber may emit one-line
     warnings. We require that there's no raw Python traceback in
     stderr (those are the 10-20+ lines of noise the bug produced).
     """
     script = textwrap.dedent("""
         import os
-        os.environ["PYRE_WORKER"] = ""
+        os.environ["PYRONOVA_WORKER"] = ""
         import threading, time, urllib.request
-        from pyreframework import Pyre
+        from pyronova import Pyronova
 
-        app = Pyre()
+        app = Pyronova()
 
         @app.get("/")
         def ok(req):

@@ -4,12 +4,12 @@ use bytes::Bytes;
 use http_body_util::Full;
 use hyper::{Response, StatusCode};
 
-pub(crate) const SERVER_HEADER: &str = concat!("Pyre/", env!("CARGO_PKG_VERSION"));
+pub(crate) const SERVER_HEADER: &str = concat!("Pyronova/", env!("CARGO_PKG_VERSION"));
 use pyo3::prelude::*;
 use pyo3::types::{PyAnyMethods, PyDict, PyList, PyString};
 
 use crate::json::py_to_json_value;
-use crate::types::{PyreResponse, ResponseData};
+use crate::types::{PyronovaResponse, ResponseData};
 use pyo3::types::PyBytes;
 
 // ---------------------------------------------------------------------------
@@ -20,8 +20,8 @@ pub(crate) fn extract_response_data(
     py: Python<'_>,
     obj: Bound<'_, pyo3::PyAny>,
 ) -> Result<ResponseData, String> {
-    // PyreResponse
-    if let Ok(resp) = obj.cast::<PyreResponse>() {
+    // PyronovaResponse
+    if let Ok(resp) = obj.cast::<PyronovaResponse>() {
         let resp = resp.get();
         let body_bound = resp.body.bind(py);
 
@@ -245,7 +245,7 @@ mod tests {
         assert!(resp.headers()["server"]
             .to_str()
             .unwrap()
-            .starts_with("Pyre/"));
+            .starts_with("Pyronova/"));
         assert_eq!(body_bytes(resp), b"{\"error\":\"not found\"}");
     }
 

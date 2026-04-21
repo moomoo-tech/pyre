@@ -1,6 +1,6 @@
 # Python GC 优化指南 — 金融量化场景
 
-> 适用于 Pyre 框架下的高频交易、实时行情、多因子计算等场景
+> 适用于 Pyronova 框架下的高频交易、实时行情、多因子计算等场景
 
 ## 为什么 GC 在金融场景下致命
 
@@ -9,7 +9,7 @@ Python 的 GC (Garbage Collector) 执行时会 Stop-The-World：
 - Gen1 回收：~1-5ms
 - Gen2 回收：~10-50ms（**致命：足以错过一个交易窗口**）
 
-### Pyre 架构下的影响
+### Pyronova 架构下的影响
 
 | 模式 | GC 影响 | 检测方式 |
 |------|---------|---------|
@@ -19,7 +19,7 @@ Python 的 GC (Garbage Collector) 执行时会 Stop-The-World：
 
 ### 如何用 Watchdog 检测 GC 停顿
 
-现象特征（`/__pyre__/metrics` 看板）：
+现象特征（`/__pyronova__/metrics` 看板）：
 ```json
 {
     "gil_peak_us": 45000,    // 45ms 延迟毛刺 ← GC 嫌疑
@@ -96,11 +96,11 @@ class QuoteBuffer:
 buffer = QuoteBuffer()
 ```
 
-## Pyre 框架未来计划
+## Pyronova 框架未来计划
 
 | 功能 | 状态 | 说明 |
 |------|------|------|
-| GIL Watchdog 延迟探测 | ✅ 已实现 | `PYRE_METRICS=1` 启用 |
+| GIL Watchdog 延迟探测 | ✅ 已实现 | `PYRONOVA_METRICS=1` 启用 |
 | 内存 RSS 监控 | ✅ 已实现 | `get_gil_metrics()` 返回 RSS |
 | Event Loop lag 监控 | 📋 Phase 7.2 | asyncio 心跳协程 |
 | `app.gc_control()` API | 📋 计划 | 框架层面的 GC 开关 |

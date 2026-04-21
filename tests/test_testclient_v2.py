@@ -5,8 +5,8 @@ from __future__ import annotations
 
 import pytest
 
-from pyreframework import Pyre, PyreResponse
-from pyreframework.testing import TestClient
+from pyronova import Pyronova, Response
+from pyronova.testing import TestClient
 
 
 # ---------------------------------------------------------------------------
@@ -15,7 +15,7 @@ from pyreframework.testing import TestClient
 
 
 def test_params_dict_is_urlencoded():
-    app = Pyre()
+    app = Pyronova()
 
     @app.get("/q")
     def q(req):
@@ -30,7 +30,7 @@ def test_params_dict_is_urlencoded():
 
 
 def test_params_merges_with_existing_query():
-    app = Pyre()
+    app = Pyronova()
 
     @app.get("/q")
     def q(req):
@@ -44,7 +44,7 @@ def test_params_merges_with_existing_query():
 
 
 def test_params_doseq_list():
-    app = Pyre()
+    app = Pyronova()
 
     @app.get("/q")
     def q(req):
@@ -62,11 +62,11 @@ def test_params_doseq_list():
 
 
 def test_cookies_persist_across_requests():
-    app = Pyre()
+    app = Pyronova()
 
     @app.post("/login")
     def login(req):
-        return PyreResponse(
+        return Response(
             body="",
             headers={"Set-Cookie": "sid=abc123; Path=/"},
         )
@@ -88,11 +88,11 @@ def test_cookies_persist_across_requests():
 
 
 def test_follows_redirects_by_default():
-    app = Pyre()
+    app = Pyronova()
 
     @app.get("/from")
     def redir(req):
-        return PyreResponse(body="", status_code=302, headers={"Location": "/to"})
+        return Response(body="", status_code=302, headers={"Location": "/to"})
 
     @app.get("/to")
     def dest(req):
@@ -106,11 +106,11 @@ def test_follows_redirects_by_default():
 
 
 def test_can_disable_redirect_following():
-    app = Pyre()
+    app = Pyronova()
 
     @app.get("/from")
     def redir(req):
-        return PyreResponse(body="", status_code=302, headers={"Location": "/to"})
+        return Response(body="", status_code=302, headers={"Location": "/to"})
 
     @app.get("/to")
     def dest(req):
@@ -129,11 +129,11 @@ def test_can_disable_redirect_following():
 
 
 def test_options_method():
-    app = Pyre()
+    app = Pyronova()
 
     @app.options("/thing")
     def opts(req):
-        return PyreResponse(body="", status_code=204, headers={"Allow": "GET, POST"})
+        return Response(body="", status_code=204, headers={"Allow": "GET, POST"})
 
     with TestClient(app, port=None) as c:
         r = c.options("/thing")
@@ -144,7 +144,7 @@ def test_options_method():
 
 
 def test_head_method():
-    app = Pyre()
+    app = Pyronova()
 
     @app.head("/ping")
     def head(req):
@@ -161,7 +161,7 @@ def test_head_method():
 
 
 def test_response_ok_true_on_2xx():
-    app = Pyre()
+    app = Pyronova()
 
     @app.get("/")
     def root(req):
@@ -173,11 +173,11 @@ def test_response_ok_true_on_2xx():
 
 
 def test_response_ok_false_on_4xx():
-    app = Pyre()
+    app = Pyronova()
 
     @app.get("/")
     def root(req):
-        return PyreResponse(body="nope", status_code=404)
+        return Response(body="nope", status_code=404)
 
     with TestClient(app, port=None) as c:
         r = c.get("/")
@@ -185,11 +185,11 @@ def test_response_ok_false_on_4xx():
 
 
 def test_raise_for_status_raises_on_error():
-    app = Pyre()
+    app = Pyronova()
 
     @app.get("/bad")
     def bad(req):
-        return PyreResponse(body="boom", status_code=500)
+        return Response(body="boom", status_code=500)
 
     with TestClient(app, port=None) as c:
         r = c.get("/bad")
@@ -198,7 +198,7 @@ def test_raise_for_status_raises_on_error():
 
 
 def test_raise_for_status_noop_on_success():
-    app = Pyre()
+    app = Pyronova()
 
     @app.get("/")
     def root(req):
@@ -210,7 +210,7 @@ def test_raise_for_status_noop_on_success():
 
 
 def test_json_accepts_list_response():
-    app = Pyre()
+    app = Pyronova()
 
     @app.get("/nums")
     def nums(req):
@@ -227,7 +227,7 @@ def test_json_accepts_list_response():
 
 
 def test_request_method_accepts_arbitrary_verbs():
-    app = Pyre()
+    app = Pyronova()
 
     @app.route("PATCH", "/thing")
     def patch(req):

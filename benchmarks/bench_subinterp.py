@@ -1,12 +1,12 @@
 """Benchmark: sub-interpreter mode with headers + query_params."""
 
-from pyreframework import PyreApp
+from pyronova import PyronovaApp
 
-app = PyreApp()
+app = PyronovaApp()
 
 
 def index(req):
-    return "Hello from Pyre!"
+    return "Hello from Pyronova!"
 
 
 def greet(req):

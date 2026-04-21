@@ -1,11 +1,11 @@
-# Pyre Examples
+# Pyronova Examples
 
 Three production-grade demo applications.
 
 ## Setup
 
 ```bash
-# Build Pyre first
+# Build Pyronova first
 cd ..
 maturin develop --release
 

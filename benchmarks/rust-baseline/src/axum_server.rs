@@ -1,4 +1,4 @@
-//! Pure Rust Axum server — same tech stack as Pyre (Tokio + Hyper).
+//! Pure Rust Axum server — same tech stack as Pyronova (Tokio + Hyper).
 //! Equivalent endpoints to examples/hello.py for fair comparison.
 
 use axum::{extract::Path, routing::get, Json, Router};
