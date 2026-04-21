@@ -611,10 +611,34 @@ pub(crate) async fn handle_request_subinterp(
         let method_log = Arc::clone(&method);
         let path_log = Arc::clone(&path);
         // v1 streaming limitation: sub-interpreter hybrid mode always buffers
-        // the body before dispatching to the GIL route. A proper streaming
-        // path in sub-interp mode needs per-route flag propagation into the
-        // accept loop before the body collect — deferred to v2. Use
-        // `mode="default"` for streaming-sensitive workloads today.
+        // the body before dispatching to the GIL route — a proper
+        // streaming path in sub-interp mode needs per-route flag
+        // propagation into the accept loop before the body collect
+        // (v2). As a compatibility shim so `for chunk in req.stream`
+        // still works on streaming routes under hybrid mode, wrap the
+        // already-collected bytes in a one-shot channel: one Data frame
+        // followed by Eof. The API is identical; only the memory-saving
+        // property is lost.
+        let is_stream_route = handler_idx != usize::MAX
+            && routes.is_stream.get(handler_idx).copied().unwrap_or(false);
+        let body_stream_rx = if is_stream_route {
+            let (tx, rx) = std::sync::mpsc::channel::<crate::body_stream::ChunkMsg>();
+            if !body_bytes.is_empty() {
+                let _ = tx.send(crate::body_stream::ChunkMsg::Data(body_bytes.clone()));
+            }
+            let _ = tx.send(crate::body_stream::ChunkMsg::Eof);
+            Arc::new(std::sync::Mutex::new(Some(rx)))
+        } else {
+            Arc::new(std::sync::Mutex::new(None))
+        };
+        // For stream routes, the body is served through the stream —
+        // keep body_bytes empty so handler code that reads `.body`
+        // doesn't double-consume.
+        let body_bytes_for_req = if is_stream_route {
+            Bytes::new()
+        } else {
+            body_bytes
+        };
         let sky_req = PyreRequest {
             method,
             path,
@@ -623,8 +647,8 @@ pub(crate) async fn handle_request_subinterp(
             headers_source: crate::types::LazyHeaders::Raw(raw_headers),
             headers_cache: std::sync::OnceLock::new(),
             client_ip_addr,
-            body_bytes,
-            body_stream_rx: Arc::new(std::sync::Mutex::new(None)),
+            body_bytes: body_bytes_for_req,
+            body_stream_rx,
         };
 
         let routes_ref = Arc::clone(&routes);

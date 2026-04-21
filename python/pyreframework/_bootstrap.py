@@ -145,19 +145,22 @@ _mock_pyreframework.redirect = _redirect
 # Pyre wrapper (no-op in worker mode)
 class _MockPyre:
     def __init__(self, debug=False, log_config=None): pass
-    def get(self, path, handler=None, *, gil=False, model=None):
+    # Route decorators accept whatever kwargs the real API takes (gil,
+    # model, stream, ...); swallow them so adding a new flag to the real
+    # decorator doesn't break sub-interp replay until we update this mock.
+    def get(self, path, handler=None, **kw):
         if handler: return handler
         return lambda f: f
-    def post(self, path, handler=None, *, gil=False, model=None):
+    def post(self, path, handler=None, **kw):
         if handler: return handler
         return lambda f: f
-    def put(self, path, handler=None, *, gil=False, model=None):
+    def put(self, path, handler=None, **kw):
         if handler: return handler
         return lambda f: f
-    def delete(self, path, handler=None, *, gil=False, model=None):
+    def delete(self, path, handler=None, **kw):
         if handler: return handler
         return lambda f: f
-    def patch(self, path, handler=None, *, gil=False, model=None):
+    def patch(self, path, handler=None, **kw):
         if handler: return handler
         return lambda f: f
     def route(self, *a, **kw):
@@ -181,6 +184,20 @@ class _MockPyre:
     def enable_logging(self): pass
     def enable_cors(self, **kw): pass
     def run(self, **kw): pass
+    def __getattr__(self, name):
+        # Fallback: any unrecognized attribute access (e.g. future
+        # feature toggles like enable_compression, enable_request_logging,
+        # set_max_body_size, set_cors_config, etc.) resolves to a harmless
+        # no-op. Sub-interp replay only needs route decorators to succeed —
+        # runtime feature calls are ignored here and applied once on the
+        # main interpreter.
+        return lambda *a, **kw: None
+    @property
+    def max_body_size(self):
+        return 10 * 1024 * 1024
+    @max_body_size.setter
+    def max_body_size(self, _v):
+        pass
     @property
     def state(self):
         return {}
@@ -251,6 +268,29 @@ _cookies_mod.delete_cookie = _delete_cookie
 sys.modules["pyreframework.cookies"] = _cookies_mod
 sys.modules["pyreframework.rpc"] = types.ModuleType("pyreframework.rpc")
 sys.modules["pyreframework.testing"] = types.ModuleType("pyreframework.testing")
+
+# -- Mock pyreframework.db and .crud for sub-interp replay --------------------
+#
+# The real PgPool lives in the main interpreter and writes to a Rust-side
+# OnceLock; sub-interpreter replays only need the imports to succeed.
+# DB-backed handlers are `gil=True` — they execute on the main interp,
+# not inside a sub-interp, so the mock methods below are never actually
+# called on the hot path.
+
+_db_mod = types.ModuleType("pyreframework.db")
+class _MockPgPool:
+    @classmethod
+    def connect(cls, *a, **kw): return cls()
+    def fetch_one(self, *a, **kw): return None
+    def fetch_all(self, *a, **kw): return []
+    def fetch_scalar(self, *a, **kw): return None
+    def execute(self, *a, **kw): return 0
+_db_mod.PgPool = _MockPgPool
+sys.modules["pyreframework.db"] = _db_mod
+
+_crud_mod = types.ModuleType("pyreframework.crud")
+_crud_mod.register_crud = lambda *a, **kw: None
+sys.modules["pyreframework.crud"] = _crud_mod
 
 # -- Pydantic stub (WARNING: replaces real pydantic in sub-interpreters) ------
 # Pydantic V2's pydantic-core is a Rust/PyO3 extension that cannot load in
