@@ -12,6 +12,37 @@ Built on Per-Interpreter GIL (PEP 684) and a Rust async core, Pyre runs Python h
 - Sustained **400k QPS**: RSS grew **4 MB over 73.8M requests** in 180s
   (≈0 B/req). Zero errors, zero leaks.
 
+### What's new in v1.6
+
+- **`pyre` CLI** — `pyre run <module:app>` (prod), `pyre dev <module:app>`
+  (hot-reload + debug logging), `pyre routes <module:app>` (print the
+  route table). `python -m pyreframework ...` works the same way.
+- **Kubernetes health probes** — one-liner `app.enable_health_probes()`
+  registers `/livez` (always 200) and `/readyz` (runs every
+  `@app.readiness_check("name")`, sync or async; any failure → 503 with
+  JSON diagnostics).
+- **Prometheus metrics** — `app.enable_metrics()` exposes
+  `GET /metrics` with RED-style counters (total, by status class, by
+  method, latency sum + count). Counters live in `app.state` so they
+  aggregate across sub-interpreter workers.
+- **X-Request-ID** — `app.enable_request_id()` mints a UUID if the
+  client didn't send one, echoes it back on every response, and pushes
+  it into the per-request `ctx` for downstream handlers.
+- **Request-scoped context** — `from pyreframework.context import ctx`;
+  `ContextVar`-backed `ctx.get/set/request_id()`, reset per request so
+  recycled worker threads don't leak state.
+- **`PyreSettings`** — thin pydantic-settings base (lazy import, opt-in)
+  with Pyre-friendly defaults (case-insensitive, ignore unknown, `.env`).
+- **TestClient v2** — `params=`, persistent cookie jar,
+  `follow_redirects=False`, `OPTIONS`/`HEAD`, `.ok`/`.raise_for_status()`,
+  `websocket_connect()` via the `websockets` package.
+- **Streaming DB cursor** — `pool.fetch_iter(sql, ...)` yields Postgres
+  rows with O(1) memory (see `docs/positioning-and-roadmap.md`).
+- **Misc.**: admission gate skipped for small bodies (fixes HTTP/2
+  regression), `drain_count()` on `PyreBodyStream` for upload
+  throughput, fast-path responses with zero-cost guard, TLS handshake
+  10 s timeout (Slowloris).
+
 ### What's new in v1.5.0
 
 - **Sub-interpreter memory-leak root cause closed.** Unbounded RSS growth
@@ -271,15 +302,20 @@ Graceful degradation under extreme concurrency — still 356k QPS with zero erro
 | Memory RSS monitoring | ✅ | ❌ | ❌ |
 | Request counters | ✅ | ❌ | ❌ |
 | Structured logging | ✅ | ✅ | ✅ |
+| Prometheus `/metrics` | ✅ `app.enable_metrics()` | third-party | ❌ |
+| Health probes `/livez` + `/readyz` | ✅ `app.enable_health_probes()` | third-party | ❌ |
+| X-Request-ID + request ctx | ✅ `app.enable_request_id()` + `ctx` | third-party | ❌ |
 
 ### Developer Experience
 
 | Feature | Pyre | FastAPI | Robyn | Notes |
 |---------|------|---------|-------|-------|
 | Type stubs (.pyi) | ✅ | ✅ native | ✅ | |
-| TestClient | ✅ | ✅ | ❌ | |
+| TestClient | ✅ full (cookies, redirects, ws) | ✅ | ❌ | |
 | Env var config | ✅ | ✅ | ✅ | |
-| Hot reload | ✅ `reload=True` | ✅ `--reload` | ✅ | |
+| Hot reload | ✅ `reload=True` / `pyre dev` | ✅ `--reload` | ✅ | |
+| CLI (`run` / `dev` / `routes`) | ✅ `pyre` | ✅ `fastapi` (newer) | ❌ | |
+| Pydantic-settings config | ✅ `PyreSettings` | ✅ | ❌ | |
 | OpenAPI docs | — | ✅ | ✅ | Pyre uses MCP for AI discovery; type hints serve as docs |
 | Dependency injection | — | ✅ `Depends()` | ✅ | Pyre uses `before_request` hooks for the same purpose |
 
