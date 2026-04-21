@@ -220,7 +220,7 @@ fn build_fast_response(
 /// 30 s budget as the buffered path).
 async fn stream_body_feeder(
     body: Incoming,
-    tx: std::sync::mpsc::Sender<crate::body_stream::ChunkMsg>,
+    tx: tokio::sync::mpsc::Sender<crate::body_stream::ChunkMsg>,
     max_size: usize,
 ) {
     use crate::body_stream::ChunkMsg;
@@ -236,27 +236,39 @@ async fn stream_body_feeder(
         {
             Ok(Some(Ok(f))) => f,
             Ok(Some(Err(e))) => {
-                let _ = tx.send(ChunkMsg::Err(format!("body read: {e}")));
+                let _ = tx.send(ChunkMsg::Err(format!("body read: {e}"))).await;
                 return;
             }
             Ok(None) => {
-                let _ = tx.send(ChunkMsg::Eof);
+                let _ = tx.send(ChunkMsg::Eof).await;
                 return;
             }
             Err(_) => {
-                let _ = tx.send(ChunkMsg::Err("body read timeout (30s)".into()));
+                let _ = tx
+                    .send(ChunkMsg::Err("body read timeout (30s)".into()))
+                    .await;
                 return;
             }
         };
         if let Ok(chunk) = frame_res.into_data() {
             total = total.saturating_add(chunk.len());
             if total > max_size {
-                let _ = tx.send(ChunkMsg::Err(format!(
-                    "body exceeds max_body_size ({max_size} bytes)"
-                )));
+                let _ = tx
+                    .send(ChunkMsg::Err(format!(
+                        "body exceeds max_body_size ({max_size} bytes)"
+                    )))
+                    .await;
                 return;
             }
-            if tx.send(ChunkMsg::Data(chunk)).is_err() {
+            // `.send().await` propagates backpressure all the way back to
+            // hyper's poll_frame: a slow Python consumer blocks the feeder,
+            // which blocks the next poll, which closes the TCP receive
+            // window so the client slows down on the wire. The previous
+            // `std::sync::mpsc::Sender::send()` was unbounded — a fast
+            // network peer could dump gigabytes into RAM before the Python
+            // handler consumed the first chunk. See body_stream.rs module
+            // doc for the bound (CHANNEL_CAPACITY = 8 frames in flight).
+            if tx.send(ChunkMsg::Data(chunk)).await.is_err() {
                 // Handler dropped the stream — no one to receive further chunks.
                 return;
             }
@@ -342,7 +354,9 @@ pub(crate) async fn handle_request(
         // Streaming path: spawn a feeder that pushes body frames into a
         // channel. The handler takes the receiver out via `req.stream`
         // on first access.
-        let (tx, rx) = std::sync::mpsc::channel::<crate::body_stream::ChunkMsg>();
+        let (tx, rx) = tokio::sync::mpsc::channel::<crate::body_stream::ChunkMsg>(
+            crate::body_stream::CHANNEL_CAPACITY,
+        );
         let cap = max_body_size();
         tokio::spawn(stream_body_feeder(body_obj, tx, cap));
         (Bytes::new(), Arc::new(std::sync::Mutex::new(Some(rx))))
@@ -705,7 +719,9 @@ pub(crate) async fn handle_request_subinterp(
     // Decide body handling: stream-capable GIL routes bypass the collect
     // (proper streaming), everyone else collects up front.
     let (body_bytes, body_stream_rx_early) = if is_stream_route {
-        let (tx, rx) = std::sync::mpsc::channel::<crate::body_stream::ChunkMsg>();
+        let (tx, rx) = tokio::sync::mpsc::channel::<crate::body_stream::ChunkMsg>(
+            crate::body_stream::CHANNEL_CAPACITY,
+        );
         let cap = max_body_size();
         tokio::spawn(stream_body_feeder(body_obj, tx, cap));
         (
@@ -736,13 +752,18 @@ pub(crate) async fn handle_request_subinterp(
         let body_stream_rx = if let Some(rx) = body_stream_rx_early.clone() {
             rx
         } else if is_stream_route {
-            // Defensive: the is_stream branch above always populates
-            // body_stream_rx_early; this arm keeps the types lined up.
-            let (tx, rx) = std::sync::mpsc::channel::<crate::body_stream::ChunkMsg>();
+            // Defensive dead-branch: the `is_stream_route` arm above
+            // always populates body_stream_rx_early, so control never
+            // reaches here. Keep it type-correct and `try_send` (non-
+            // awaiting) so a future refactor doesn't accidentally
+            // reintroduce a pre-awaited send on a channel nobody reads.
+            let (tx, rx) = tokio::sync::mpsc::channel::<crate::body_stream::ChunkMsg>(
+                crate::body_stream::CHANNEL_CAPACITY,
+            );
             if !body_bytes.is_empty() {
-                let _ = tx.send(crate::body_stream::ChunkMsg::Data(body_bytes.clone()));
+                let _ = tx.try_send(crate::body_stream::ChunkMsg::Data(body_bytes.clone()));
             }
-            let _ = tx.send(crate::body_stream::ChunkMsg::Eof);
+            let _ = tx.try_send(crate::body_stream::ChunkMsg::Eof);
             Arc::new(std::sync::Mutex::new(Some(rx)))
         } else {
             Arc::new(std::sync::Mutex::new(None))

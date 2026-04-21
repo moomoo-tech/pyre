@@ -3,9 +3,19 @@
 //!
 //! Opt-in per route via `@app.post("/path", gil=True, stream=True)`. The
 //! accept loop skips `Limited::new().collect()` and instead spawns a feeder
-//! task that pushes each body frame into an `std::sync::mpsc` channel; the
+//! task that pushes each body frame into a **bounded** channel; the
 //! handler sees `req.stream` as a Python iterator yielding `bytes` chunks
 //! and terminating with `StopIteration` on EOF.
+//!
+//! The channel is `tokio::sync::mpsc` with capacity 8 rather than
+//! `std::sync::mpsc` unbounded — the bound propagates backpressure all
+//! the way to the TCP stack. If the Python handler is slow (say parsing
+//! a 10 GB upload line-by-line), the feeder `.send().await` suspends,
+//! which in turn stops `poll_frame` from being driven, and eventually
+//! the TCP receive window closes on the client side. No OOM, no silent
+//! space leak. The crossover point for "full" is ~8 × typical frame
+//! size (~64 KB each) = ~512 KB in flight per connection, which is
+//! deliberately modest.
 //!
 //! Scope (v1):
 //!   * Only `gil=True` routes. Sub-interpreter streaming needs a C-FFI
@@ -23,6 +33,11 @@ use bytes::Bytes;
 use pyo3::exceptions::{PyIOError, PyStopIteration};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
+
+/// Bounded-channel capacity. Low enough to enforce real backpressure
+/// on a slow consumer, high enough that a steady-state 64 KB-frame
+/// stream never stalls on round-trip scheduling latency.
+pub(crate) const CHANNEL_CAPACITY: usize = 8;
 
 /// A message on the feeder → handler channel.
 pub(crate) enum ChunkMsg {
@@ -46,11 +61,11 @@ pub(crate) enum ChunkMsg {
 /// `StopIteration` immediately.
 #[pyclass]
 pub(crate) struct PyreBodyStream {
-    rx: Mutex<Option<std::sync::mpsc::Receiver<ChunkMsg>>>,
+    rx: Mutex<Option<tokio::sync::mpsc::Receiver<ChunkMsg>>>,
 }
 
 impl PyreBodyStream {
-    pub(crate) fn new(rx: std::sync::mpsc::Receiver<ChunkMsg>) -> Self {
+    pub(crate) fn new(rx: tokio::sync::mpsc::Receiver<ChunkMsg>) -> Self {
         PyreBodyStream {
             rx: Mutex::new(Some(rx)),
         }
@@ -72,30 +87,29 @@ impl PyreBodyStream {
         // same stream object. Release the GIL during the recv so other
         // threads can make progress.
         let rx_opt = { self.rx.lock().unwrap().take() };
-        let Some(rx) = rx_opt else {
+        let Some(mut rx) = rx_opt else {
             return Err(PyStopIteration::new_err("stream exhausted"));
         };
 
-        // Move rx into the closure (Sync-by-reference is not satisfied for
-        // std::sync::mpsc::Receiver, but FnOnce-by-value is fine) and hand
-        // it back out after the blocking recv.
-        let (rx, msg) = py.detach(move || {
-            let msg = rx.recv();
-            (rx, msg)
-        });
+        // tokio::sync::mpsc::Receiver::blocking_recv is explicitly designed
+        // for "call from a blocking context" — the handler thread here — and
+        // suspends until the feeder produces a frame. No polling, no
+        // busy-wait. Release the GIL while we wait so other Python threads
+        // make progress.
+        let msg = py.detach(|| rx.blocking_recv());
 
         match msg {
-            Ok(ChunkMsg::Data(b)) => {
+            Some(ChunkMsg::Data(b)) => {
                 // Put the receiver back for the next iteration.
                 *self.rx.lock().unwrap() = Some(rx);
                 Ok(PyBytes::new(py, &b).unbind())
             }
-            Ok(ChunkMsg::Eof) => {
+            Some(ChunkMsg::Eof) => {
                 // Drop receiver — subsequent __next__ fast-path to StopIteration.
                 Err(PyStopIteration::new_err(py.None()))
             }
-            Ok(ChunkMsg::Err(e)) => Err(PyIOError::new_err(e)),
-            Err(_) => {
+            Some(ChunkMsg::Err(e)) => Err(PyIOError::new_err(e)),
+            None => {
                 // Sender dropped without sending Eof — treat as EOF.
                 Err(PyStopIteration::new_err(py.None()))
             }

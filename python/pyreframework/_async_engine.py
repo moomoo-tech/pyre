@@ -117,7 +117,30 @@ async def _pyre_engine():
     loop = asyncio.get_running_loop()
     t = threading.Thread(target=_fetcher_thread, args=(loop,), daemon=False)
     t.start()
-    await asyncio.to_thread(t.join)
+    try:
+        await asyncio.to_thread(t.join)
+    finally:
+        # Graceful asyncio shutdown. Without this, Py_EndInterpreter
+        # would tear the VM down while pending tasks (background
+        # asyncio.create_task'd work) still hold FDs — orphan sockets,
+        # possible SIGSEGV during CPython's emergency task GC.
+        #
+        # 1. Cancel every task still pending on this loop.
+        # 2. Drain cancellations with gather(return_exceptions=True).
+        # 3. Close async generators (asyncpg-style connection pools
+        #    use async generators for iterate-on-demand results).
+        try:
+            pending = [t for t in asyncio.all_tasks(loop)
+                       if t is not asyncio.current_task()]
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            await loop.shutdown_asyncgens()
+        except Exception:
+            # Shutdown is best-effort; any exception here is better
+            # logged than allowed to propagate and abort the Py_EndInterpreter.
+            _log.exception("asyncio shutdown error")
 
 
 asyncio.run(_pyre_engine())

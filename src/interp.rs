@@ -543,6 +543,49 @@ pub(crate) unsafe fn py_bytes(data: &[u8]) -> Option<PyObjRef> {
 /// pending Python exception before returning None. Callers must not
 /// pass a non-NULL PyObject back to Python with a set exception state
 /// (CPython raises SystemError in that case).
+/// Capture the currently-set Python exception as a string and route it
+/// through Rust's async `tracing` pipeline. Replaces ad-hoc `PyErr_Print`
+/// calls on the hot path — `PyErr_Print` writes directly and
+/// synchronously to the process's `stderr` fd, which at 500k rps under
+/// an error-triggering flood serializes every worker on the kernel
+/// stdio lock, burning CPU in kernel-mode context switches while
+/// throughput collapses. Goes through `tracing::error!` so the
+/// already-configured `tracing_appender::non_blocking` writer swallows
+/// it without stalling the request path.
+///
+/// No-op if no exception is pending. Always clears the error indicator.
+pub(crate) unsafe fn log_and_clear_py_exception(context: &str) {
+    if ffi::PyErr_Occurred().is_null() {
+        return;
+    }
+    // PyErr_GetRaisedException is the post-3.12 replacement for the
+    // Fetch/Normalize/Restore triple — returns a single normalized
+    // exception instance and clears the error indicator in one step.
+    let exc = ffi::PyErr_GetRaisedException();
+    if exc.is_null() {
+        return;
+    }
+
+    let repr = ffi::PyObject_Str(exc);
+    let msg = if !repr.is_null() {
+        let mut size: ffi::Py_ssize_t = 0;
+        let data = ffi::PyUnicode_AsUTF8AndSize(repr, &mut size);
+        let s = if data.is_null() {
+            "<non-utf8 exception repr>".to_string()
+        } else {
+            String::from_utf8_lossy(std::slice::from_raw_parts(data as *const u8, size as usize))
+                .into_owned()
+        };
+        ffi::Py_DECREF(repr);
+        s
+    } else {
+        "<PyObject_Str failed>".to_string()
+    };
+
+    ffi::Py_DECREF(exc);
+    tracing::error!(target: "pyre::server", %context, error = %msg, "Python exception");
+}
+
 pub(crate) unsafe fn py_str_dict(map: &HashMap<String, String>) -> Option<PyObjRef> {
     let dict = PyObjRef::from_owned(ffi::PyDict_New())?;
     for (k, v) in map {
@@ -1150,7 +1193,7 @@ def _attach_pyre_request_helpers(t):\n    from urllib.parse import parse_qs\n   
             kwargs.as_ptr(),
         ))
         .ok_or_else(|| {
-            ffi::PyErr_Print();
+            log_and_clear_py_exception("_PyreResponse construction");
             "failed to create _PyreResponse".to_string()
         })
     }
@@ -1201,7 +1244,7 @@ def _attach_pyre_request_helpers(t):\n    from urllib.parse import parse_qs\n   
         match result {
             Some(r) => Ok(r),
             None => {
-                ffi::PyErr_Print();
+                log_and_clear_py_exception("loop.run_until_complete");
                 Err("loop.run_until_complete() failed".to_string())
             }
         }
@@ -1222,7 +1265,7 @@ def _attach_pyre_request_helpers(t):\n    from urllib.parse import parse_qs\n   
             std::ptr::null_mut(),
         ))
         .ok_or_else(|| {
-            ffi::PyErr_Print();
+            log_and_clear_py_exception("json.dumps");
             "json.dumps failed".to_string()
         })?;
 
@@ -1506,7 +1549,7 @@ def _attach_pyre_request_helpers(t):\n    from urllib.parse import parse_qs\n   
                         // that signal denial by raising. Return an error
                         // so the caller serves 500 instead of the
                         // unprotected handler output.
-                        ffi::PyErr_Print();
+                        log_and_clear_py_exception("before_request hook");
                         return Err(format!(
                             "before_request hook {hook_name:?} raised an exception"
                         ));
@@ -1536,7 +1579,7 @@ def _attach_pyre_request_helpers(t):\n    from urllib.parse import parse_qs\n   
             }
             None => {
                 // req_for_hooks dropped here automatically → DECREF
-                ffi::PyErr_Print();
+                log_and_clear_py_exception("sub-interp handler");
                 return Err("handler raised an exception".to_string());
             }
         };
@@ -1570,7 +1613,7 @@ def _attach_pyre_request_helpers(t):\n    from urllib.parse import parse_qs\n   
                             }
                         }
                         None => {
-                            ffi::PyErr_Print();
+                            log_and_clear_py_exception("after_request hook");
                         }
                     }
                 }
@@ -2151,7 +2194,7 @@ fn worker_thread_loop_async(
             worker.globals,
         );
         if result.is_null() {
-            ffi::PyErr_Print();
+            log_and_clear_py_exception("async engine script");
         } else {
             ffi::Py_DECREF(result);
         }

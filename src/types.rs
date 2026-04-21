@@ -45,7 +45,7 @@ pub(crate) struct PyreRequest {
     /// keep `drop_in_place::<PyreRequest>` free of `_Py_Dealloc` — that
     /// would break `cargo test` linking for the pure-Rust unit tests.
     pub(crate) body_stream_rx:
-        Arc<std::sync::Mutex<Option<std::sync::mpsc::Receiver<crate::body_stream::ChunkMsg>>>>,
+        Arc<std::sync::Mutex<Option<tokio::sync::mpsc::Receiver<crate::body_stream::ChunkMsg>>>>,
 }
 
 /// Manual Clone: OnceLock doesn't impl Clone, so we reset the cache on clone.

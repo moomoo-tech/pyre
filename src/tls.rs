@@ -115,17 +115,23 @@ pub(crate) fn build_acceptor(cert_path: &str, key_path: &str) -> Result<Arc<TlsA
 }
 
 /// Perform the TLS handshake and wrap the result in `MaybeTlsStream::Tls`.
-/// On handshake failure, returns an error string for the caller to log; the
-/// connection is dropped (clients see a TLS alert / closed connection).
+///
+/// Bounded by a hard 10 s handshake timeout — defense against TLS
+/// Slowloris attacks where a peer opens a TCP connection then dribbles
+/// ClientHello bytes one per 30 s, pinning a file descriptor and an
+/// async task indefinitely. With 65k half-open connections a single
+/// laptop can exhaust the server's fd budget without ever finishing
+/// a handshake; the timeout closes the loop.
 pub(crate) async fn wrap_tls(
     acceptor: &TlsAcceptor,
     stream: TcpStream,
 ) -> Result<MaybeTlsStream, String> {
-    acceptor
-        .accept(stream)
-        .await
-        .map(|tls| MaybeTlsStream::Tls { inner: tls })
-        .map_err(|e| e.to_string())
+    const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+    match tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(stream)).await {
+        Ok(Ok(tls)) => Ok(MaybeTlsStream::Tls { inner: tls }),
+        Ok(Err(e)) => Err(format!("TLS handshake error: {e}")),
+        Err(_) => Err("TLS handshake timed out after 10s (possible Slowloris)".to_string()),
+    }
 }
 
 pub(crate) fn wrap_plain(stream: TcpStream) -> MaybeTlsStream {
