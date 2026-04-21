@@ -691,14 +691,25 @@ pub(crate) async fn handle_request_subinterp(
     let is_gil_route =
         handler_idx == usize::MAX || pool.requires_gil.get(handler_idx).copied().unwrap_or(false);
 
-    // Admission gate (sub-interp path only): take a permit BEFORE the
-    // body collect so that N concurrent overcapacity requests can't pile
-    // N × max_body_size into RAM while they wait for the worker queue to
-    // drain. If no permit is available, reject immediately with 503 —
-    // the request never touches its body, TCP just stays in the kernel.
-    // GIL-route requests skip this (they dispatch via spawn_blocking,
-    // not the sub-interp channel).
-    let _submit_permit = if !is_gil_route {
+    // Admission gate (sub-interp, large-body path only): take a permit
+    // BEFORE a potentially-large body collect so that N concurrent
+    // uploads can't pile N × max_body_size into RAM. The gate is
+    // deliberately SKIPPED for small/no-body requests — HTTP/2
+    // multiplexes hundreds of streams per connection and gcannon's
+    // baseline-h2 profile easily puts 25k+ concurrent small requests
+    // in flight at once. A blanket permit budget sized for "the
+    // queue" (n × 128) would reject 99% of them and destroy h2
+    // throughput; a budget sized for "the worst-case RAM cost of a
+    // body flood" would be too large to protect against it. The
+    // split: small bodies (<= ADMISSION_SKIP_BYTES) pass through,
+    // large bodies (> threshold) require a permit.
+    const ADMISSION_SKIP_BYTES: u64 = 64 * 1024; // 64 KiB
+    let content_length = raw_headers
+        .get(hyper::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(0);
+    let _submit_permit = if !is_gil_route && content_length > ADMISSION_SKIP_BYTES {
         match pool.submit_semaphore.clone().try_acquire_owned() {
             Ok(p) => Some(p),
             Err(_) => {

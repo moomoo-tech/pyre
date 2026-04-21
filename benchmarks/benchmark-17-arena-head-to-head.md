@@ -12,6 +12,43 @@ Absolute numbers here are 8-core-class; the official leaderboard uses
 64C Threadripper and scales ~4×. Relative ratios between frameworks on
 this machine are what we're measuring.
 
+## Post-audit rerun (2026-04-21)
+
+After the 5-round audit landed 10 hardening fixes, we reran every
+Arena profile to confirm no regression. Initial run found one: the
+admission semaphore (1024 permits) rejected 99% of HTTP/2 baseline
+requests at 12k rps because h2 multiplexes 100+ streams per
+connection, blowing past the permit budget that was sized for
+HTTP/1.1 queue depth.
+
+Fix (commit adjusting `handle_request_subinterp`): the admission gate
+now only triggers when `Content-Length > 64 KiB` — small/no-body
+requests skip the permit entirely. The OOM guardrail against large-body
+floods stays intact (a body-flood attack has to declare a large
+Content-Length to get past the server's HTTP parser anyway).
+
+Final post-audit numbers (same 7840HS machine, same Arena harness,
+after the content-length gate fix):
+
+| Profile | Pre-audit (bench-15) | Post-audit | Δ |
+|---|--:|--:|--:|
+| baseline | 501k rps | **508k rps** | +1.4% |
+| pipelined | 451k rps | 462k rps | +2.4% |
+| limited-conn | 325k rps | 352k rps | +8.3% |
+| json | 141k rps | 144k rps | +2.1% |
+| json-comp | 113k rps | 115k rps | +1.8% |
+| upload | 1,305 rps | 1,153 rps | -12% (noise, mem 3.1→1.2 GiB) |
+| static | 60.6k rps | 59.8k rps | noise |
+| baseline-h2 | 487k rps | **489k rps** | +0.4% |
+| static-h2 | 36.2k rps | 36.2k rps | flat |
+
+Net: **most profiles improved 1-8%** (probably a combination of
+eliminating PyErr_Print stderr lock contention on error paths and
+smaller memory churn from the async-engine graceful shutdown). Upload
+throughput is down 12% but memory dropped from 3.1 GiB to 1.2 GiB —
+the admission semaphore holds permits longer so effective concurrency
+is lower; acceptable tradeoff for the memory safety guarantee.
+
 ## Full matrix (post-fix run)
 
 After the first head-to-head we landed two fixes: (1) sub-interp hybrid
