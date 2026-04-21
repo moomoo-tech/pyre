@@ -1,0 +1,161 @@
+"""Pyre command-line interface.
+
+Entry point for the ``pyre`` console script. Three subcommands:
+
+- ``pyre run <module:attr>``   production-ish launch (no reload)
+- ``pyre dev <module:attr>``   hot-reload + DEBUG logging
+- ``pyre routes <module:attr>`` print the registered route table
+
+The target is a ``module:attr`` string identifying a Pyre app, just like
+gunicorn/uvicorn. ``attr`` defaults to ``app``.
+
+Examples::
+
+    pyre run examples.hello:app --port 8080
+    pyre dev examples.hello
+    pyre routes examples.hello
+"""
+
+from __future__ import annotations
+
+import argparse
+import importlib
+import os
+import sys
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pyreframework.app import Pyre
+
+
+def _load_app(target: str) -> "Pyre":
+    """Resolve ``module[:attr]`` → Pyre instance. Importing the module
+    runs its top-level code, which registers routes on the app."""
+    if ":" in target:
+        module_name, attr = target.split(":", 1)
+    else:
+        module_name, attr = target, "app"
+
+    # Make the current directory importable — same ergonomic as uvicorn.
+    cwd = os.getcwd()
+    if cwd not in sys.path:
+        sys.path.insert(0, cwd)
+
+    try:
+        module = importlib.import_module(module_name)
+    except ModuleNotFoundError as e:
+        sys.exit(f"pyre: cannot import {module_name!r}: {e}")
+
+    try:
+        app = getattr(module, attr)
+    except AttributeError:
+        sys.exit(f"pyre: module {module_name!r} has no attribute {attr!r}")
+
+    from pyreframework.app import Pyre
+    if not isinstance(app, Pyre):
+        sys.exit(
+            f"pyre: {target} is a {type(app).__name__}, expected pyreframework.Pyre"
+        )
+    return app
+
+
+def _cmd_run(args: argparse.Namespace) -> None:
+    app = _load_app(args.target)
+    app.run(
+        host=args.host,
+        port=args.port,
+        workers=args.workers,
+        io_workers=args.io_workers,
+        reload=False,
+        tls_cert=args.tls_cert,
+        tls_key=args.tls_key,
+    )
+
+
+def _cmd_dev(args: argparse.Namespace) -> None:
+    os.environ.setdefault("PYRE_LOG", "1")
+    app = _load_app(args.target)
+    # Dev defaults: bind all interfaces so LAN clients can probe.
+    app.run(
+        host=args.host,
+        port=args.port,
+        workers=args.workers,
+        reload=True,
+    )
+
+
+def _cmd_routes(args: argparse.Namespace) -> None:
+    app = _load_app(args.target)
+    rows: list[tuple[str, str, str, str]] = []
+    for r in app.routes:
+        flags = []
+        if r.get("gil"):
+            flags.append("gil")
+        if r.get("stream"):
+            flags.append("stream")
+        if r.get("async"):
+            flags.append("async")
+        if r.get("model"):
+            flags.append(f"model={r['model']}")
+        rows.append((r["method"], r["path"], r["handler"], ",".join(flags)))
+    for r in app.fast_routes:
+        rows.append((r["method"], r["path"], f"<fast:{r['bytes']}B>", f"status={r['status_code']}"))
+
+    if not rows:
+        print("(no routes registered)")
+        return
+
+    widths = [max(len(r[i]) for r in rows) for i in range(4)]
+    header = ("METHOD", "PATH", "HANDLER", "FLAGS")
+    widths = [max(widths[i], len(header[i])) for i in range(4)]
+    fmt = "  ".join("{:<%d}" % w for w in widths)
+    print(fmt.format(*header))
+    print(fmt.format(*("-" * w for w in widths)))
+    for r in rows:
+        print(fmt.format(*r))
+    print(f"\n{len(rows)} route(s)")
+
+
+def _add_run_flags(p: argparse.ArgumentParser) -> None:
+    p.add_argument("target", help="module[:attr], e.g. examples.hello:app")
+    p.add_argument("--host", default=None, help="bind address (default 127.0.0.1)")
+    p.add_argument("--port", type=int, default=None, help="bind port (default 8000)")
+    p.add_argument("--workers", type=int, default=None, help="sub-interpreter count")
+    p.add_argument("--io-workers", type=int, default=None, help="Tokio I/O thread count")
+    p.add_argument("--tls-cert", default=None)
+    p.add_argument("--tls-key", default=None)
+
+
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(
+        prog="pyre",
+        description="Pyre — high-performance Python web framework powered by Rust.",
+    )
+    try:
+        from pyreframework import __version__ as _v
+    except Exception:
+        _v = "dev"
+    parser.add_argument("--version", action="version", version=f"pyre {_v}")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    p_run = sub.add_parser("run", help="start the server")
+    _add_run_flags(p_run)
+    p_run.set_defaults(func=_cmd_run)
+
+    p_dev = sub.add_parser("dev", help="start with hot-reload + debug logging")
+    p_dev.add_argument("target", help="module[:attr]")
+    p_dev.add_argument("--host", default="127.0.0.1")
+    p_dev.add_argument("--port", type=int, default=None)
+    p_dev.add_argument("--workers", type=int, default=None)
+    p_dev.set_defaults(func=_cmd_dev)
+
+    p_routes = sub.add_parser("routes", help="print the route table")
+    p_routes.add_argument("target", help="module[:attr]")
+    p_routes.set_defaults(func=_cmd_routes)
+
+    args = parser.parse_args(argv)
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()

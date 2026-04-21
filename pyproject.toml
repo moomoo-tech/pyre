@@ -31,6 +31,9 @@ test = [
     "msgpack",
 ]
 
+[project.scripts]
+pyre = "pyreframework.cli:main"
+
 [tool.maturin]
 features = ["pyo3/extension-module"]
 python-source = "python"

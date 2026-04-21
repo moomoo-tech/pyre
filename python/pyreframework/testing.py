@@ -79,12 +79,16 @@ class TestClient:
         )
         self._thread.start()
 
-        # Wait for server ready
+        # Wait for server ready. Any HTTP response (including 404) means
+        # the server is accepting connections — only ConnectionError /
+        # timeout means it's still starting.
         for _ in range(50):
             time.sleep(0.1)
             try:
                 urllib.request.urlopen(f"{self.base_url}/", timeout=1)
                 return
+            except urllib.error.HTTPError:
+                return  # server responded with an error — it's up
             except Exception:
                 pass
 

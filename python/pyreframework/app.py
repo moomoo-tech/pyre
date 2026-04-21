@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 import sys
 from typing import Callable, TypedDict
+import inspect
 
 import os
 
@@ -133,6 +134,10 @@ class Pyre:
         self.debug = debug
         self._startup_hooks: list[Callable] = []
         self._shutdown_hooks: list[Callable] = []
+        self._routes_meta: list[dict] = []
+        self._fast_routes_meta: list[dict] = []
+        self._readiness_checks: list[tuple[str, Callable]] = []
+        self._health_probes_enabled: bool = False
 
         # Resolve final logging config: debug mode defaults vs production defaults.
         # Actual init_logger call is deferred to run() so enable_logging() can
@@ -237,6 +242,13 @@ class Pyre:
             status_code=status_code,
             headers=headers,
         )
+        self._fast_routes_meta.append({
+            "method": method.upper(),
+            "path": path,
+            "status_code": status_code,
+            "content_type": content_type,
+            "bytes": len(body),
+        })
 
     @property
     def state(self):
@@ -316,15 +328,28 @@ class Pyre:
             wrapper.__qualname__ = fn.__qualname__
             return wrapper
 
+        def _record(fn: Callable) -> None:
+            self._routes_meta.append({
+                "method": method,
+                "path": path,
+                "handler": getattr(fn, "__qualname__", getattr(fn, "__name__", repr(fn))),
+                "gil": gil,
+                "stream": stream,
+                "model": model.__name__ if model is not None else None,
+                "async": inspect.iscoroutinefunction(fn),
+            })
+
         if handler is not None:
             if model is not None:
                 handler = _wrap_with_model(handler, model)
             self._engine.route(method, path, handler, gil, stream)
+            _record(handler)
             return handler
 
         def decorator(fn: Callable) -> Callable:
             wrapped = _wrap_with_model(fn, model) if model is not None else fn
             self._engine.route(method, path, wrapped, gil, stream)
+            _record(fn)
             return fn  # Return original for type hints
 
         return decorator
@@ -487,6 +512,64 @@ class Pyre:
         return decorator
 
     # ------------------------------------------------------------------
+    # Health probes — /livez + /readyz
+    # ------------------------------------------------------------------
+
+    def enable_health_probes(
+        self,
+        *,
+        livez_path: str = "/livez",
+        readyz_path: str = "/readyz",
+        gil: bool = True,
+    ) -> None:
+        """Register Kubernetes-style ``/livez`` and ``/readyz`` routes.
+
+        ``/livez`` always returns 200 — the process is alive. ``/readyz``
+        runs every function registered with ``@app.readiness_check(name)``
+        and returns 200 only when all pass; any failure produces 503 with a
+        JSON body listing the failing check.
+
+        Call once at startup, typically right after ``Pyre()``. Idempotent —
+        calling again is a no-op.
+
+        Args:
+            livez_path: route for the liveness probe (default ``/livez``).
+            readyz_path: route for the readiness probe (default ``/readyz``).
+            gil: whether probes run on the main interpreter. Default True
+                 because most readiness checks touch globals (DB pools,
+                 cache clients) that live on the main interp.
+        """
+        if self._health_probes_enabled:
+            return
+        from pyreframework.health import _build_livez_handler, _build_readyz_handler
+
+        self._route("GET", livez_path, _build_livez_handler(), gil=gil)
+        self._route(
+            "GET",
+            readyz_path,
+            _build_readyz_handler(self._readiness_checks),
+            gil=gil,
+        )
+        self._health_probes_enabled = True
+
+    def readiness_check(self, name: str):
+        """Register a readiness check. Sync or async. Decorator form::
+
+            @app.readiness_check("db")
+            def _db_ready():
+                pool.fetch_scalar("SELECT 1")
+
+        A check passes when it returns any value that isn't ``False`` and
+        doesn't raise. ``False`` or an exception → the check is reported
+        as failing in ``/readyz`` and the whole probe returns 503.
+        """
+        def decorator(fn: Callable) -> Callable:
+            self._readiness_checks.append((name, fn))
+            return fn
+
+        return decorator
+
+    # ------------------------------------------------------------------
     # Fallback (custom 404)
     # ------------------------------------------------------------------
 
@@ -618,6 +701,20 @@ class Pyre:
     # ------------------------------------------------------------------
     # Run
     # ------------------------------------------------------------------
+
+    @property
+    def routes(self) -> list[dict]:
+        """List of registered routes (dicts with method/path/handler/gil/stream/async/model).
+
+        Populated as routes are registered via decorators or direct calls.
+        Fast-path routes (``add_fast_response``) appear in ``fast_routes``.
+        """
+        return list(self._routes_meta)
+
+    @property
+    def fast_routes(self) -> list[dict]:
+        """Routes registered via ``add_fast_response``."""
+        return list(self._fast_routes_meta)
 
     def run(
         self,
