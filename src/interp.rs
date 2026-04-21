@@ -62,6 +62,55 @@ fn get_worker_state(worker_id: usize) -> Option<Arc<WorkerState>> {
 // C-FFI bridge functions for async engine
 // ---------------------------------------------------------------------------
 
+/// Wrap an `extern "C"` body in `catch_unwind` so a Rust panic never
+/// crosses into CPython's stack. Since Rust 1.81 a panic through
+/// `extern "C"` aborts the process (was UB before) — still not
+/// graceful under a 500k-rps flood that hits a `.unwrap()` on
+/// a poisoned Mutex or a PyArg_ParseTuple failure we missed.
+///
+/// On a caught panic:
+///   1. log via tracing (async, non-blocking — no stderr storm),
+///   2. set a `PyRuntimeError` via `PyErr_SetString` so the caller's
+///      next C-API call surfaces a normal Python exception rather
+///      than the cryptic "returned NULL without setting an exception"
+///      warning,
+///   3. return NULL.
+///
+/// Callers whose semantics are "None == no data" (e.g. `pyre_recv`
+/// returns `None` when the channel is closed) should NOT use this
+/// for normal signaling — that's a return value of `Py_None` via
+/// `Py_INCREF`. This helper's NULL-return is strictly for the panic
+/// path.
+unsafe fn ffi_catch_unwind<F>(context: &'static str, f: F) -> *mut ffi::PyObject
+where
+    F: FnOnce() -> *mut ffi::PyObject + std::panic::UnwindSafe,
+{
+    match std::panic::catch_unwind(f) {
+        Ok(p) => p,
+        Err(panic_payload) => {
+            let msg = if let Some(s) = panic_payload.downcast_ref::<&str>() {
+                (*s).to_string()
+            } else if let Some(s) = panic_payload.downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "<non-string panic payload>".to_string()
+            };
+            tracing::error!(
+                target: "pyre::server",
+                context,
+                panic = %msg,
+                "Rust panic caught at FFI boundary"
+            );
+            let msg_c = format!("Rust panic in {context}: {msg}\0");
+            ffi::PyErr_SetString(
+                ffi::PyExc_RuntimeError,
+                msg_c.as_ptr() as *const std::os::raw::c_char,
+            );
+            std::ptr::null_mut()
+        }
+    }
+}
+
 /// pyre_recv(worker_id, pool_id) → (req_id, handler_idx, method, path, params, query, body, headers, client_ip) or None
 /// RELEASES GIL during blocking recv — lets asyncio loop run freely.
 ///
@@ -74,6 +123,16 @@ unsafe extern "C" fn pyre_recv_cfunc(
     _self: *mut ffi::PyObject,
     args: *mut ffi::PyObject,
 ) -> *mut ffi::PyObject {
+    ffi_catch_unwind(
+        "pyre_recv",
+        std::panic::AssertUnwindSafe(|| pyre_recv_inner(args)),
+    )
+}
+
+/// Body of pyre_recv — panic-catchable. Separated so the outer
+/// `extern "C"` is just a catch_unwind wrapper and we avoid propagating
+/// Rust panics into CPython's stack.
+unsafe fn pyre_recv_inner(args: *mut ffi::PyObject) -> *mut ffi::PyObject {
     let mut worker_id: isize = 0;
     let mut pool_id: u64 = 0;
     if ffi::PyArg_ParseTuple(args, c"nK".as_ptr(), &mut worker_id, &mut pool_id) == 0 {
@@ -202,6 +261,14 @@ unsafe extern "C" fn pyre_send_cfunc(
     _self: *mut ffi::PyObject,
     args: *mut ffi::PyObject,
 ) -> *mut ffi::PyObject {
+    ffi_catch_unwind(
+        "pyre_send",
+        std::panic::AssertUnwindSafe(|| pyre_send_inner(args)),
+    )
+}
+
+/// See `pyre_recv_inner` — same rationale.
+unsafe fn pyre_send_inner(args: *mut ffi::PyObject) -> *mut ffi::PyObject {
     let mut worker_id: isize = 0;
     let mut pool_id: u64 = 0;
     let mut req_id: u64 = 0;
@@ -304,6 +371,13 @@ unsafe extern "C" fn pyre_emit_log_cfunc(
     _self: *mut ffi::PyObject,
     args: *mut ffi::PyObject,
 ) -> *mut ffi::PyObject {
+    ffi_catch_unwind(
+        "pyre_emit_log",
+        std::panic::AssertUnwindSafe(|| pyre_emit_log_inner(args)),
+    )
+}
+
+unsafe fn pyre_emit_log_inner(args: *mut ffi::PyObject) -> *mut ffi::PyObject {
     let mut level_ptr: *const std::os::raw::c_char = std::ptr::null();
     let mut name_ptr: *const std::os::raw::c_char = std::ptr::null();
     let mut msg_ptr: *const std::os::raw::c_char = std::ptr::null();
@@ -1635,6 +1709,14 @@ pub(crate) struct InterpreterPool {
     /// Dropping senders closes the channel, signaling workers to exit.
     sync_work_tx: crossbeam_channel::Sender<WorkRequest>,
     async_work_tx: Option<crossbeam_channel::Sender<WorkRequest>>,
+    /// Admission-control gate: one permit per slot in the work channel.
+    /// Callers `try_acquire_owned()` BEFORE collecting the request body,
+    /// so an over-capacity surge of uploads doesn't let N × max_body_size
+    /// pile up in RAM while N requests sit waiting for a full queue.
+    /// Permit lifetime spans [body-collect, submit, worker-dispatch]
+    /// — see `handle_request_subinterp` for the acquire site and
+    /// `worker_thread_loop` where the permit rides inside WorkRequest.
+    pub(crate) submit_semaphore: Arc<tokio::sync::Semaphore>,
     /// Worker threads — joined on drop to ensure clean sub-interpreter shutdown.
     worker_threads: Option<Vec<std::thread::JoinHandle<()>>>,
     routers: HashMap<String, Router<usize>>,
@@ -1827,6 +1909,15 @@ impl InterpreterPool {
             threads.push(handle);
         }
 
+        // Admission semaphore: one permit per total queue slot across
+        // both pools. `n * 128` matches the channel capacities so a
+        // permit-holder is guaranteed to find a slot when it reaches
+        // submit(). Could split sync/async but that complicates the
+        // acquire site — shared budget is fine and happens to model
+        // "N × 128 in-flight requests per process" as one number.
+        let total_permits = n * 128 * if has_any_async { 2 } else { 1 };
+        let submit_semaphore = Arc::new(tokio::sync::Semaphore::new(total_permits));
+
         Ok(InterpreterPool {
             sync_work_tx,
             async_work_tx,
@@ -1839,6 +1930,7 @@ impl InterpreterPool {
             has_async_workers: has_any_async,
             cors_config,
             _request_logging: logging_flag,
+            submit_semaphore,
         })
     }
 

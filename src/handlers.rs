@@ -691,6 +691,27 @@ pub(crate) async fn handle_request_subinterp(
     let is_gil_route =
         handler_idx == usize::MAX || pool.requires_gil.get(handler_idx).copied().unwrap_or(false);
 
+    // Admission gate (sub-interp path only): take a permit BEFORE the
+    // body collect so that N concurrent overcapacity requests can't pile
+    // N × max_body_size into RAM while they wait for the worker queue to
+    // drain. If no permit is available, reject immediately with 503 —
+    // the request never touches its body, TCP just stays in the kernel.
+    // GIL-route requests skip this (they dispatch via spawn_blocking,
+    // not the sub-interp channel).
+    let _submit_permit = if !is_gil_route {
+        match pool.submit_semaphore.clone().try_acquire_owned() {
+            Ok(p) => Some(p),
+            Err(_) => {
+                crate::monitor::DROPPED_REQUESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let mut r = full_body(overloaded_response("server overloaded"));
+                apply_cors(&mut r, pool.cors_config.as_ref());
+                return Ok(r);
+            }
+        }
+    } else {
+        None
+    };
+
     // Streaming is only honored on GIL routes (v1). A sub-interp route
     // with stream=True falls through to the buffered path — but that's
     // impossible by construction because add_route rejects non-GIL
