@@ -69,9 +69,11 @@ def test_pool_exposes_submit_semaphore():
     assert "submit_semaphore: Arc<tokio::sync::Semaphore>" in src, (
         "InterpreterPool must hold Arc<tokio::sync::Semaphore> as submit_semaphore"
     )
-    # It's populated in InterpreterPool::new with a non-zero permit budget.
-    # Rough check: the permit count uses `n * 128` (matches channel capacity).
-    assert "total_permits = n * 128" in src, (
-        "permit count should match channel capacity (n * 128) so permit-holders "
-        "are guaranteed to find a slot when they reach submit()"
+    # It's populated in InterpreterPool::new with a non-zero permit budget
+    # sized to the sum of per-shard capacities (one bounded channel per
+    # worker after the sharding refactor).
+    assert "total_slots" in src and "SHARD_CAPACITY" in src, (
+        "permit count should be sized from the sharded channel capacities "
+        "(sum over shards of SHARD_CAPACITY) so the admission gate matches "
+        "the actual queue budget"
     )
