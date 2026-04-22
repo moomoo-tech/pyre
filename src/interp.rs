@@ -1750,9 +1750,14 @@ def _attach_pyronova_request_helpers(t):\n    from urllib.parse import parse_qs\
 // ---------------------------------------------------------------------------
 
 pub(crate) struct InterpreterPool {
-    /// Dropping senders closes the channel, signaling workers to exit.
-    sync_work_tx: crossbeam_channel::Sender<WorkRequest>,
-    async_work_tx: Option<crossbeam_channel::Sender<WorkRequest>>,
+    /// Per-worker work channels. Each worker owns exactly one Receiver, so
+    /// the MPMC crossbeam queue degenerates to MPSC at the worker end — no
+    /// dequeue contention between consumers, no condvar fan-out to "pick
+    /// one" when a single item arrives. Producers (tokio IO threads) pick
+    /// a shard by round-robin via `sync_dispatch` / `async_dispatch`.
+    /// Dropping all senders closes the channels, signaling workers to exit.
+    sync_work_txs: Vec<crossbeam_channel::Sender<WorkRequest>>,
+    async_work_txs: Option<Vec<crossbeam_channel::Sender<WorkRequest>>>,
     /// Admission-control gate: one permit per slot in the work channel.
     /// Callers `try_acquire_owned()` BEFORE collecting the request body,
     /// so an over-capacity surge of uploads doesn't let N × max_body_size
@@ -1779,9 +1784,9 @@ pub(crate) struct InterpreterPool {
 impl Drop for InterpreterPool {
     fn drop(&mut self) {
         // 1. Drop senders to close the channels — workers will exit their recv loop.
-        //    (We need to replace them so the Sender::drop fires now, not later.)
-        let _ = std::mem::replace(&mut self.sync_work_tx, crossbeam_channel::bounded(0).0);
-        let _ = self.async_work_tx.take();
+        //    Clearing the Vecs drops every Sender, closing each shard.
+        self.sync_work_txs.clear();
+        let _ = self.async_work_txs.take();
 
         // 2. Join all worker threads so they finish Py_EndInterpreter BEFORE
         //    the main interpreter tears down (Py_Finalize). Without this join,
@@ -1859,23 +1864,41 @@ impl InterpreterPool {
         all_func_names.sort();
         all_func_names.dedup();
 
-        // Create work channels
-        // Sync pool: handles def handlers (220k req/s)
-        // Async pool: handles async def handlers (133k req/s)
-        let (sync_work_tx, sync_work_rx) = crossbeam_channel::bounded::<WorkRequest>(n * 128);
-        let (async_work_tx, async_work_rx) = if has_any_async {
-            let (tx, rx) = crossbeam_channel::bounded::<WorkRequest>(n * 128);
-            (Some(tx), Some(rx))
-        } else {
-            (None, None)
-        };
-
         // Determine worker split: if async handlers exist, split workers
-        let (sync_count, _async_count) = if has_any_async {
+        let (sync_count, async_count) = if has_any_async {
             let async_n = (n / 2).max(1).min(n); // At least 1, never exceed total
             (n.saturating_sub(async_n), async_n)
         } else {
             (n, 0)
+        };
+
+        // Sharded work channels — one per worker. See the struct docstring
+        // for the why. Capacity per shard matches the old global capacity
+        // divided evenly (128 slots per worker).
+        const SHARD_CAPACITY: usize = 128;
+        let mut sync_work_txs: Vec<crossbeam_channel::Sender<WorkRequest>> =
+            Vec::with_capacity(sync_count);
+        let mut sync_work_rxs: Vec<crossbeam_channel::Receiver<WorkRequest>> =
+            Vec::with_capacity(sync_count);
+        for _ in 0..sync_count {
+            let (tx, rx) = crossbeam_channel::bounded::<WorkRequest>(SHARD_CAPACITY);
+            sync_work_txs.push(tx);
+            sync_work_rxs.push(rx);
+        }
+        let (async_work_txs, async_work_rxs): (
+            Option<Vec<crossbeam_channel::Sender<WorkRequest>>>,
+            Option<Vec<crossbeam_channel::Receiver<WorkRequest>>>,
+        ) = if has_any_async {
+            let mut txs = Vec::with_capacity(async_count);
+            let mut rxs = Vec::with_capacity(async_count);
+            for _ in 0..async_count {
+                let (tx, rx) = crossbeam_channel::bounded::<WorkRequest>(SHARD_CAPACITY);
+                txs.push(tx);
+                rxs.push(rx);
+            }
+            (Some(txs), Some(rxs))
+        } else {
+            (None, None)
         };
 
         // Allocate a fresh pool_id for this InterpreterPool instance.
@@ -1894,13 +1917,30 @@ impl InterpreterPool {
             workers.push(worker);
         }
 
-        // Initialize async worker states if needed
+        // Initialize async worker states if needed. Each async worker gets
+        // its OWN receiver — with sharded channels there's one rx per
+        // shard, so WORKER_STATES[i] must own rxs[i].
+        //
+        // Sync workers (indices 0..sync_count) are driven by their own
+        // sync_work_rxs[i], not via WORKER_STATES, so those slots here are
+        // placeholders that the C-FFI bridge never reaches. We give them
+        // a dummy closed-on-construction receiver so the Arc<WorkerState>
+        // vector length stays N (the async engine indexes by worker id).
         if has_any_async {
-            let async_rx = async_work_rx.as_ref().unwrap();
+            let async_rxs = async_work_rxs.as_ref().unwrap();
             let mut states = Vec::with_capacity(n);
-            for _ in 0..n {
+            for i in 0..n {
+                let rx = if i >= sync_count {
+                    // async worker — give it its own shard
+                    async_rxs[i - sync_count].clone()
+                } else {
+                    // sync slot placeholder — a pre-closed channel so a
+                    // stray recv() returns Disconnected immediately.
+                    let (_tx, rx) = crossbeam_channel::bounded::<WorkRequest>(1);
+                    rx
+                };
                 states.push(Arc::new(WorkerState {
-                    rx: async_rx.clone(),
+                    rx,
                     response_map: Mutex::new(HashMap::new()),
                     next_req_id: AtomicU64::new(0),
                     pool_id,
@@ -1933,8 +1973,8 @@ impl InterpreterPool {
                     })
                     .map_err(|e| format!("failed to spawn async worker {i}: {e}"))?
             } else {
-                // Sync worker
-                let rx = sync_work_rx.clone();
+                // Sync worker — consume its own dedicated shard receiver.
+                let rx = sync_work_rxs[i].clone();
                 std::thread::Builder::new()
                     .name(format!("pyronova-worker-{i}"))
                     .spawn(move || {
@@ -1953,18 +1993,21 @@ impl InterpreterPool {
             threads.push(handle);
         }
 
-        // Admission semaphore: one permit per total queue slot across
-        // both pools. `n * 128` matches the channel capacities so a
-        // permit-holder is guaranteed to find a slot when it reaches
-        // submit(). Could split sync/async but that complicates the
-        // acquire site — shared budget is fine and happens to model
-        // "N × 128 in-flight requests per process" as one number.
-        let total_permits = n * 128 * if has_any_async { 2 } else { 1 };
-        let submit_semaphore = Arc::new(tokio::sync::Semaphore::new(total_permits));
+        // Admission semaphore: permits == sum of all shard capacities so a
+        // permit-holder will usually find a slot. With sharding a permit
+        // no longer guarantees a slot (the round-robin target shard may
+        // be hot while others are empty), but submit() walks the ring
+        // with a one-hop fallback so that's fine in practice.
+        let total_slots = sync_work_txs.len() * SHARD_CAPACITY
+            + async_work_txs
+                .as_ref()
+                .map(|v| v.len() * SHARD_CAPACITY)
+                .unwrap_or(0);
+        let submit_semaphore = Arc::new(tokio::sync::Semaphore::new(total_slots));
 
         Ok(InterpreterPool {
-            sync_work_tx,
-            async_work_tx,
+            sync_work_txs,
+            async_work_txs,
             worker_threads: Some(threads),
             routers,
             _handler_names: handler_names.to_vec(),
@@ -2008,25 +2051,110 @@ impl InterpreterPool {
     /// Get handler name by index.
     /// Submit a work request. Routes to sync or async pool based on handler type.
     pub fn submit(&self, req: WorkRequest) -> Result<(), String> {
-        // Route to async pool if handler is async and pool exists
-        let tx = if self.has_async_workers
+        // Route to async pool if handler is async and pool exists.
+        let is_async = self.has_async_workers
             && self
                 .is_async_handler
                 .get(req.handler_idx)
                 .copied()
-                .unwrap_or(false)
-        {
-            self.async_work_tx.as_ref().unwrap()
+                .unwrap_or(false);
+        let shards = if is_async {
+            self.async_work_txs.as_ref().unwrap().as_slice()
         } else {
-            &self.sync_work_tx
+            self.sync_work_txs.as_slice()
         };
 
-        tx.try_send(req).map_err(|e| match e {
-            crossbeam_channel::TrySendError::Full(_) => "server overloaded".to_string(),
-            crossbeam_channel::TrySendError::Disconnected(_) => {
-                "worker pool channel closed".to_string()
+        let len = shards.len();
+        if len == 0 {
+            return Err("worker pool has no shards".to_string());
+        }
+        if len == 1 {
+            return shards[0].try_send(req).map_err(|e| match e {
+                crossbeam_channel::TrySendError::Full(_) => "server overloaded".to_string(),
+                crossbeam_channel::TrySendError::Disconnected(_) => {
+                    "worker pool channel closed".to_string()
+                }
+            });
+        }
+
+        // Power of Two Choices dispatch.
+        //
+        // Pure round-robin eliminates CAS contention but re-introduces
+        // head-of-line blocking: if shard A gets a 100ms handler
+        // (numpy heavy, LLM call, etc.) and shards B..N are idle,
+        // subsequent requests round-robined to A queue behind the slow
+        // one instead of stealing to B. Tail latency blows up even as
+        // mean throughput looks fine.
+        //
+        // P2C fix (Mitzenmacher 2001): pick two shards at random, send
+        // to whichever is shorter. Mathematically this is within a
+        // constant factor of a global queue for load balance, at zero
+        // coordination cost. `crossbeam_channel::Sender::len()` is a
+        // single atomic load — the read visits the shard's own head/
+        // tail cell, so no cross-shard cache bouncing.
+        //
+        // Randomness comes from a thread-local xorshift64* seeded by a
+        // one-time global atomic bump in the initializer. Hot path:
+        // one `with()`, one arithmetic shift sequence, no atomics.
+        static THREAD_SEED: std::sync::atomic::AtomicU64 =
+            std::sync::atomic::AtomicU64::new(0x9E3779B97F4A7C15);
+        thread_local! {
+            static RR_RNG: std::cell::Cell<u64> = std::cell::Cell::new(
+                THREAD_SEED
+                    .fetch_add(0x9E3779B97F4A7C15, std::sync::atomic::Ordering::Relaxed)
+                    | 1
+            );
+        }
+        let rnd = RR_RNG.with(|c| {
+            let mut x = c.get();
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            c.set(x);
+            x
+        });
+
+        let i1 = (rnd as usize) % len;
+        // i2 drawn from [0, len-1) then bumped past i1 so i1 != i2 without a loop.
+        let j = ((rnd >> 32) as usize) % (len - 1);
+        let i2 = if j >= i1 { j + 1 } else { j };
+
+        let (a, b) = if shards[i1].len() <= shards[i2].len() {
+            (i1, i2)
+        } else {
+            (i2, i1)
+        };
+
+        // Try the shorter queue first. If it's full, try the other.
+        // Both full (rare, only under sustained overload) → walk the
+        // remaining shards as a last-resort scan before giving up.
+        let mut msg = req;
+        for idx in [a, b] {
+            match shards[idx].try_send(msg) {
+                Ok(()) => return Ok(()),
+                Err(crossbeam_channel::TrySendError::Full(r)) => {
+                    msg = r;
+                }
+                Err(crossbeam_channel::TrySendError::Disconnected(_)) => {
+                    return Err("worker pool channel closed".to_string());
+                }
             }
-        })
+        }
+        for off in 0..len {
+            if off == a || off == b {
+                continue;
+            }
+            match shards[off].try_send(msg) {
+                Ok(()) => return Ok(()),
+                Err(crossbeam_channel::TrySendError::Full(r)) => {
+                    msg = r;
+                }
+                Err(crossbeam_channel::TrySendError::Disconnected(_)) => {
+                    return Err("worker pool channel closed".to_string());
+                }
+            }
+        }
+        Err("server overloaded".to_string())
     }
 }
 

@@ -74,3 +74,9 @@ lto = "fat"            # Cross-crate inlining: LLVM optimizes across hyper/tokio
 codegen-units = 1      # Single codegen unit: max optimization at cost of compile time
 opt-level = 3          # Aggressive optimization
 strip = true           # Strip symbols: smaller binary, better icache
+
+[profile.profiling]
+inherits = "release"
+debug = true
+strip = false
+lto = "thin"

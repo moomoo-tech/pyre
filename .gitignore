@@ -10,3 +10,6 @@ dist/
 *.lock
 .arc/
 arc.log.jsonl
+
+# Local profiling artifacts (dsymutil output)
+*.dSYM/
