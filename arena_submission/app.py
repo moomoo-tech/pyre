@@ -19,10 +19,19 @@ no boilerplate for workers, TLS, or compression.
 """
 
 import json
+import logging
 import os
 
-from pyronova import Pyronova, Response
+from pyronova import Pyronova, Request, Response
 from pyronova.db import PgPool
+
+# Log benchmark-path errors at WARNING so they surface in the runner log
+# but don't flood the tracing subscriber under load. Every broad-except
+# site below calls log.warning(..., exc_info=True) so the stack trace is
+# preserved instead of silently swallowed — swallowing a traceback to
+# hand a 404 / 400 / {} back has been a regular source of "why is
+# throughput suddenly tanking?" debugging evenings elsewhere.
+log = logging.getLogger("pyronova.arena")
 
 
 # ---------------------------------------------------------------------------
@@ -99,12 +108,12 @@ def _sum_query_params(req) -> int:
 
 
 @app.get("/baseline11")
-def baseline11_get(req):
+def baseline11_get(req: "Request"):
     return Response(str(_sum_query_params(req)), content_type="text/plain")
 
 
 @app.post("/baseline11")
-def baseline11_post(req):
+def baseline11_post(req: "Request"):
     total = _sum_query_params(req)
     body = req.body
     if body:
@@ -116,12 +125,12 @@ def baseline11_post(req):
 
 
 @app.get("/baseline2")
-def baseline2(req):
+def baseline2(req: "Request"):
     return Response(str(_sum_query_params(req)), content_type="text/plain")
 
 
 @app.post("/upload", gil=True, stream=True)
-def upload(req):
+def upload(req: "Request"):
     # drain_count() runs the whole consume loop in Rust with the GIL
     # released once — vs a Python `for chunk in req.stream:` that pays
     # GIL release+reacquire + PyBytes alloc per 16 KB hyper frame
@@ -143,7 +152,7 @@ def upload(req):
 # ~150μs per call on the same data. Returning the dict shaves ~100μs
 # per request on the /json profile.
 @app.get("/json/{count}")
-def json_endpoint(req):
+def json_endpoint(req: "Request"):
     # Returning a dict directly triggers Pyronova's Rust-side JSON
     # serialization path (pythonize + serde_json::to_vec). Empirically
     # this matches or beats orjson.dumps() + Response(bytes) for
@@ -167,7 +176,7 @@ def json_endpoint(req):
 
 
 @app.get("/json-comp/{count}")
-def json_comp_endpoint(req):
+def json_comp_endpoint(req: "Request"):
     # Identical payload; Arena's json-comp profile hits /json/{count} in
     # practice (see benchmark-15), but we keep this alias registered for
     # legacy URL shape compatibility.
@@ -185,7 +194,7 @@ PG_SQL = (
 
 
 @app.get("/async-db", gil=True)
-def async_db_endpoint(req):
+def async_db_endpoint(req: "Request"):
     # `gil=True` is load-bearing: our Rust PgPool lives in a
     # OnceLock populated by the MAIN interpreter's import-time
     # `PgPool.connect(...)`. Sub-interpreters run their own copy of
@@ -202,10 +211,14 @@ def async_db_endpoint(req):
         limit = int(q.get("limit", "50"))
         limit = max(1, min(limit, 50))
     except ValueError:
+        log.warning("/async-db: bad query params %r", dict(q), exc_info=True)
         return _EMPTY_DB_RESPONSE
     try:
         rows = PG_POOL.fetch_all(PG_SQL, min_val, max_val, limit)
-    except Exception:
+    except RuntimeError:
+        # pyronova.db raises RuntimeError for sqlx failures; keep the
+        # empty-response contract Arena expects, but don't lose the trace.
+        log.warning("/async-db: fetch_all failed", exc_info=True)
         return _EMPTY_DB_RESPONSE
     return _rows_to_payload(rows)
 
@@ -257,6 +270,12 @@ _BAD_REQUEST = Response("bad request", status_code=400, content_type="text/plain
 import time as _time
 
 _CRUD_TTL_S = 0.2
+# _CRUD_CACHE is a bare dict because every handler below runs with
+# `gil=True` on Pyronova's main interpreter — only one handler thread
+# executes at a time, so dict get/set/pop are atomic under the GIL and
+# no lock is needed. If a handler is ever demoted off the main interp
+# this dict becomes a race; wrap it in threading.Lock or flip to
+# threading.local at that point.
 _CRUD_CACHE: dict = {}  # item_id -> (payload_dict, expires_at_monotonic)
 
 _CRUD_COLS = (
@@ -300,7 +319,7 @@ def _row_to_full_item(row):
 
 
 @app.get("/crud/items/{id}", gil=True)
-def crud_get_one(req):
+def crud_get_one(req: "Request"):
     if PG_POOL is None:
         return _NOT_FOUND
     try:
@@ -313,7 +332,8 @@ def crud_get_one(req):
         return entry[0]
     try:
         row = PG_POOL.fetch_one(_CRUD_GET_SQL, item_id)
-    except Exception:
+    except RuntimeError:
+        log.warning("/crud/items/%s: fetch_one failed", item_id, exc_info=True)
         return _NOT_FOUND
     if row is None:
         return _NOT_FOUND
@@ -323,7 +343,7 @@ def crud_get_one(req):
 
 
 @app.get("/crud/items", gil=True)
-def crud_list(req):
+def crud_list(req: "Request"):
     if PG_POOL is None:
         return _EMPTY_CRUD_LIST
     q = req.query_params
@@ -343,14 +363,15 @@ def crud_list(req):
     offset = (page - 1) * limit
     try:
         rows = PG_POOL.fetch_all(_CRUD_LIST_SQL, category, limit, offset)
-    except Exception:
+    except RuntimeError:
+        log.warning("/crud/items list: fetch_all failed", exc_info=True)
         return _EMPTY_CRUD_LIST
     items = [_row_to_full_item(r) for r in rows]
     return {"items": items, "total": len(items), "page": page, "limit": limit}
 
 
 @app.put("/crud/items/{id}", gil=True)
-def crud_update(req):
+def crud_update(req: "Request"):
     if PG_POOL is None:
         return _NOT_FOUND
     try:
@@ -366,7 +387,8 @@ def crud_update(req):
         return _BAD_REQUEST
     try:
         affected = PG_POOL.execute(_CRUD_UPDATE_SQL, name, price, quantity, item_id)
-    except Exception:
+    except RuntimeError:
+        log.warning("/crud/items/%s update: execute failed", item_id, exc_info=True)
         return _NOT_FOUND
     if affected == 0:
         return _NOT_FOUND
@@ -375,7 +397,7 @@ def crud_update(req):
 
 
 @app.post("/crud/items", gil=True)
-def crud_upsert(req):
+def crud_upsert(req: "Request"):
     if PG_POOL is None:
         return _BAD_REQUEST
     try:
@@ -395,7 +417,8 @@ def crud_upsert(req):
             _CRUD_UPSERT_SQL,
             item_id, name, category, price, quantity,
         )
-    except Exception:
+    except RuntimeError:
+        log.warning("/crud/items upsert id=%s: fetch_scalar failed", item_id, exc_info=True)
         return _BAD_REQUEST
     _CRUD_CACHE.pop(item_id, None)
     return Response(

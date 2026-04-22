@@ -18,7 +18,10 @@ Usage::
 """
 
 from __future__ import annotations
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pyronova.engine import Request, Response
 
 # Characters forbidden in cookie name/value per RFC 6265. CR (\r) and LF
 # (\n) in particular enable HTTP Response Splitting: an attacker crafts a
@@ -39,7 +42,7 @@ def _reject_control_chars(field: str, value: str) -> None:
             )
 
 
-def get_cookies(req) -> dict[str, str]:
+def get_cookies(req: Request) -> dict[str, str]:
     """Parse cookies from request headers.
 
     Returns a dict of cookie name → value.
@@ -56,13 +59,13 @@ def get_cookies(req) -> dict[str, str]:
     return cookies
 
 
-def get_cookie(req, name: str, default: str | None = None) -> str | None:
+def get_cookie(req: Request, name: str, default: str | None = None) -> str | None:
     """Get a single cookie value by name."""
     return get_cookies(req).get(name, default)
 
 
 def set_cookie(
-    response,
+    response: Response,
     name: str,
     value: str,
     *,
@@ -117,7 +120,7 @@ def set_cookie(
     )
 
 
-def delete_cookie(response, name: str, *, path: str = "/") -> "Response":
+def delete_cookie(response: Response, name: str, *, path: str = "/") -> Response:
     """Delete a cookie by setting it expired."""
     return set_cookie(
         response, name, "",

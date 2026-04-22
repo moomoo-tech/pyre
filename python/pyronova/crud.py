@@ -39,8 +39,13 @@ intend to expose.
 """
 
 import re
+from typing import Callable, TYPE_CHECKING
 
 from .app import Response
+
+if TYPE_CHECKING:
+    from .app import Pyronova
+    from .db import PgPool
 
 __all__ = ["register_crud"]
 
@@ -64,14 +69,14 @@ def _validate_ident(name: str, role: str) -> str:
 
 
 def register_crud(
-    app,
-    pool,
+    app: "Pyronova",
+    pool: "PgPool",
     *,
     prefix: str,
     table: str,
     columns: list[str],
     id_column: str = "id",
-    id_type=int,
+    id_type: Callable[[str], object] = int,
     default_limit: int = 100,
     max_limit: int = 1000,
 ) -> None:
