@@ -26,16 +26,38 @@ def _cpu_count() -> int:
         return max(os.cpu_count() or 1, 1)
 
 
+def _numa_nodes() -> int:
+    """How many NUMA nodes does the kernel see? 1 on UMA systems
+    (laptops, Apple Silicon, single-socket AMD/Intel desktop),
+    2+ on multi-CCD Threadripper/EPYC and multi-socket boxes."""
+    try:
+        return max(
+            sum(1 for d in os.listdir("/sys/devices/system/node") if d.startswith("node")),
+            1,
+        )
+    except (FileNotFoundError, PermissionError):
+        return 1
+
+
 def main() -> int:
     total = _cpu_count()
     per_proc = max(total // 2, 1)
-    # IO threads handle accept + hyper socket read/write. Each IO thread
-    # can drive many thousands of rps, so running one per CPU is severe
-    # over-subscription once workers (Python sub-interps) also want a
-    # core. Rule of thumb on Threadripper/EPYC: 1 IO thread per 4
-    # physical cores, floored at 4, capped at 16 — keeps the accept loops
-    # on a single CCD and leaves the other CCDs for Python.
-    io_per_proc = min(max(per_proc // 4, 4), 16)
+    # IO workers sizing is NUMA-topology-aware. Two regimes:
+    #
+    # Multi-node (Threadripper PRO / EPYC / multi-socket Xeon): cap IO
+    # at `per_proc // 4` so the accept loops + hyper socket threads
+    # stay on a couple of CCDs. Letting IO spread across every CCD
+    # turns every `crossbeam_channel::recv` into an Infinity-Fabric
+    # round trip — Leo observed this as "baseline stops scaling past
+    # 26 cores on the 3995WX" in the Arena run.
+    #
+    # Single-node (laptops, Apple Silicon, most cloud VMs): IO == cores.
+    # The prior NUMA-only formula cost 32% throughput on an M5 Pro
+    # because IO threads starved with no matching compute benefit.
+    if _numa_nodes() > 1:
+        io_per_proc = min(max(per_proc // 4, 4), 16)
+    else:
+        io_per_proc = per_proc
 
     base_port = int(os.environ.get("PORT", "8080"))
     tls_cert = os.environ.get("TLS_CERT", "/certs/server.crt")

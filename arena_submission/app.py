@@ -184,15 +184,15 @@ PG_SQL = (
 )
 
 
-@app.get("/async-db")
+@app.get("/async-db", gil=True)
 def async_db_endpoint(req):
-    # No `gil=True`: runs on sub-interpreter pool. `PG_POOL.fetch_all`
-    # releases the GIL for the duration of the query via sqlx's Rust
-    # runtime, so concurrency comes from the *pool* (max_connections
-    # simultaneous PG queries) rather than from a single GIL that every
-    # request serializes through. At 1024 conns on Arena the main-interp
-    # variant capped at ~7.5k rps because main-interp GIL held the
-    # row-to-dict loop; sub-interp mode lifts that cap.
+    # `gil=True` is load-bearing: our Rust PgPool lives in a
+    # OnceLock populated by the MAIN interpreter's import-time
+    # `PgPool.connect(...)`. Sub-interpreters run their own copy of
+    # `app.py` but import the mock pyronova.db stub, so `PG_POOL`
+    # stays None in every worker. Routing through the main interp
+    # gives the handler access to the real pool. Validator fails with
+    # `count=0` if we drop `gil=True`.
     if PG_POOL is None:
         return _EMPTY_DB_RESPONSE
     q = req.query_params
@@ -242,45 +242,48 @@ _BAD_REQUEST = Response("bad request", status_code=400, content_type="text/plain
 
 
 # ---------------------------------------------------------------------------
-# CRUD — cache-aside with 200ms TTL, same `items` table as /async-db.
-# ---------------------------------------------------------------------------
+# CRUD — paths mirror Arena's aspnet-minimal reference:
+#   GET  /crud/items?category=X&page=N&limit=M   paginated list
+#   GET  /crud/items/{id}                        single item (200ms cache)
+#   POST /crud/items                             upsert, returns 201
+#   PUT  /crud/items/{id}                        update, invalidates cache
 #
-# Arena's CRUD profile mix: 75% GET /crud/{id}, 15% PUT /crud/{id},
-# 5% GET /crud, 5% POST /crud (upsert). Cache is in-process per
-# sub-interpreter — a shared DashMap (app.state) would need explicit
-# serialization and a background evictor to honor the 200ms TTL. Per-
-# interp dict is simpler, fast, and good enough: at 64 workers with
-# uniform load every hot key re-warms its cache in every worker within
-# one hit.
+# Cache is an in-process dict per sub-interpreter. Arena's aspnet impl
+# uses IMemoryCache (same semantics). `gil=True` on every handler for
+# the same reason /async-db needs it — our PgPool lives behind a
+# Rust-side OnceLock populated by the main interpreter's module-import.
+# ---------------------------------------------------------------------------
 
 import time as _time
 
 _CRUD_TTL_S = 0.2
 _CRUD_CACHE: dict = {}  # item_id -> (payload_dict, expires_at_monotonic)
 
-_CRUD_SELECT = (
-    "SELECT id, name, category, price, quantity, active, tags, "
-    "rating_score, rating_count FROM items"
-)
-_CRUD_GET_SQL = f"{_CRUD_SELECT} WHERE id = $1"
-_CRUD_LIST_SQL = f"{_CRUD_SELECT} ORDER BY id LIMIT $1"
-_CRUD_UPDATE_SQL = (
-    "UPDATE items SET quantity = $1 WHERE id = $2 "
-    "RETURNING id, name, category, price, quantity, active, tags, "
+_CRUD_COLS = (
+    "id, name, category, price, quantity, active, tags, "
     "rating_score, rating_count"
 )
+_CRUD_GET_SQL = f"SELECT {_CRUD_COLS} FROM items WHERE id = $1 LIMIT 1"
+_CRUD_LIST_SQL = (
+    f"SELECT {_CRUD_COLS} FROM items WHERE category = $1 "
+    "ORDER BY id LIMIT $2 OFFSET $3"
+)
+# `name = $1, price = $2, quantity = $3 WHERE id = $4`. Arena's aspnet
+# UPDATE doesn't touch tags/active/category — mirror exactly.
+_CRUD_UPDATE_SQL = "UPDATE items SET name = $1, price = $2, quantity = $3 WHERE id = $4"
+# Fixed tags/rating in the INSERT path — Arena's aspnet does the same
+# (`'[\"bench\"]'` literal, rating 0/0) so the row always passes its
+# CHECK constraints regardless of input shape.
 _CRUD_UPSERT_SQL = (
     "INSERT INTO items "
     "(id, name, category, price, quantity, active, tags, rating_score, rating_count) "
-    "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) "
-    "ON CONFLICT (id) DO UPDATE SET "
-    "name = EXCLUDED.name, quantity = EXCLUDED.quantity "
-    "RETURNING id, name, category, price, quantity, active, tags, "
-    "rating_score, rating_count"
+    "VALUES ($1, $2, $3, $4, $5, true, '[\"bench\"]', 0, 0) "
+    "ON CONFLICT (id) DO UPDATE SET name = $2, price = $4, quantity = $5 "
+    "RETURNING id"
 )
 
 
-def _row_to_item(row):
+def _row_to_full_item(row):
     tags = row["tags"]
     if tags.__class__ is str:
         tags = json.loads(tags)
@@ -296,7 +299,7 @@ def _row_to_item(row):
     }
 
 
-@app.get("/crud/{id}")
+@app.get("/crud/items/{id}", gil=True)
 def crud_get_one(req):
     if PG_POOL is None:
         return _NOT_FOUND
@@ -314,78 +317,101 @@ def crud_get_one(req):
         return _NOT_FOUND
     if row is None:
         return _NOT_FOUND
-    item = _row_to_item(row)
+    item = _row_to_full_item(row)
     _CRUD_CACHE[item_id] = (item, now + _CRUD_TTL_S)
     return item
 
 
-@app.get("/crud")
+@app.get("/crud/items", gil=True)
 def crud_list(req):
     if PG_POOL is None:
-        return _EMPTY_DB_RESPONSE
+        return _EMPTY_CRUD_LIST
+    q = req.query_params
+    category = q.get("category") or "electronics"
     try:
-        limit = int(req.query_params.get("limit", "50"))
-        limit = max(1, min(limit, 50))
+        page = int(q.get("page", "1"))
+        if page < 1:
+            page = 1
     except ValueError:
-        return _EMPTY_DB_RESPONSE
+        page = 1
     try:
-        rows = PG_POOL.fetch_all(_CRUD_LIST_SQL, limit)
+        limit = int(q.get("limit", "10"))
+    except ValueError:
+        limit = 10
+    if limit < 1 or limit > 50:
+        limit = 10
+    offset = (page - 1) * limit
+    try:
+        rows = PG_POOL.fetch_all(_CRUD_LIST_SQL, category, limit, offset)
     except Exception:
-        return _EMPTY_DB_RESPONSE
-    return _rows_to_payload(rows)
+        return _EMPTY_CRUD_LIST
+    items = [_row_to_full_item(r) for r in rows]
+    return {"items": items, "total": len(items), "page": page, "limit": limit}
 
 
-@app.put("/crud/{id}")
+@app.put("/crud/items/{id}", gil=True)
 def crud_update(req):
     if PG_POOL is None:
         return _NOT_FOUND
     try:
         item_id = int(req.params["id"])
-        body = json.loads(req.body)
+        body = json.loads(req.body) if req.body else {}
+    except (KeyError, ValueError, TypeError):
+        return _BAD_REQUEST
+    name = body.get("name") or "Updated"
+    try:
+        price = int(body.get("price", 0))
         quantity = int(body.get("quantity", 0))
-    except Exception:
+    except (TypeError, ValueError):
         return _BAD_REQUEST
     try:
-        row = PG_POOL.fetch_one(_CRUD_UPDATE_SQL, quantity, item_id)
+        affected = PG_POOL.execute(_CRUD_UPDATE_SQL, name, price, quantity, item_id)
     except Exception:
         return _NOT_FOUND
-    if row is None:
+    if affected == 0:
         return _NOT_FOUND
     _CRUD_CACHE.pop(item_id, None)
-    return _row_to_item(row)
+    return {"id": item_id, "name": name, "price": price, "quantity": quantity}
 
 
-@app.post("/crud")
+@app.post("/crud/items", gil=True)
 def crud_upsert(req):
     if PG_POOL is None:
         return _BAD_REQUEST
     try:
-        body = json.loads(req.body)
+        body = json.loads(req.body) if req.body else {}
         item_id = int(body["id"])
-        name = body.get("name", "")
-        category = body.get("category", "")
-        price = float(body.get("price", 0))
+    except (KeyError, ValueError, TypeError):
+        return _BAD_REQUEST
+    name = body.get("name") or "New Product"
+    category = body.get("category") or "test"
+    try:
+        price = int(body.get("price", 0))
         quantity = int(body.get("quantity", 0))
-        active = bool(body.get("active", True))
-        tags_raw = body.get("tags", [])
-        tags_json = json.dumps(tags_raw)
-        rating = body.get("rating", {})
-        rating_score = float(rating.get("score", 0))
-        rating_count = int(rating.get("count", 0))
-    except Exception:
+    except (TypeError, ValueError):
         return _BAD_REQUEST
     try:
-        row = PG_POOL.fetch_one(
+        new_id = PG_POOL.fetch_scalar(
             _CRUD_UPSERT_SQL,
             item_id, name, category, price, quantity,
-            active, tags_json, rating_score, rating_count,
         )
     except Exception:
         return _BAD_REQUEST
-    if row is None:
-        return _BAD_REQUEST
     _CRUD_CACHE.pop(item_id, None)
-    return _row_to_item(row)
+    return Response(
+        body=json.dumps({
+            "id": new_id,
+            "name": name,
+            "category": category,
+            "price": price,
+            "quantity": quantity,
+        }),
+        status_code=201,
+        content_type="application/json",
+    )
+
+
+_EMPTY_CRUD_LIST = {"items": [], "total": 0, "page": 1, "limit": 10}
 
 
 if __name__ == "__main__":
