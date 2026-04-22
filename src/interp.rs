@@ -1873,9 +1873,23 @@ impl InterpreterPool {
         };
 
         // Sharded work channels — one per worker. See the struct docstring
-        // for the why. Capacity per shard matches the old global capacity
-        // divided evenly (128 slots per worker).
-        const SHARD_CAPACITY: usize = 128;
+        // for the why.
+        //
+        // Per-shard capacity is deliberately 2× the admission budget
+        // per worker (`PERMITS_PER_WORKER`, 128). Rationale: with P2C
+        // dispatch the worst-case per-shard load is
+        //   mean + log log N_shards  (Mitzenmacher 2001)
+        // which, at 100% admission utilization (mean = 128), can briefly
+        // exceed 128. If shard capacity were also 128, those transient
+        // peaks would cause `try_send → Full` and submit() would have
+        // to 503 the request even though the global permit pool still
+        // has slack — "spurious overload". Giving each shard 2× the
+        // per-worker permit budget provides a capacity cushion that
+        // absorbs P2C's statistical variance so 503s happen only when
+        // the GLOBAL permit pool is exhausted, which is the correct
+        // load-shedding signal.
+        const PERMITS_PER_WORKER: usize = 128;
+        const SHARD_CAPACITY: usize = PERMITS_PER_WORKER * 2;
         let mut sync_work_txs: Vec<crossbeam_channel::Sender<WorkRequest>> =
             Vec::with_capacity(sync_count);
         let mut sync_work_rxs: Vec<crossbeam_channel::Receiver<WorkRequest>> =
@@ -1993,17 +2007,17 @@ impl InterpreterPool {
             threads.push(handle);
         }
 
-        // Admission semaphore: permits == sum of all shard capacities so a
-        // permit-holder will usually find a slot. With sharding a permit
-        // no longer guarantees a slot (the round-robin target shard may
-        // be hot while others are empty), but submit() walks the ring
-        // with a one-hop fallback so that's fine in practice.
-        let total_slots = sync_work_txs.len() * SHARD_CAPACITY
-            + async_work_txs
-                .as_ref()
-                .map(|v| v.len() * SHARD_CAPACITY)
-                .unwrap_or(0);
-        let submit_semaphore = Arc::new(tokio::sync::Semaphore::new(total_slots));
+        // Admission semaphore. Permit budget matches the pre-sharding
+        // formula: n × PERMITS_PER_WORKER, doubled when the async pool
+        // also exists (async handlers add their own in-flight budget
+        // on top of the sync pool). A permit-holder does NOT have a
+        // reserved slot in any specific shard (P2C picks randomly),
+        // but SHARD_CAPACITY = 2 × PERMITS_PER_WORKER so "all P2C picks
+        // full" stays vanishingly rare until the global permit pool
+        // itself saturates (Mitzenmacher: max load ≈ mean + log log N
+        // < 2 × mean). 503s fire only at true process saturation.
+        let total_permits = n * PERMITS_PER_WORKER * if has_any_async { 2 } else { 1 };
+        let submit_semaphore = Arc::new(tokio::sync::Semaphore::new(total_permits));
 
         Ok(InterpreterPool {
             sync_work_txs,
@@ -2111,7 +2125,11 @@ impl InterpreterPool {
             x ^= x >> 7;
             x ^= x << 17;
             c.set(x);
-            x
+            // Marsaglia's xorshift64* — the final scrambling multiply
+            // breaks residual low-bit correlations that plain xorshift64
+            // leaves behind, so even the bottom bits we actually use
+            // for `% len` and `% (len-1)` are high-quality-uniform.
+            x.wrapping_mul(0x2545F4914F6CDD1D)
         });
 
         let i1 = (rnd as usize) % len;
@@ -2125,9 +2143,21 @@ impl InterpreterPool {
             (i2, i1)
         };
 
-        // Try the shorter queue first. If it's full, try the other.
-        // Both full (rare, only under sustained overload) → walk the
-        // remaining shards as a last-resort scan before giving up.
+        // Try the shorter queue first, then the longer of the two picks.
+        // If BOTH picks are full, shed the request immediately — DO NOT
+        // scan the remaining shards. Under sustained overload every
+        // submit that walks the ring performs N atomic `len()` reads,
+        // each touching a different shard's head cache line. With M
+        // IO threads doing that concurrently the system spends all its
+        // cycles in cross-core cache probes instead of serving requests
+        // (fallback-storm cascade-to-death). Load shedding at the first
+        // sign of full-queue back-pressure is the whole point of P2C.
+        //
+        // The admission semaphore upstream of submit() already caps
+        // total in-flight at sum(shard capacities), so "both picks full"
+        // should only occur during transient imbalance, not steady
+        // state. 503ing a few requests here is strictly better than
+        // melting the dispatcher.
         let mut msg = req;
         for idx in [a, b] {
             match shards[idx].try_send(msg) {
@@ -2140,20 +2170,7 @@ impl InterpreterPool {
                 }
             }
         }
-        for off in 0..len {
-            if off == a || off == b {
-                continue;
-            }
-            match shards[off].try_send(msg) {
-                Ok(()) => return Ok(()),
-                Err(crossbeam_channel::TrySendError::Full(r)) => {
-                    msg = r;
-                }
-                Err(crossbeam_channel::TrySendError::Disconnected(_)) => {
-                    return Err("worker pool channel closed".to_string());
-                }
-            }
-        }
+        let _ = msg; // explicitly drop the rejected request
         Err("server overloaded".to_string())
     }
 }

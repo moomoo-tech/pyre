@@ -72,8 +72,8 @@ def test_pool_exposes_submit_semaphore():
     # It's populated in InterpreterPool::new with a non-zero permit budget
     # sized to the sum of per-shard capacities (one bounded channel per
     # worker after the sharding refactor).
-    assert "total_slots" in src and "SHARD_CAPACITY" in src, (
-        "permit count should be sized from the sharded channel capacities "
-        "(sum over shards of SHARD_CAPACITY) so the admission gate matches "
-        "the actual queue budget"
+    assert "total_permits" in src and "PERMITS_PER_WORKER" in src, (
+        "permit count should use the n × PERMITS_PER_WORKER formula "
+        "(doubled when an async pool exists) — sized independently of the "
+        "per-shard capacity so P2C dispatch variance has headroom"
     )
