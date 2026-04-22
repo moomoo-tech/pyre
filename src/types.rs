@@ -183,16 +183,37 @@ impl PyronovaRequest {
 
     #[getter]
     fn query_params(&self) -> HashMap<String, String> {
-        // Parse once, reuse on subsequent accesses. Handlers that read
-        // `req.query_params.get("a")` and `req.query_params.get("b")`
-        // previously parsed the query string twice.
+        // Parse once, reuse on subsequent accesses. On duplicate keys
+        // (`?a=1&a=2`) we keep the FIRST value, not the last. Rationale:
+        // HTTP parameter pollution (HPP). WAFs, rate limiters, and
+        // reverse proxies almost always inspect the first occurrence of
+        // a duplicated param; a web framework that then silently picks
+        // the last one opens a classic security-policy bypass
+        // (`?role=user&role=admin` reaches business logic as admin
+        // while the WAF approved it as user). First-wins lines up
+        // with those upstream components.
+        //
+        // If a handler legitimately needs all values, use
+        // `query_params_all()` which returns Dict[str, List[str]].
         self.query_cache
             .get_or_init(|| {
-                form_urlencoded::parse(self.query.as_bytes())
-                    .map(|(k, v)| (k.into_owned(), v.into_owned()))
-                    .collect()
+                let mut map: HashMap<String, String> = HashMap::new();
+                for (k, v) in form_urlencoded::parse(self.query.as_bytes()) {
+                    map.entry(k.into_owned()).or_insert_with(|| v.into_owned());
+                }
+                map
             })
             .clone()
+    }
+
+    /// Full query-parameter access preserving duplicate keys.
+    /// Returns Dict[str, List[str]] in insertion order.
+    fn query_params_all(&self) -> HashMap<String, Vec<String>> {
+        let mut map: HashMap<String, Vec<String>> = HashMap::new();
+        for (k, v) in form_urlencoded::parse(self.query.as_bytes()) {
+            map.entry(k.into_owned()).or_default().push(v.into_owned());
+        }
+        map
     }
 }
 

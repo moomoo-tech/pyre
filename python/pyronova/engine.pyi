@@ -26,6 +26,12 @@ class Request:
     client_ip: str
     body: bytes
     query_params: dict[str, str]
+    """Query parameters as Dict[str, str]. On duplicate keys, the FIRST
+    value wins (HTTP parameter pollution defense — aligns with common
+    WAF / reverse-proxy behavior). Use `query_params_all` for duplicates."""
+    query_params_all: dict[str, list[str]]
+    """Query parameters preserving all values per key. Use when the
+    handler legitimately accepts multiple occurrences of the same key."""
     def text(self) -> str: ...
     def json(self) -> dict: ...
 
