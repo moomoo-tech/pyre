@@ -636,7 +636,21 @@ impl PyronovaApp {
                                                 }
                                             }
                                         });
-                                        let builder = AutoBuilder::new(hyper_util::rt::TokioExecutor::new());
+                                        let mut builder = AutoBuilder::new(hyper_util::rt::TokioExecutor::new());
+                                        // Slowloris defense: cap how long hyper waits for the
+                                        // client to finish sending request headers. Without this
+                                        // a client that opens a TCP connection and dribbles
+                                        // one header byte per minute holds a Tokio task + fd
+                                        // forever. TLS handshake is already bounded in
+                                        // src/tls.rs::wrap_tls; this closes the analogous hole
+                                        // on the plaintext HTTP path (and on HTTP-after-TLS).
+                                        // HTTP/2 has its own internal frame/settings timeouts
+                                        // via the h2 crate, so we only configure H/1 here.
+                                        // Requires a Timer — TokioTimer ties it to the runtime.
+                                        builder
+                                            .http1()
+                                            .timer(hyper_util::rt::TokioTimer::new())
+                                            .header_read_timeout(std::time::Duration::from_secs(10));
                                         let conn = builder.serve_connection_with_upgrades(io, svc);
                                         tokio::pin!(conn);
                                         let mut graceful_sent = false;
@@ -866,7 +880,21 @@ impl PyronovaApp {
                                                 }
                                             }
                                         });
-                                        let builder = AutoBuilder::new(hyper_util::rt::TokioExecutor::new());
+                                        let mut builder = AutoBuilder::new(hyper_util::rt::TokioExecutor::new());
+                                        // Slowloris defense: cap how long hyper waits for the
+                                        // client to finish sending request headers. Without this
+                                        // a client that opens a TCP connection and dribbles
+                                        // one header byte per minute holds a Tokio task + fd
+                                        // forever. TLS handshake is already bounded in
+                                        // src/tls.rs::wrap_tls; this closes the analogous hole
+                                        // on the plaintext HTTP path (and on HTTP-after-TLS).
+                                        // HTTP/2 has its own internal frame/settings timeouts
+                                        // via the h2 crate, so we only configure H/1 here.
+                                        // Requires a Timer — TokioTimer ties it to the runtime.
+                                        builder
+                                            .http1()
+                                            .timer(hyper_util::rt::TokioTimer::new())
+                                            .header_read_timeout(std::time::Duration::from_secs(10));
                                         let conn = builder.serve_connection_with_upgrades(io, svc);
                                         tokio::pin!(conn);
                                         let mut graceful_sent = false;

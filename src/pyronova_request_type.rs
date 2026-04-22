@@ -208,15 +208,15 @@ unsafe extern "C" fn pyronova_request_init(
     {
         return -1;
     }
-    // Release any previous contents (in case __init__ is called twice —
-    // CPython's API contract allows this even if unusual).
-    ffi::Py_XDECREF((*inner).method);
-    ffi::Py_XDECREF((*inner).path);
-    ffi::Py_XDECREF((*inner).params);
-    ffi::Py_XDECREF((*inner).query);
-    ffi::Py_XDECREF((*inner).body_bytes);
-    ffi::Py_XDECREF((*inner).headers);
-    ffi::Py_XDECREF((*inner).client_ip);
+    // CPython allows __init__ to be called a second time. To handle the
+    // pathological `req.__init__(req.method, ...)` case safely we must
+    // INCREF-new BEFORE DECREF-old (Py_SETREF idiom). The naive "DECREF
+    // old, INCREF new, store" order can drop the only live reference
+    // to `method` and leave us holding a dangling pointer. In normal
+    // call conventions the args tuple pins the new values through this
+    // function, so the bad ordering wouldn't actually UAF in practice —
+    // but the idiom is what CPython's own C code uses for a reason;
+    // cheap to get right, silent to get wrong.
     ffi::Py_INCREF(method);
     ffi::Py_INCREF(path);
     ffi::Py_INCREF(params);
@@ -224,6 +224,15 @@ unsafe extern "C" fn pyronova_request_init(
     ffi::Py_INCREF(body_bytes);
     ffi::Py_INCREF(headers);
     ffi::Py_INCREF(client_ip);
+
+    let old_method = (*inner).method;
+    let old_path = (*inner).path;
+    let old_params = (*inner).params;
+    let old_query = (*inner).query;
+    let old_body = (*inner).body_bytes;
+    let old_headers = (*inner).headers;
+    let old_client_ip = (*inner).client_ip;
+
     (*inner).method = method;
     (*inner).path = path;
     (*inner).params = params;
@@ -231,6 +240,14 @@ unsafe extern "C" fn pyronova_request_init(
     (*inner).body_bytes = body_bytes;
     (*inner).headers = headers;
     (*inner).client_ip = client_ip;
+
+    ffi::Py_XDECREF(old_method);
+    ffi::Py_XDECREF(old_path);
+    ffi::Py_XDECREF(old_params);
+    ffi::Py_XDECREF(old_query);
+    ffi::Py_XDECREF(old_body);
+    ffi::Py_XDECREF(old_headers);
+    ffi::Py_XDECREF(old_client_ip);
     0
 }
 
