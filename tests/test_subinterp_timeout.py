@@ -69,7 +69,7 @@ def slow(req):
     return {"should": "never reach"}
 
 if __name__ == "__main__":
-    app.run(host="127.0.0.1", port=19894, mode="subinterp", workers=2)
+    app.run(host="127.0.0.1", port=19898, mode="subinterp", workers=2)
 '''
 
 
@@ -78,16 +78,16 @@ def server():
     script = "/tmp/pyronova_test_sync_timeout.py"
     with open(script, "w") as f:
         f.write(SLOW_SYNC_SCRIPT)
-    proc = start_server(script, 19894)
+    proc = start_server(script, 19898)
     yield proc
-    stop_server(proc, 19894)
+    stop_server(proc, 19898)
 
 
 def test_sync_timeout_returns_504(server):
     """Sync handler exceeding 30s Rust timeout returns 504."""
     try:
         resp = urllib.request.urlopen(
-            "http://127.0.0.1:19894/slow", timeout=35
+            "http://127.0.0.1:19898/slow", timeout=35
         )
         status = resp.status
         body = resp.read()
@@ -101,7 +101,7 @@ def test_server_healthy_after_timeout(server):
     """After a 504 timeout, subsequent fast requests succeed."""
     try:
         resp = urllib.request.urlopen(
-            "http://127.0.0.1:19894/", timeout=5
+            "http://127.0.0.1:19898/", timeout=5
         )
         status = resp.status
         body = json.loads(resp.read())

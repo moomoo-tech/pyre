@@ -1758,6 +1758,17 @@ pub(crate) struct InterpreterPool {
     /// Dropping all senders closes the channels, signaling workers to exit.
     sync_work_txs: Vec<crossbeam_channel::Sender<WorkRequest>>,
     async_work_txs: Option<Vec<crossbeam_channel::Sender<WorkRequest>>>,
+    /// Per-sync-worker "currently executing" flag. crossbeam's `len()` only
+    /// reports queued items — a worker that's already dequeued and is
+    /// running a slow handler looks idle (queue len 0) to P2C, which
+    /// can then dispatch NEW work onto its empty-but-stuck shard while
+    /// other workers are genuinely idle. With only 2 workers + 1 stuck
+    /// this regresses `test_server_healthy_after_timeout`; at scale the
+    /// same race creates rare tail-latency spikes. Including this flag
+    /// in the P2C load metric lets dispatch see "queued + in-flight".
+    /// CachePadded so the atomic for worker i doesn't share a cache
+    /// line with worker i±1 — critical on many-CCD boxes.
+    sync_worker_busy: Vec<Arc<crossbeam_utils::CachePadded<AtomicBool>>>,
     /// Admission-control gate: one permit per slot in the work channel.
     /// Callers `try_acquire_owned()` BEFORE collecting the request body,
     /// so an over-capacity surge of uploads doesn't let N × max_body_size
@@ -1894,10 +1905,15 @@ impl InterpreterPool {
             Vec::with_capacity(sync_count);
         let mut sync_work_rxs: Vec<crossbeam_channel::Receiver<WorkRequest>> =
             Vec::with_capacity(sync_count);
+        let mut sync_worker_busy: Vec<Arc<crossbeam_utils::CachePadded<AtomicBool>>> =
+            Vec::with_capacity(sync_count);
         for _ in 0..sync_count {
             let (tx, rx) = crossbeam_channel::bounded::<WorkRequest>(SHARD_CAPACITY);
             sync_work_txs.push(tx);
             sync_work_rxs.push(rx);
+            sync_worker_busy.push(Arc::new(crossbeam_utils::CachePadded::new(
+                AtomicBool::new(false),
+            )));
         }
         let (async_work_txs, async_work_rxs): (
             Option<Vec<crossbeam_channel::Sender<WorkRequest>>>,
@@ -1989,12 +2005,14 @@ impl InterpreterPool {
             } else {
                 // Sync worker — consume its own dedicated shard receiver.
                 let rx = sync_work_rxs[i].clone();
+                let busy = Arc::clone(&sync_worker_busy[i]);
                 std::thread::Builder::new()
                     .name(format!("pyronova-worker-{i}"))
                     .spawn(move || {
                         worker_thread_loop(
                             worker,
                             rx,
+                            busy,
                             &handler_names_clone,
                             &before_hooks_clone,
                             &after_hooks_clone,
@@ -2022,6 +2040,7 @@ impl InterpreterPool {
         Ok(InterpreterPool {
             sync_work_txs,
             async_work_txs,
+            sync_worker_busy,
             worker_threads: Some(threads),
             routers,
             _handler_names: handler_names.to_vec(),
@@ -2137,7 +2156,25 @@ impl InterpreterPool {
         let j = ((rnd >> 32) as usize) % (len - 1);
         let i2 = if j >= i1 { j + 1 } else { j };
 
-        let (a, b) = if shards[i1].len() <= shards[i2].len() {
+        // Effective load = queued items + (1 if worker actively running).
+        // See `sync_worker_busy` docstring: a worker executing a slow
+        // handler looks idle to `sender.len()` (queue has 0 items after
+        // dequeue) but is unavailable for new work. Only meaningful for
+        // the sync pool — async workers can multiplex many futures per
+        // thread, so a single busy bool doesn't carry useful signal.
+        let load = |idx: usize| -> usize {
+            let queued = shards[idx].len();
+            let busy = if is_async {
+                0
+            } else {
+                self.sync_worker_busy
+                    .get(idx)
+                    .map(|b| b.load(std::sync::atomic::Ordering::Relaxed) as usize)
+                    .unwrap_or(0)
+            };
+            queued + busy
+        };
+        let (a, b) = if load(i1) <= load(i2) {
             (i1, i2)
         } else {
             (i2, i1)
@@ -2270,6 +2307,7 @@ unsafe fn rebind_tstate_to_current_thread(
 fn worker_thread_loop(
     mut worker: SubInterpreterWorker,
     rx: crossbeam_channel::Receiver<WorkRequest>,
+    busy: Arc<crossbeam_utils::CachePadded<AtomicBool>>,
     handler_names: &[String],
     before_hook_names: &[String],
     after_hook_names: &[String],
@@ -2293,6 +2331,12 @@ fn worker_thread_loop(
         // even during panic unwind.
         let tstate_cell = std::cell::Cell::new(worker.tstate);
 
+        // Mark worker busy for the P2C load metric. `store(false)` runs
+        // even on panic because the flag is set outside catch_unwind
+        // and cleared after the Result is captured — catch_unwind
+        // returns Err(_), we still fall through to the clear below.
+        busy.store(true, Ordering::Relaxed);
+
         // Catch panics to prevent worker thread death.
         // SubInterpGilGuard ensures GIL is released even if call_handler panics.
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
@@ -2313,6 +2357,8 @@ fn worker_thread_loop(
             )
             // _guard drops here → PyEval_SaveThread() → tstate_cell updated
         }));
+
+        busy.store(false, Ordering::Relaxed);
 
         // Recover tstate (updated by guard's Drop, even after panic)
         worker.tstate = tstate_cell.get();
