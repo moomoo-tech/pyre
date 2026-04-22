@@ -29,7 +29,7 @@
 
 use bytes::{BufMut, Bytes, BytesMut};
 use futures_util::stream;
-use http_body_util::{BodyExt, Limited, StreamBody};
+use http_body_util::{BodyExt, LengthLimitError, Limited, StreamBody};
 use hyper::body::{Frame, Incoming};
 use hyper::header::HeaderValue;
 use hyper::{HeaderMap, Request, Response, StatusCode};
@@ -66,7 +66,17 @@ pub(crate) async fn handle_grpc(
     let limited = Limited::new(req.into_body(), crate::handlers::max_body_size());
     let collected = match limited.collect().await {
         Ok(c) => c.to_bytes(),
-        Err(_) => return Ok(grpc_reply_trailers(None, "8", "body too large")),
+        Err(e) => {
+            // Distinguish "client exceeded our size cap" from a transport
+            // drop so the grpc-status on the wire actually matches what
+            // happened. Downcasting the boxed error is the documented way
+            // to interrogate `Limited` (see its rustdoc example).
+            return Ok(if e.downcast_ref::<LengthLimitError>().is_some() {
+                grpc_reply_trailers(None, "8", "body too large") // RESOURCE_EXHAUSTED
+            } else {
+                grpc_reply_trailers(None, "14", "body read failed") // UNAVAILABLE
+            });
+        }
     };
 
     if collected.len() < 5 {
