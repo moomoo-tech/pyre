@@ -43,7 +43,7 @@ const CURSOR_CAPACITY: usize = 8;
 static PG_POOL: OnceLock<sqlx::PgPool> = OnceLock::new();
 static PG_RUNTIME: OnceLock<Runtime> = OnceLock::new();
 
-fn runtime() -> &'static Runtime {
+pub(crate) fn runtime() -> &'static Runtime {
     PG_RUNTIME.get_or_init(|| {
         tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
@@ -54,7 +54,7 @@ fn runtime() -> &'static Runtime {
     })
 }
 
-fn pool_ref() -> PyResult<&'static sqlx::PgPool> {
+pub(crate) fn pool_ref() -> PyResult<&'static sqlx::PgPool> {
     PG_POOL.get().ok_or_else(|| {
         PyRuntimeError::new_err("PgPool not initialized — call PgPool.connect() first")
     })
@@ -68,7 +68,7 @@ fn pool_ref() -> PyResult<&'static sqlx::PgPool> {
 /// concrete Rust type sqlx expects. This sidesteps the need for trait-object
 /// parameter binding (which sqlx doesn't directly support) — we build a
 /// `sqlx::query::Query` and call the matching `bind::<T>()` per param.
-enum BoundParam {
+pub(crate) enum BoundParam {
     Null,
     Bool(bool),
     Int(i64),
@@ -79,7 +79,7 @@ enum BoundParam {
     Json(serde_json::Value),
 }
 
-fn extract_param(obj: &Bound<'_, PyAny>) -> PyResult<BoundParam> {
+pub(crate) fn extract_param(obj: &Bound<'_, PyAny>) -> PyResult<BoundParam> {
     if obj.is_none() {
         return Ok(BoundParam::Null);
     }
@@ -113,7 +113,7 @@ fn extract_param(obj: &Bound<'_, PyAny>) -> PyResult<BoundParam> {
     )))
 }
 
-fn bind_params_raw<'q>(
+pub(crate) fn bind_params_raw<'q>(
     mut query: sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>,
     params: &'q [BoundParam],
 ) -> sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments> {
@@ -137,7 +137,7 @@ fn bind_params_raw<'q>(
 
 /// Convert a single column cell into a Python object. Dispatches on the
 /// Postgres type OID name (sqlx exposes it via `TypeInfo::name()`).
-fn column_to_py(py: Python<'_>, value: PgValueRef<'_>) -> PyResult<Py<PyAny>> {
+pub(crate) fn column_to_py(py: Python<'_>, value: PgValueRef<'_>) -> PyResult<Py<PyAny>> {
     if value.is_null() {
         return Ok(py.None());
     }
@@ -230,7 +230,7 @@ where
     Ok(bound.into_any().unbind())
 }
 
-fn row_to_dict(py: Python<'_>, row: &PgRow) -> PyResult<Py<PyDict>> {
+pub(crate) fn row_to_dict(py: Python<'_>, row: &PgRow) -> PyResult<Py<PyDict>> {
     let dict = PyDict::new(py);
     for col in row.columns() {
         let name = col.name();

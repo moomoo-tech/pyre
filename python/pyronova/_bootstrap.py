@@ -269,35 +269,60 @@ sys.modules["pyronova.cookies"] = _cookies_mod
 sys.modules["pyronova.rpc"] = types.ModuleType("pyronova.rpc")
 sys.modules["pyronova.testing"] = types.ModuleType("pyronova.testing")
 
-# -- Mock pyronova.db and .crud for sub-interp replay --------------------
+# -- pyronova.db — bridge-backed PgPool proxy ---------------------------
 #
-# The real PgPool lives in the main interpreter and writes to a Rust-side
-# OnceLock; sub-interpreter replays only need the imports to succeed.
-# DB-backed handlers are `gil=True` — they execute on the main interp,
-# not inside a sub-interp, so the mock methods below are never actually
-# called on the hot path.
+# The #[pymodule] engine does not carry a Py_mod_multiple_interpreters
+# slot (CPython 3.12+ refuses to load such modules in a sub-interp), so
+# the real `PgPool` pyclass is not reachable from this interpreter.
+# Rust injects four C-FFI entry points into each sub-interp's globals
+# (`_pyronova_db_fetch_all`, `_pyronova_db_fetch_one`,
+# `_pyronova_db_fetch_scalar`, `_pyronova_db_execute`) that forward to
+# the main-process sqlx pool while releasing the calling sub-interp's
+# GIL. See src/db_bridge.rs for the full rationale.
 
 _db_mod = types.ModuleType("pyronova.db")
+
 class _MockPgCursor:
+    # fetch_iter is still mock — cursor streaming across the interp
+    # boundary needs a per-worker mpsc channel and we haven't wired
+    # that yet. Handlers that rely on streaming should stay gil=True.
     def __iter__(self): return self
     def __next__(self): raise StopIteration
     def to_list(self): return []
-class _MockPgPool:
+
+class _PgPool:
+    """Sub-interp proxy for the Rust-side sqlx pool.
+
+    Zero-state; methods forward into the four C-FFI functions injected
+    by src/interp.rs before this bootstrap runs. The functions drop the
+    GIL during the sqlx round-trip, so many workers can have queries
+    in flight simultaneously on the same shared pool.
+    """
     @classmethod
-    def connect(cls, *a, **kw): return cls()
-    def fetch_one(self, *a, **kw): return None
-    def fetch_all(self, *a, **kw): return []
-    def fetch_scalar(self, *a, **kw): return None
-    def execute(self, *a, **kw): return 0
-    def fetch_iter(self, *a, **kw): return _MockPgCursor()
-    # async variants; bootstrap mock is just "don't crash at import / route
-    # registration", so these return awaitable-None. Real async calls only
-    # execute on the main interpreter where the real PgPool lives.
+    def connect(cls, *a, **kw):
+        # Sub-interp side: no-op. The main interp owns init of the
+        # Rust-side static PG_POOL: OnceLock. This handle is stateless
+        # and every method call reads that global directly.
+        return cls()
+    def fetch_all(self, sql, *params):
+        return _pyronova_db_fetch_all(sql, params)  # type: ignore[name-defined]
+    def fetch_one(self, sql, *params):
+        return _pyronova_db_fetch_one(sql, params)  # type: ignore[name-defined]
+    def fetch_scalar(self, sql, *params):
+        return _pyronova_db_fetch_scalar(sql, params)  # type: ignore[name-defined]
+    def execute(self, sql, *params):
+        return _pyronova_db_execute(sql, params)  # type: ignore[name-defined]
+    def fetch_iter(self, *a, **kw):
+        return _MockPgCursor()
+    # Async variants — still stubs. Adding them needs async C-FFI
+    # entry points; the sqlx pool itself is async-native, but the
+    # current bridge blocks the sub-interp worker thread on the runtime.
     async def fetch_one_async(self, *a, **kw): return None
     async def fetch_all_async(self, *a, **kw): return []
     async def fetch_scalar_async(self, *a, **kw): return None
     async def execute_async(self, *a, **kw): return 0
-_db_mod.PgPool = _MockPgPool
+
+_db_mod.PgPool = _PgPool
 _db_mod.PgCursor = _MockPgCursor
 sys.modules["pyronova.db"] = _db_mod
 

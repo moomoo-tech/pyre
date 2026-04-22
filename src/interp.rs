@@ -942,6 +942,12 @@ impl SubInterpreterWorker {
             ffi::Py_DECREF(emit_log_func);
         }
 
+        // Sub-interp DB bridge — 4 C-FFI functions that forward fetch_*
+        // and execute calls onto the main-process sqlx pool, so DB-backed
+        // routes no longer need `gil=True`. See src/db_bridge.rs for the
+        // full rationale.
+        crate::db_bridge::register_db_bridge(globals.as_ptr());
+
         // Set __file__ so user scripts can use it for path resolution
         if let Some(py_file) = py_str(script_path) {
             ffi::PyDict_SetItemString(globals.as_ptr(), c"__file__".as_ptr(), py_file.as_ptr());
@@ -2515,6 +2521,12 @@ fn worker_thread_loop_async(
             );
             ffi::Py_DECREF(emit_log_func);
         }
+
+        // Sub-interp DB bridge — see sync worker path + src/db_bridge.rs
+        // for the rationale. Same 4 C-FFI functions injected into the
+        // async worker's globals so async handlers can also issue DB
+        // queries without the `gil=True` escape hatch.
+        crate::db_bridge::register_db_bridge(worker.globals);
 
         // Run the async engine — this blocks until the channel is closed
         let code = std::ffi::CString::new(engine_script).unwrap();
