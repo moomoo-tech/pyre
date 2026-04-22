@@ -265,31 +265,31 @@ class Pyronova:
     # Route registration (decorator + direct call)
     # ------------------------------------------------------------------
 
-    def get(self, path: str, handler: Callable | None = None, *, gil: bool = False, model: type | None = None):
+    def get(self, path: str, handler: Callable | None = None, *, gil: bool = False, model: type | None = None) -> Callable:
         return self._route("GET", path, handler, gil=gil, model=model)
 
-    def post(self, path: str, handler: Callable | None = None, *, gil: bool = False, model: type | None = None, stream: bool = False):
+    def post(self, path: str, handler: Callable | None = None, *, gil: bool = False, model: type | None = None, stream: bool = False) -> Callable:
         return self._route("POST", path, handler, gil=gil, model=model, stream=stream)
 
-    def put(self, path: str, handler: Callable | None = None, *, gil: bool = False, model: type | None = None, stream: bool = False):
+    def put(self, path: str, handler: Callable | None = None, *, gil: bool = False, model: type | None = None, stream: bool = False) -> Callable:
         return self._route("PUT", path, handler, gil=gil, model=model, stream=stream)
 
-    def delete(self, path: str, handler: Callable | None = None, *, gil: bool = False, model: type | None = None):
+    def delete(self, path: str, handler: Callable | None = None, *, gil: bool = False, model: type | None = None) -> Callable:
         return self._route("DELETE", path, handler, gil=gil, model=model)
 
-    def patch(self, path: str, handler: Callable | None = None, *, gil: bool = False, model: type | None = None, stream: bool = False):
+    def patch(self, path: str, handler: Callable | None = None, *, gil: bool = False, model: type | None = None, stream: bool = False) -> Callable:
         return self._route("PATCH", path, handler, gil=gil, model=model, stream=stream)
 
-    def options(self, path: str, handler: Callable | None = None, *, gil: bool = False, model: type | None = None):
+    def options(self, path: str, handler: Callable | None = None, *, gil: bool = False, model: type | None = None) -> Callable:
         return self._route("OPTIONS", path, handler, gil=gil, model=model)
 
-    def head(self, path: str, handler: Callable | None = None, *, gil: bool = False, model: type | None = None):
+    def head(self, path: str, handler: Callable | None = None, *, gil: bool = False, model: type | None = None) -> Callable:
         return self._route("HEAD", path, handler, gil=gil, model=model)
 
-    def route(self, method: str, path: str, handler: Callable | None = None, *, gil: bool = False, model: type | None = None, stream: bool = False):
+    def route(self, method: str, path: str, handler: Callable | None = None, *, gil: bool = False, model: type | None = None, stream: bool = False) -> Callable:
         return self._route(method.upper(), path, handler, gil=gil, model=model, stream=stream)
 
-    def _route(self, method: str, path: str, handler: Callable | None, *, gil: bool = False, model: type | None = None, stream: bool = False):
+    def _route(self, method: str, path: str, handler: Callable | None, *, gil: bool = False, model: type | None = None, stream: bool = False) -> Callable:
         def _wrap_with_model(fn: Callable, mdl: type) -> Callable:
             """Wrap handler to auto-validate request body with Pydantic model."""
             import inspect
@@ -421,7 +421,7 @@ class Pyronova:
 
     # ------------------------------------------------------------------
 
-    def rpc(self, path: str, *, proto_model=None):
+    def rpc(self, path: str, *, proto_model: type | None = None) -> Callable:
         """Register an RPC endpoint with content negotiation.
 
         Supports MsgPack, JSON, and optional Protobuf auto-decode/encode.
@@ -437,7 +437,7 @@ class Pyronova:
 
     # ------------------------------------------------------------------
 
-    def before_request(self, handler: Callable | None = None):
+    def before_request(self, handler: Callable | None = None) -> Callable:
         """Register a before-request hook. Use as decorator or direct call.
 
         The hook receives ``(request)`` and should return ``None`` to continue
@@ -453,7 +453,7 @@ class Pyronova:
 
         return decorator
 
-    def after_request(self, handler: Callable | None = None):
+    def after_request(self, handler: Callable | None = None) -> Callable:
         """Register an after-request hook. Use as decorator or direct call.
 
         The hook receives ``(request, response)`` and must return a
@@ -473,7 +473,7 @@ class Pyronova:
     # Lifecycle hooks
     # ------------------------------------------------------------------
 
-    def on_startup(self, handler: Callable | None = None):
+    def on_startup(self, handler: Callable | None = None) -> Callable:
         """Register a startup hook. Called before the server starts accepting requests.
 
         Usage::
@@ -492,7 +492,7 @@ class Pyronova:
 
         return decorator
 
-    def on_shutdown(self, handler: Callable | None = None):
+    def on_shutdown(self, handler: Callable | None = None) -> Callable:
         """Register a shutdown hook. Called after the server stops.
 
         Usage::
@@ -582,7 +582,7 @@ class Pyronova:
         )
         self._health_probes_enabled = True
 
-    def readiness_check(self, name: str):
+    def readiness_check(self, name: str) -> Callable:
         """Register a readiness check. Sync or async. Decorator form::
 
             @app.readiness_check("db")
@@ -603,7 +603,7 @@ class Pyronova:
     # Fallback (custom 404)
     # ------------------------------------------------------------------
 
-    def fallback(self, handler: Callable | None = None):
+    def fallback(self, handler: Callable | None = None) -> Callable:
         """Register a fallback handler for unmatched routes."""
         if handler is not None:
             self._engine.fallback(handler)
@@ -619,7 +619,7 @@ class Pyronova:
     # WebSocket
     # ------------------------------------------------------------------
 
-    def websocket(self, path: str, handler: Callable | None = None):
+    def websocket(self, path: str, handler: Callable | None = None) -> Callable:
         """Register a WebSocket handler. Use as decorator or direct call.
 
         The handler receives a ``WebSocket`` object with ``recv()``,
@@ -748,6 +748,7 @@ class Pyronova:
 
     def run(
         self,
+        *,
         host: str | None = None,
         port: int | None = None,
         workers: int | None = None,
