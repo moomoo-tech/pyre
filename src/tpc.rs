@@ -99,7 +99,22 @@ pub(crate) fn elevate_thread_qos_macos() {
 pub(crate) fn elevate_thread_qos_macos() {}
 
 /// Log line emitted once on startup so operators can see the TPC topology.
-fn log_startup(mode: &str, addr: &SocketAddr, n_threads: usize, n_cpus: usize) {
+///
+/// `routes` is used to surface the gil / async / sub-interp split so the
+/// operator knows up front how many routes will go through the
+/// single-thread main_bridge versus the per-thread TPC fleet.
+fn log_startup(
+    mode: &str,
+    addr: &SocketAddr,
+    n_threads: usize,
+    n_cpus: usize,
+    routes: &crate::router::RouteTable,
+) {
+    let gil_count = routes.requires_gil.iter().filter(|&&g| g).count();
+    let async_count = routes.is_async.iter().filter(|&&a| a).count();
+    let stream_count = routes.is_stream.iter().filter(|&&s| s).count();
+    let total = routes.requires_gil.len();
+    let subinterp_count = total.saturating_sub(gil_count).saturating_sub(async_count);
     tracing::info!(
         target: "pyronova::server",
         version = env!("CARGO_PKG_VERSION"),
@@ -108,6 +123,11 @@ fn log_startup(mode: &str, addr: &SocketAddr, n_threads: usize, n_cpus: usize) {
         %addr,
         tpc_threads = n_threads,
         cpus = n_cpus,
+        routes_total = total,
+        routes_subinterp = subinterp_count,
+        routes_gil = gil_count,
+        routes_async = async_count,
+        routes_stream = stream_count,
         "Pyronova started"
     );
     println!(
@@ -115,7 +135,15 @@ fn log_startup(mode: &str, addr: &SocketAddr, n_threads: usize, n_cpus: usize) {
         env!("CARGO_PKG_VERSION")
     );
     println!("  Listening on http://{addr}");
-    println!("  TPC threads: {n_threads} (CPUs: {n_cpus}, pinned)\n");
+    println!("  TPC threads: {n_threads} (CPUs: {n_cpus}, pinned)");
+    println!(
+        "  Routes: {subinterp_count} sub-interp + {gil_count} GIL + {async_count} async{stream_suffix}\n",
+        stream_suffix = if stream_count > 0 {
+            format!(" ({stream_count} stream)")
+        } else {
+            String::new()
+        }
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -129,7 +157,7 @@ pub(crate) fn run_tpc_gil(
     routes: FrozenRoutes,
     tls_acceptor: Option<Arc<tokio_rustls::TlsAcceptor>>,
 ) -> Result<(), String> {
-    log_startup("gil", &addr, n_threads, n_cpus);
+    log_startup("gil", &addr, n_threads, n_cpus, &routes);
 
     let shutdown = CancellationToken::new();
     let core_ids = core_affinity::get_core_ids().unwrap_or_default();
@@ -376,7 +404,7 @@ fn run_tpc_subinterp_per_thread_listener(
     tls_acceptor: Option<Arc<tokio_rustls::TlsAcceptor>>,
     main_bridge: Option<Arc<crate::bridge::main_bridge::MainInterpBridge>>,
 ) -> Result<(), String> {
-    log_startup("hybrid-inline", &addr, n_threads, n_cpus);
+    log_startup("hybrid-inline", &addr, n_threads, n_cpus, &routes);
 
     let shutdown = CancellationToken::new();
     let core_ids = core_affinity::get_core_ids().unwrap_or_default();
@@ -464,7 +492,7 @@ fn run_tpc_subinterp_fanout(
     tls_acceptor: Option<Arc<tokio_rustls::TlsAcceptor>>,
     main_bridge: Option<Arc<crate::bridge::main_bridge::MainInterpBridge>>,
 ) -> Result<(), String> {
-    log_startup("hybrid-inline-fanout", &addr, n_threads, n_cpus);
+    log_startup("hybrid-inline-fanout", &addr, n_threads, n_cpus, &routes);
 
     let shutdown = CancellationToken::new();
     let core_ids = core_affinity::get_core_ids().unwrap_or_default();
