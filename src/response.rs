@@ -36,7 +36,7 @@ pub(crate) fn extract_response_data(
         } else if body_bound.cast::<PyDict>().is_ok() || body_bound.cast::<PyList>().is_ok() {
             let val = py_to_json_value(body_bound).map_err(|e| format!("json error: {e}"))?;
             let json_bytes =
-                serde_json::to_vec(&val).map_err(|e| format!("json serialize error: {e}"))?;
+                sonic_rs::to_vec(&val).map_err(|e| format!("json serialize error: {e}"))?;
             (Bytes::from(json_bytes), "application/json")
         } else if let Ok(pb) = body_bound.cast::<PyBytes>() {
             // Fast path for PyBytes: one copy (PyBytes buffer → Bytes
@@ -87,7 +87,7 @@ pub(crate) fn extract_response_data(
     if obj.cast::<PyDict>().is_ok() {
         let val = py_to_json_value(&obj).map_err(|e| format!("json error: {e}"))?;
         let json_bytes =
-            serde_json::to_vec(&val).map_err(|e| format!("json serialize error: {e}"))?;
+            sonic_rs::to_vec(&val).map_err(|e| format!("json serialize error: {e}"))?;
         return Ok(ResponseData {
             body: Bytes::from(json_bytes),
             content_type: "application/json".to_string(),
@@ -100,7 +100,7 @@ pub(crate) fn extract_response_data(
     if obj.cast::<PyList>().is_ok() {
         let val = py_to_json_value(&obj).map_err(|e| format!("json error: {e}"))?;
         let json_bytes =
-            serde_json::to_vec(&val).map_err(|e| format!("json serialize error: {e}"))?;
+            sonic_rs::to_vec(&val).map_err(|e| format!("json serialize error: {e}"))?;
         return Ok(ResponseData {
             body: Bytes::from(json_bytes),
             content_type: "application/json".to_string(),
