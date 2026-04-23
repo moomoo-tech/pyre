@@ -447,7 +447,10 @@ impl PyronovaApp {
             .unwrap_or(4);
         // workers = Python sub-interpreter count (default: num_cpus)
         let workers = workers.unwrap_or(num_cpus);
-        // io_workers = Tokio async thread count + accept loop count (default: num_cpus)
+        // io_workers = Tokio async thread count + accept loop count.
+        // Default logic splits by mode (set further below once we know
+        // whether TPC is active) — explicit override always wins.
+        let io_workers_explicit = io_workers.is_some();
         let io_workers = io_workers.unwrap_or(num_cpus);
 
         // Freeze route table: extract from RwLock into read-only Arc.
@@ -496,6 +499,21 @@ impl PyronovaApp {
         };
 
         let tpc_enabled = tpc.unwrap_or(false) || self.tpc || crate::tpc::env_enabled();
+
+        // TPC defaults to PHYSICAL core count, not logical. On SMT
+        // systems, pinning 2 TPC threads to sibling hyperthreads
+        // thrashes shared L1i/L1d and kills per-thread throughput
+        // (measured -50% on 7840HS baseline). Work-stealing on
+        // non-TPC can exploit SMT because one sibling does IO while
+        // the other does Python bytecode — different cache footprints.
+        // TPC runs the SAME codepath on every thread, so SMT siblings
+        // step on each other. Explicit override via workers= or
+        // PYRONOVA_IO_WORKERS env var still honored.
+        let io_workers = if tpc_enabled && !io_workers_explicit {
+            crate::tpc::physical_core_count()
+        } else {
+            io_workers
+        };
 
         if mode == "subinterp" || mode == "auto" {
             if tpc_enabled {

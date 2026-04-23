@@ -460,6 +460,41 @@ async fn drive_inline_conn(
 /// Env-var gate for Phase 1. The Python-side `app.run(tpc=True)` kwarg
 /// goes through a different path in `PyronovaApp` and does not consult
 /// this function.
+/// Count physical CPU cores (not logical hyperthreads). Parses
+/// /sys/devices/system/cpu/cpu*/topology/thread_siblings_list — the
+/// number of unique sibling groups equals the physical core count.
+/// Falls back to logical core count if topology is unavailable.
+pub(crate) fn physical_core_count() -> usize {
+    use std::collections::HashSet;
+    use std::fs;
+
+    let Ok(entries) = fs::read_dir("/sys/devices/system/cpu") else {
+        return std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
+    };
+
+    let mut sibling_groups: HashSet<String> = HashSet::new();
+    for e in entries.flatten() {
+        let name = e.file_name();
+        let name = name.to_string_lossy();
+        if !name.starts_with("cpu") || !name[3..].chars().all(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        let path = e.path().join("topology/thread_siblings_list");
+        if let Ok(s) = fs::read_to_string(&path) {
+            sibling_groups.insert(s.trim().to_string());
+        }
+    }
+    if sibling_groups.is_empty() {
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+    } else {
+        sibling_groups.len()
+    }
+}
+
 pub(crate) fn env_enabled() -> bool {
     matches!(
         std::env::var("PYRONOVA_TPC").ok().as_deref(),
