@@ -859,12 +859,12 @@ pub(crate) struct SubInterpreterWorker {
     /// a request-count cadence (see `gc_threshold` + `gc_counter`),
     /// pushing all cycle-collection work off the hot path and into
     /// deterministic slots between requests.
-    gc_collect_func: *mut ffi::PyObject,
+    pub(crate) gc_collect_func: *mut ffi::PyObject,
     /// Trigger interval in requests. 0 disables scheduled collection
     /// entirely (use when you've verified your handler graph creates no
     /// cycles — ref-counting handles everything else instantly).
     /// Default 5000, overridable via `PYRONOVA_GC_THRESHOLD=N`.
-    gc_threshold: u64,
+    pub(crate) gc_threshold: u64,
     /// Request counter for the GC scheduler. Incremented at the end of
     /// each `call_handler`; every `gc_threshold` ticks we invoke
     /// `gc.collect()`. Per-worker = per-thread, so no atomics needed.

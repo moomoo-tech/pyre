@@ -342,6 +342,77 @@ pub(crate) fn run_tpc_subinterp(
     Ok(())
 }
 
+/// GC scheduling mode. Read once at startup from `PYRONOVA_GC_MODE`:
+///   - `"count"` (default) — the count-based trigger inside
+///     `SubInterpreterWorker::call_handler` fires `gc.collect()` every
+///     `PYRONOVA_GC_THRESHOLD` requests per worker. Simple, predictable,
+///     can collide with bursty traffic.
+///   - `"idle"` — the TPC accept loop fires `gc.collect()` on a
+///     100ms-cadence timer, but ONLY when the accept queue drained to
+///     empty since the previous tick. Traffic-density-adaptive. A
+///     hard failsafe at `PYRONOVA_GC_OOM_FAILSAFE` requests (default
+///     50_000) forces a collect even under sustained load so sustained
+///     bursts can't starve the collector into OOM. The per-call_handler
+///     count trigger is disabled while in this mode.
+///   - `"off"` — no framework-level triggers at all. `gc.disable()`
+///     still runs at sub-interp init; users must call `gc.collect()`
+///     themselves or accept ref-count-only cleanup.
+#[derive(Clone, Copy, Debug)]
+enum GcMode {
+    Count,
+    Idle,
+    Off,
+}
+
+fn gc_mode_from_env() -> GcMode {
+    match std::env::var("PYRONOVA_GC_MODE").ok().as_deref() {
+        Some("idle") => GcMode::Idle,
+        Some("off") => GcMode::Off,
+        _ => GcMode::Count,
+    }
+}
+
+fn oom_failsafe_from_env() -> u64 {
+    std::env::var("PYRONOVA_GC_OOM_FAILSAFE")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(50_000)
+}
+
+fn idle_tick_ms_from_env() -> u64 {
+    std::env::var("PYRONOVA_GC_IDLE_MS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(100)
+}
+
+/// Fire a single `gc.collect()` on the worker's sub-interpreter.
+/// Acquires + releases the sub-interp GIL for the duration of the call.
+/// Cheap no-op when `gc_collect_func` is null (e.g. `gc` module failed
+/// to import at sub-interp init — unreachable in practice).
+fn fire_gc(worker: &std::rc::Rc<std::cell::RefCell<SubInterpreterWorker>>) {
+    use pyo3::ffi;
+    let mut w = worker.borrow_mut();
+    if w.gc_collect_func.is_null() {
+        return;
+    }
+    let tstate_cell = std::cell::Cell::new(w.tstate);
+    unsafe {
+        let _guard = crate::interp::SubInterpGilGuard::acquire(tstate_cell.get(), &tstate_cell);
+        let args = ffi::PyTuple_New(0);
+        if !args.is_null() {
+            let res = ffi::PyObject_Call(w.gc_collect_func, args, std::ptr::null_mut());
+            ffi::Py_DECREF(args);
+            if !res.is_null() {
+                ffi::Py_DECREF(res);
+            } else {
+                ffi::PyErr_Clear();
+            }
+        }
+    }
+    w.tstate = tstate_cell.get();
+}
+
 async fn tpc_accept_loop_inline(
     addr: SocketAddr,
     worker: std::rc::Rc<std::cell::RefCell<SubInterpreterWorker>>,
@@ -364,26 +435,98 @@ async fn tpc_accept_loop_inline(
         }
     };
 
-    let tracker = TaskTracker::new();
-    loop {
-        tokio::select! {
-            biased;
-            _ = shutdown.cancelled() => break,
-            res = listener.accept() => {
-                match res {
-                    Ok((stream, remote_addr)) => {
-                        let _ = stream.set_nodelay(true);
-                        setup_tcp_quickack(&stream);
+    let gc_mode = gc_mode_from_env();
+    // In idle mode, disable the count-based trigger inside call_handler —
+    // we drive GC from the accept loop instead. Each TPC thread owns its
+    // worker exclusively so the borrow_mut is free of contention.
+    if matches!(gc_mode, GcMode::Idle | GcMode::Off) {
+        worker.borrow_mut().gc_threshold = 0;
+    }
+    let oom_failsafe = oom_failsafe_from_env();
+    let idle_ms = idle_tick_ms_from_env();
 
-                        let worker = std::rc::Rc::clone(&worker);
-                        let routes = Arc::clone(&routes);
-                        let conn_token = shutdown.clone();
-                        let tls_acc_c = tls_acceptor.clone();
-                        tracker.spawn_local(async move {
-                            drive_inline_conn(stream, remote_addr, worker, routes, conn_token, tls_acc_c).await;
-                        });
+    let tracker = TaskTracker::new();
+    match gc_mode {
+        GcMode::Idle => {
+            // Hybrid idle trigger: collect either on every idle tick
+            // (when the accept queue drained since last tick) or on a
+            // hard failsafe to prevent OOM during sustained bursts.
+            //
+            // `requests_since_last_gc` is written from the accept path
+            // (one TPC thread — no atomics needed; the borrow is single-
+            // threaded on this current_thread runtime).
+            let mut requests_since_last_gc: u64 = 0;
+            let mut gc_timer =
+                tokio::time::interval(std::time::Duration::from_millis(idle_ms));
+            // First tick fires immediately — skip it so we don't collect
+            // an empty heap before any requests have run.
+            gc_timer.tick().await;
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = shutdown.cancelled() => break,
+                    res = listener.accept() => {
+                        match res {
+                            Ok((stream, remote_addr)) => {
+                                let _ = stream.set_nodelay(true);
+                                setup_tcp_quickack(&stream);
+                                requests_since_last_gc += 1;
+
+                                let worker_clone = std::rc::Rc::clone(&worker);
+                                let routes = Arc::clone(&routes);
+                                let conn_token = shutdown.clone();
+                                let tls_acc_c = tls_acceptor.clone();
+                                tracker.spawn_local(async move {
+                                    drive_inline_conn(stream, remote_addr, worker_clone, routes, conn_token, tls_acc_c).await;
+                                });
+
+                                // Failsafe: sustained burst — accept
+                                // queue never drains, so the idle tick
+                                // never gets its chance. Force a
+                                // collect here to keep RSS bounded.
+                                if requests_since_last_gc >= oom_failsafe {
+                                    fire_gc(&worker);
+                                    requests_since_last_gc = 0;
+                                    gc_timer.reset();
+                                }
+                            }
+                            Err(e) => handle_accept_error(&e).await,
+                        }
                     }
-                    Err(e) => handle_accept_error(&e).await,
+                    _ = gc_timer.tick(), if requests_since_last_gc > 0 => {
+                        // Idle tick: the select! raced the tick against
+                        // accept() and the tick won — the accept queue
+                        // was quiet for at least the tick period. Fire
+                        // the collect without interrupting any user-
+                        // visible request.
+                        fire_gc(&worker);
+                        requests_since_last_gc = 0;
+                    }
+                }
+            }
+        }
+        GcMode::Count | GcMode::Off => {
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = shutdown.cancelled() => break,
+                    res = listener.accept() => {
+                        match res {
+                            Ok((stream, remote_addr)) => {
+                                let _ = stream.set_nodelay(true);
+                                setup_tcp_quickack(&stream);
+
+                                let worker_clone = std::rc::Rc::clone(&worker);
+                                let routes = Arc::clone(&routes);
+                                let conn_token = shutdown.clone();
+                                let tls_acc_c = tls_acceptor.clone();
+                                tracker.spawn_local(async move {
+                                    drive_inline_conn(stream, remote_addr, worker_clone, routes, conn_token, tls_acc_c).await;
+                                });
+                            }
+                            Err(e) => handle_accept_error(&e).await,
+                        }
+                    }
                 }
             }
         }
