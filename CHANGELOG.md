@@ -1,5 +1,85 @@
 # Changelog
 
+## v2.3.0 (2026-04-23) — Multi-worker GIL bridge + observability knobs
+
+Mechanical improvements on top of the v2.2 sub-interpreter foundation:
+the main-interpreter bridge goes multi-threaded, access logging gains
+a sampling knob for production deployments, and a new `@cached_json`
+decorator lands for the "public read endpoint" pattern.
+
+### TPC main-interpreter bridge: single thread → N workers
+
+`gil=True` routes under TPC (numpy, pandas, pydantic-core, anything
+that can't run in a sub-interpreter) used to funnel through a single
+`std::thread` driven by `Receiver::blocking_recv`. That's correct for
+pure-CPU handlers — CPython's GIL caps parallelism at 1 — but
+catastrophic for I/O-bound handlers. `time.sleep`, `pool.fetch_one`,
+`open(...).read()`, and anything else that *releases* the GIL still
+blocks the **thread**, so the released GIL goes unused while new work
+piles up until 503.
+
+v2.3 replaces the single thread with a pool backed by a crossbeam MPMC
+queue. Each released GIL is immediately picked up by a peer worker.
+CPU-bound handlers serialize as before; I/O-bound handlers see real
+concurrency bounded only by worker count.
+
+- Default: 4 workers, capacity 16 × workers
+- Knobs: `PYRONOVA_GIL_BRIDGE_WORKERS`, `PYRONOVA_GIL_BRIDGE_CAPACITY`
+
+Measured on a 5 ms `time.sleep` handler at c=64: single-thread ~200
+req/s with 99.96% 503s, 4-thread ~777 req/s with 0 drops.
+
+### Access-log sampling
+
+`enable_logging()` takes two new optional args:
+
+    app.enable_logging(sample=100, always_log_status=400)
+
+- `sample=N` — log 1-in-N requests (default `1`, log every).
+- `always_log_status` — always log when status >= this (e.g. `400`
+  keeps 4xx/5xx full visibility, samples 2xx).
+
+Avoids the 25-30% throughput tax of full-traffic logging at 400k+ req/s.
+
+### `@cached_json(ttl=...)` decorator
+
+    from pyronova import Pyronova, cached_json
+
+    @app.get("/health")
+    @cached_json(ttl=1.0)
+    def health(req):
+        return {"status": "ok"}
+
+Per-worker response cache: first call within the TTL runs the handler
+and stashes JSON bytes; hits short-circuit handler + `json.dumps`.
+100-row JSON (~40 KB) on 7840HS: 68k → **336k req/s** (5.0× throughput,
+9× lower p50).
+
+### Startup banner
+
+TPC mode's startup line prints the route-count breakdown again
+(`Routes: 5 sub-interp + 6 GIL + 0 async`), plus `(N stream)` suffix
+when stream routes are registered.
+
+### Internal
+
+- `serde_json` → `sonic-rs` on response hot path (within noise now,
+  kept for future SIMD payload work).
+- `body_stream_rx` only materialized when dispatching to main_bridge —
+  TPC inline hot path no longer pays an Arc::clone per request.
+- Arena-submission `/crud/items/{id}` emits `X-Cache: MISS|HIT` header
+  (HttpArena validator requirement).
+
+### Bugfixes / CI
+
+- `test_passive_gil_metrics::test_total_requests_counter` now green —
+  the metrics flag re-reads env on every `app.run()` instead of
+  latching once per process.
+- `clippy::collapsible_match` (Rust 1.95) silenced on WebSocket read
+  loop — guard-based rewrite duplicates arms, hurts readability.
+- `cargo fmt` + `clippy --all-targets -- -D warnings` green on 1.94
+  and 1.95.
+
 ## v2.0.0 (2026-04-21) — Rename to Pyronova
 
 Project rename — `pyreframework` → `pyronova`, brand `Pyre` → `Pyronova`.

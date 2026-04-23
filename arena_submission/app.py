@@ -320,6 +320,11 @@ def _row_to_full_item(row):
 
 @app.get("/crud/items/{id}", gil=True)
 def crud_get_one(req: "Request"):
+    # Arena validator requires an `X-Cache: MISS|HIT` response header on
+    # this endpoint so the cache-aside test can observe that a second
+    # GET for the same id hits the in-process cache without re-querying
+    # Postgres. Header is computed once per code path and wrapped in a
+    # Response() because a bare dict return would skip custom headers.
     if PG_POOL is None:
         return _NOT_FOUND
     try:
@@ -329,7 +334,11 @@ def crud_get_one(req: "Request"):
     now = _time.monotonic()
     entry = _CRUD_CACHE.get(item_id)
     if entry is not None and entry[1] > now:
-        return entry[0]
+        return Response(
+            body=json.dumps(entry[0]),
+            content_type="application/json",
+            headers={"x-cache": "HIT"},
+        )
     try:
         row = PG_POOL.fetch_one(_CRUD_GET_SQL, item_id)
     except RuntimeError:
@@ -339,7 +348,11 @@ def crud_get_one(req: "Request"):
         return _NOT_FOUND
     item = _row_to_full_item(row)
     _CRUD_CACHE[item_id] = (item, now + _CRUD_TTL_S)
-    return item
+    return Response(
+        body=json.dumps(item),
+        content_type="application/json",
+        headers={"x-cache": "MISS"},
+    )
 
 
 @app.get("/crud/items", gil=True)
