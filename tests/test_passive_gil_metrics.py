@@ -11,6 +11,8 @@ Covers:
 - Total requests counter works
 """
 
+import os
+
 import pytest
 from pyronova import Pyronova, get_gil_metrics
 from pyronova.testing import TestClient
@@ -18,6 +20,11 @@ from pyronova.testing import TestClient
 
 @pytest.fixture(scope="module")
 def client():
+    # TOTAL_REQUESTS counter is gated by PYRONOVA_METRICS=1 (default off
+    # to keep the cross-core atomic out of the 5M req/s hot path). Tests
+    # that read metrics[8] need it on; flip before TestClient spawns the
+    # server thread so the Rust-side init_metrics_flag() picks it up.
+    os.environ["PYRONOVA_METRICS"] = "1"
     app = Pyronova()
 
     @app.get("/")

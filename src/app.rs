@@ -339,13 +339,17 @@ impl PyronovaApp {
         tls_key: Option<&str>,
         tpc: Option<bool>,
     ) -> PyResult<()> {
-        // Start RSS sampler (once, opt-in via PYRONOVA_METRICS=1).
-        // GIL contention is now measured passively on the request path —
-        // no active watchdog thread needed (zero observer-effect overhead).
+        // Refresh the metrics kill-switch from the current env every
+        // run() — process-level state, but tests / hot-reload may flip
+        // PYRONOVA_METRICS between runs and we want each new server to
+        // honor the latest value.
+        crate::monitor::init_metrics_flag();
+        // RSS sampler is a real OS thread; spawning it twice would
+        // leak. Once-protect the spawn (and the log line) but leave
+        // the flag refresh above unguarded.
         use std::sync::Once;
-        static METRICS_INIT: Once = Once::new();
-        METRICS_INIT.call_once(|| {
-            crate::monitor::init_metrics_flag();
+        static RSS_SAMPLER_INIT: Once = Once::new();
+        RSS_SAMPLER_INIT.call_once(|| {
             if std::env::var("PYRONOVA_METRICS").unwrap_or_default() == "1" {
                 crate::monitor::spawn_rss_sampler();
                 tracing::info!(target: "pyronova::server", "Metrics enabled (PYRONOVA_METRICS=1): passive GIL monitor + RSS sampler");
