@@ -28,6 +28,18 @@ pub(crate) use tpc::handle_request_tpc_inline;
 
 /// Bounded body collection. Returns Err with a ready-made error response
 /// on oversize/stream errors.
+///
+/// `#[inline]` on this and the other hot-path helpers (`apply_cors`,
+/// `full_body`, `build_fast_response`, `build_stream_response`,
+/// `max_body_size`): when these lived as private `fn` in the old
+/// monolithic handlers.rs, same-module call sites auto-inlined them.
+/// After the split into `handlers/{tpc,gil,subinterp}.rs` they became
+/// `pub(crate) fn` — visible across submodules — and the compiler
+/// became conservative about inlining them even under fat LTO,
+/// emitting separate callable symbols. Explicit `#[inline]` restores
+/// the pre-split behavior. Measured 2% regression on bench_inmem
+/// Python w=6 without these hints.
+#[inline]
 pub(crate) async fn collect_body_bounded(
     body: Incoming,
 ) -> Result<Vec<u8>, Response<BoxBody>> {
@@ -57,6 +69,7 @@ pub(crate) fn set_max_body_size(size: usize) {
     MAX_BODY_SIZE.store(size, std::sync::atomic::Ordering::Relaxed);
 }
 
+#[inline]
 pub(crate) fn max_body_size() -> usize {
     MAX_BODY_SIZE.load(std::sync::atomic::Ordering::Relaxed)
 }
@@ -182,6 +195,7 @@ pub(crate) type BoxBody = http_body_util::combinators::BoxBody<Bytes, hyper::Err
 /// Per W3C CORS spec, Access-Control-Allow-Credentials and
 /// Access-Control-Expose-Headers must be present on actual responses
 /// (GET/POST/etc.), not only OPTIONS preflight.
+#[inline]
 pub(crate) fn apply_cors(resp: &mut Response<BoxBody>, cors: Option<&crate::router::CorsConfig>) {
     let Some(cfg) = cors else { return };
     let headers = resp.headers_mut();
@@ -205,6 +219,7 @@ pub(crate) fn apply_cors(resp: &mut Response<BoxBody>, cors: Option<&crate::rout
     }
 }
 
+#[inline]
 pub(crate) fn full_body(resp: Response<Full<Bytes>>) -> Response<BoxBody> {
     resp.map(|b| b.map_err(|_| unreachable!()).boxed())
 }
@@ -212,6 +227,7 @@ pub(crate) fn full_body(resp: Response<Full<Bytes>>) -> Response<BoxBody> {
 /// Build a hyper response from a `FastResponse` — used for the fast-path
 /// route table (`app.add_fast_response`). No Python touched; just copies
 /// the pre-built Bytes + headers into a Response<Full<Bytes>>.
+#[inline]
 pub(crate) fn build_fast_response(
     fr: &crate::router::FastResponse,
     cors: Option<&crate::router::CorsConfig>,
@@ -475,6 +491,7 @@ pub(crate) fn call_handler_with_hooks(
 }
 
 /// Build a streaming SSE response from a channel receiver.
+#[inline]
 pub(crate) fn build_stream_response(info: StreamInfo) -> Response<BoxBody> {
     use tokio_stream::StreamExt;
 
