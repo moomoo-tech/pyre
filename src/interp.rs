@@ -1160,11 +1160,6 @@ def _attach_pyronova_request_helpers(t):\n    from urllib.parse import parse_qs\
         } else {
             py_str(path).ok_or("failed to create py_path")?
         };
-        let py_params = if skip("params") {
-            none_ref()
-        } else {
-            py_str_dict_from_vec(params).ok_or("failed to create py_params")?
-        };
         let py_query = if skip("query") {
             none_ref()
         } else {
@@ -1174,11 +1169,6 @@ def _attach_pyronova_request_helpers(t):\n    from urllib.parse import parse_qs\
             none_ref()
         } else {
             py_bytes(body).ok_or("failed to create py_body")?
-        };
-        let py_headers = if skip("headers") {
-            none_ref()
-        } else {
-            py_str_dict(headers).ok_or("failed to create py_headers")?
         };
         let py_client_ip = if skip("client_ip") {
             none_ref()
@@ -1190,18 +1180,40 @@ def _attach_pyronova_request_helpers(t):\n    from urllib.parse import parse_qs\
             return Err("_Request type not registered".to_string());
         }
 
+        // Lazy maps: move raw Rust data into a Box. The getset getters
+        // on `_Request` will build the actual PyDict on first access
+        // to `.params` / `.headers` — handlers that never touch those
+        // slots (common on plaintext benchmarks) pay zero Python
+        // allocation for them.
+        //
+        // The skip_* bisection flags for params/headers are honored by
+        // supplying empty placeholders; the getters still return a
+        // (now empty) dict, preserving the old observation surface.
+        let skip_params = skip("params");
+        let skip_headers = skip("headers");
+        let maps = Box::new(crate::pyronova_request_type::LazyMaps {
+            params: if skip_params {
+                Vec::new()
+            } else {
+                params.to_vec()
+            },
+            headers: if skip_headers {
+                HashMap::new()
+            } else {
+                headers.clone()
+            },
+        });
+
         // Transfer ownership of each new ref into the instance.
-        // `alloc_and_init` DECREFs them on failure — so we must NOT
-        // rely on PyObjRef::Drop after `into_raw()`.
-        crate::pyronova_request_type::alloc_and_init(
+        // `alloc_and_init_lazy` DECREFs them + drops `maps` on failure.
+        crate::pyronova_request_type::alloc_and_init_lazy(
             self.sky_request_cls,
             py_method.into_raw(),
             py_path.into_raw(),
-            py_params.into_raw(),
             py_query.into_raw(),
             py_body.into_raw(),
-            py_headers.into_raw(),
             py_client_ip.into_raw(),
+            maps,
         )
     }
 

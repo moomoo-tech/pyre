@@ -21,8 +21,27 @@
 //! dealloc count stayed at 0 despite tp_dealloc being wired correctly.
 //! Helper methods (`.text()`, `.json()`, `.body`, `.query_params`) are
 //! instead monkey-patched onto the heap type at sub-interp init.
+//!
+//! ## Lazy dict slots (params, headers)
+//!
+//! The two map-typed slots — `params` and `headers` — are built lazily.
+//! The per-request hot path was paying for a `PyDict_New` plus
+//! `PyUnicode_FromStringAndSize` times (2 × number_of_headers) on every
+//! request, even when the handler never touched `req.headers`. For a
+//! typical 3-header request that's 7+ PyObject allocations at 400k+ rps
+//! = several million needless PyObject allocs per second.
+//!
+//! The raw Rust data (`Vec<(String,String)>` for params,
+//! `HashMap<String,String>` for headers) is stored in a heap-allocated
+//! `LazyMaps` struct pinned to the `_Request` instance. The getter
+//! (`PyGetSetDef`) checks the cache slot first; if null, builds the
+//! dict from the raw data, stores in cache, returns. Second access is
+//! a bare pointer read + `Py_INCREF`. The 5 simple slots (method, path,
+//! query, body_bytes, client_ip) stay eager — their single
+//! `PyUnicode_FromStringAndSize` / `PyBytes_FromStringAndSize` is cheap.
 
 use pyo3::ffi;
+use std::collections::HashMap;
 use std::ffi::{c_char, c_int, c_void};
 
 #[cfg(feature = "leak_detect")]
@@ -31,10 +50,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 // ---------------------------------------------------------------------------
 // Diagnostics (leak_detect feature only)
 // ---------------------------------------------------------------------------
-//
-// These counters were the probes that isolated the dealloc path during
-// the v1.4.5 leak hunt. Kept behind the feature so they remain available
-// for future regressions without any cost in the shipped binary.
 
 #[cfg(feature = "leak_detect")]
 pub(crate) static DEALLOC_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -90,93 +105,96 @@ pub fn slot_rc_report() -> String {
     s
 }
 
+// ---------------------------------------------------------------------------
+// Lazy dict storage
+// ---------------------------------------------------------------------------
+
+/// Owned Rust-side storage for the two lazy-built dict slots. Heap
+/// allocated once per request (Box<LazyMaps>) and freed in
+/// `pyronova_request_dealloc`. Lifetime is tied to the _Request instance.
+pub(crate) struct LazyMaps {
+    pub params: Vec<(String, String)>,
+    pub headers: HashMap<String, String>,
+}
+
+// ---------------------------------------------------------------------------
+// RequestInner
+// ---------------------------------------------------------------------------
+
 /// C-layout storage backing a `_Request` instance.
 ///
-/// All seven slot pointers carry a strong reference. They are set
-/// non-null by `alloc_and_init` and Py_XDECREF'd by `pyronova_request_dealloc`.
+/// Eager slots (method, path, query, body_bytes, client_ip) carry owned
+/// `*mut PyObject` strong refs, set by `alloc_and_init{,_lazy}` and
+/// `Py_XDECREF`'d by `pyronova_request_dealloc`.
+///
+/// Lazy slots (params_cache, headers_cache) start null on
+/// `alloc_and_init_lazy` and fill on first getter call. `lazy_maps`
+/// owns the Rust-side raw data; dropped in the dealloc.
 #[repr(C)]
 pub(crate) struct RequestInner {
     pub ob_base: ffi::PyObject,
     pub method: *mut ffi::PyObject,
     pub path: *mut ffi::PyObject,
-    pub params: *mut ffi::PyObject,
     pub query: *mut ffi::PyObject,
     pub body_bytes: *mut ffi::PyObject,
-    pub headers: *mut ffi::PyObject,
     pub client_ip: *mut ffi::PyObject,
+    pub params_cache: *mut ffi::PyObject,
+    pub headers_cache: *mut ffi::PyObject,
+    /// Non-null when built via `alloc_and_init_lazy`. Dropped via
+    /// `Box::from_raw` in dealloc. Null when built via `tp_init`
+    /// (Python-side _Request(...)) — in that case caches are
+    /// pre-populated eagerly.
+    pub lazy_maps: *mut LazyMaps,
 }
 
 // --- tp_dealloc ---------------------------------------------------------
-
-// --- tp_dealloc ---------------------------------------------------------
 //
-// NOTE: We deliberately do NOT set `Py_TPFLAGS_HAVE_GC` on this type,
-// even though CPython issue gh-116946 (vstinner) recommends it for
-// heap types that hold owned PyObject refs. We measured +GC → leak
-// went from 63 B/req to 313 B/req in OWN_GIL sub-interp mode. Even
-// the empty-slots shell case (all=None) went from 0 to 48 B/req,
-// indicating PyGC_Head bookkeeping itself is costly-or-leaky under
-// PEP 684. gh-116946's concern is interp-teardown cycle collection;
-// our workload has no cycles and doesn't rely on teardown cleanup
-// (each request's tp_dealloc is synchronous). So we opt out of GC
-// tracking entirely and rely on explicit Py_XDECREF + PyDict_Clear.
+// NOTE: We deliberately do NOT set `Py_TPFLAGS_HAVE_GC` on this type.
+// See commit history / original docstring for the GC vs leak rationale
+// — tl;dr: enabling GC tracking reintroduced a per-request leak under
+// PEP 684 OWN_GIL sub-interps. Safe to opt out because our objects
+// don't form cycles.
 
 unsafe extern "C" fn pyronova_request_dealloc(obj: *mut ffi::PyObject) {
     #[cfg(feature = "leak_detect")]
     DEALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
 
     let inner = obj as *mut RequestInner;
-    // Take the type BEFORE tp_free — tp_free may invalidate Py_TYPE(obj).
     let tp = ffi::Py_TYPE(obj);
 
     #[cfg(feature = "leak_detect")]
     {
         record_slot_rc(0, (*inner).method);
         record_slot_rc(1, (*inner).path);
-        record_slot_rc(2, (*inner).params);
+        record_slot_rc(2, (*inner).params_cache);
         record_slot_rc(3, (*inner).query);
         record_slot_rc(4, (*inner).body_bytes);
-        record_slot_rc(5, (*inner).headers);
+        record_slot_rc(5, (*inner).headers_cache);
         record_slot_rc(6, (*inner).client_ip);
     }
 
-    // Historical note: a `PyDict_Clear` pass over params+headers used
-    // to live here as a workaround for an apparent sub-interp dict
-    // leak. After the tstate-rebind root-cause fix (commit fc45a7f),
-    // the underlying leak was in cross-thread tstate reuse, not in
-    // PyDict — the -54 B/req "savings" attributed to the workaround
-    // was run-to-run measurement noise. Removing restores ~1-2%
-    // throughput. `dict_dealloc` triggered by Py_XDECREF below handles
-    // key/value DECREF correctly on its own under the fixed tstate.
-
     ffi::Py_XDECREF((*inner).method);
     ffi::Py_XDECREF((*inner).path);
-    ffi::Py_XDECREF((*inner).params);
     ffi::Py_XDECREF((*inner).query);
     ffi::Py_XDECREF((*inner).body_bytes);
-    ffi::Py_XDECREF((*inner).headers);
     ffi::Py_XDECREF((*inner).client_ip);
+    ffi::Py_XDECREF((*inner).params_cache);
+    ffi::Py_XDECREF((*inner).headers_cache);
+
+    if !(*inner).lazy_maps.is_null() {
+        // Reclaim the Box — its Drop frees the String/HashMap data.
+        let _ = Box::from_raw((*inner).lazy_maps);
+    }
 
     if let Some(free) = (*tp).tp_free {
         free(obj as *mut c_void);
     } else {
         ffi::PyObject_Free(obj as *mut c_void);
     }
-    // Heap types hold a ref to their type object. Release it AFTER
-    // tp_free (CPython convention — tp_free may still need the type).
     ffi::Py_DECREF(tp as *mut ffi::PyObject);
 }
 
-// --- tp_init ------------------------------------------------------------
-//
-// Accepts the same 7 positional args the old Python `_Request.__init__`
-// did: (method, path, params, query, body_bytes, headers, client_ip).
-// Needed so Python code that constructs `_Request(...)` directly
-// (e.g. the async engine bridge in `_async_engine.py`) keeps working.
-// The fast path in Rust `build_request` skips this entirely — it fills
-// the struct via `alloc_and_init` with zero Python-side argument
-// marshalling — so this init path only pays the cost when user / async
-// code explicitly instantiates from Python.
+// --- tp_init (Python-side constructor compat) ---------------------------
 
 unsafe extern "C" fn pyronova_request_init(
     self_: *mut ffi::PyObject,
@@ -191,8 +209,6 @@ unsafe extern "C" fn pyronova_request_init(
     let mut body_bytes: *mut ffi::PyObject = std::ptr::null_mut();
     let mut headers: *mut ffi::PyObject = std::ptr::null_mut();
     let mut client_ip: *mut ffi::PyObject = std::ptr::null_mut();
-    // "OOOOOOO" — seven borrowed refs. PyArg_ParseTuple does NOT INCREF
-    // the targets, so we must bump refcounts ourselves before storing.
     let fmt = c"OOOOOOO";
     if ffi::PyArg_ParseTuple(
         args,
@@ -208,15 +224,7 @@ unsafe extern "C" fn pyronova_request_init(
     {
         return -1;
     }
-    // CPython allows __init__ to be called a second time. To handle the
-    // pathological `req.__init__(req.method, ...)` case safely we must
-    // INCREF-new BEFORE DECREF-old (Py_SETREF idiom). The naive "DECREF
-    // old, INCREF new, store" order can drop the only live reference
-    // to `method` and leave us holding a dangling pointer. In normal
-    // call conventions the args tuple pins the new values through this
-    // function, so the bad ordering wouldn't actually UAF in practice —
-    // but the idiom is what CPython's own C code uses for a reason;
-    // cheap to get right, silent to get wrong.
+    // Py_SETREF-style: INCREF new refs before DECREFing old.
     ffi::Py_INCREF(method);
     ffi::Py_INCREF(path);
     ffi::Py_INCREF(params);
@@ -227,48 +235,202 @@ unsafe extern "C" fn pyronova_request_init(
 
     let old_method = (*inner).method;
     let old_path = (*inner).path;
-    let old_params = (*inner).params;
+    let old_params_cache = (*inner).params_cache;
     let old_query = (*inner).query;
     let old_body = (*inner).body_bytes;
-    let old_headers = (*inner).headers;
+    let old_headers_cache = (*inner).headers_cache;
     let old_client_ip = (*inner).client_ip;
 
     (*inner).method = method;
     (*inner).path = path;
-    (*inner).params = params;
+    (*inner).params_cache = params;
     (*inner).query = query;
     (*inner).body_bytes = body_bytes;
-    (*inner).headers = headers;
+    (*inner).headers_cache = headers;
     (*inner).client_ip = client_ip;
+
+    // Python-side init drops any previously-attached lazy_maps — the
+    // caller is providing the values directly, no raw-data fallback.
+    if !(*inner).lazy_maps.is_null() {
+        let _ = Box::from_raw((*inner).lazy_maps);
+        (*inner).lazy_maps = std::ptr::null_mut();
+    }
 
     ffi::Py_XDECREF(old_method);
     ffi::Py_XDECREF(old_path);
-    ffi::Py_XDECREF(old_params);
+    ffi::Py_XDECREF(old_params_cache);
     ffi::Py_XDECREF(old_query);
     ffi::Py_XDECREF(old_body);
-    ffi::Py_XDECREF(old_headers);
+    ffi::Py_XDECREF(old_headers_cache);
     ffi::Py_XDECREF(old_client_ip);
     0
 }
 
-// --- PyMemberDef table --------------------------------------------------
+// --- Lazy getters -------------------------------------------------------
 //
-// Descriptors exposed read-only (flags = READONLY = 1) so user handlers
-// can read req.method etc. but cannot replace them — also keeps the GC
-// story simple (no SetAttr path to worry about).
+// `params` returns a list of (key, value) tuples matching the existing
+// interface used by handlers. `headers` returns a dict.
+//
+// Returning a dict on second+ access returns the SAME PyDict pointer
+// each time — user code that mutates `req.headers` sees those mutations
+// persist across calls within the same request (intended). A fresh
+// request always gets a fresh dict (raw_headers is cloned per request
+// on the Rust side; the cache lives one request only).
+
+unsafe fn build_str_dict_from_hashmap(m: &HashMap<String, String>) -> *mut ffi::PyObject {
+    let dict = ffi::PyDict_New();
+    if dict.is_null() {
+        return std::ptr::null_mut();
+    }
+    for (k, v) in m {
+        let kobj = ffi::PyUnicode_FromStringAndSize(
+            k.as_ptr() as *const c_char,
+            k.len() as ffi::Py_ssize_t,
+        );
+        if kobj.is_null() {
+            ffi::Py_DECREF(dict);
+            return std::ptr::null_mut();
+        }
+        let vobj = ffi::PyUnicode_FromStringAndSize(
+            v.as_ptr() as *const c_char,
+            v.len() as ffi::Py_ssize_t,
+        );
+        if vobj.is_null() {
+            ffi::Py_DECREF(kobj);
+            ffi::Py_DECREF(dict);
+            return std::ptr::null_mut();
+        }
+        // PyDict_SetItem INCREFs both — we DECREF our owned refs.
+        ffi::PyDict_SetItem(dict, kobj, vobj);
+        ffi::Py_DECREF(kobj);
+        ffi::Py_DECREF(vobj);
+    }
+    dict
+}
+
+unsafe fn build_str_dict_from_pairs(pairs: &[(String, String)]) -> *mut ffi::PyObject {
+    let dict = ffi::PyDict_New();
+    if dict.is_null() {
+        return std::ptr::null_mut();
+    }
+    for (k, v) in pairs {
+        let kobj = ffi::PyUnicode_FromStringAndSize(
+            k.as_ptr() as *const c_char,
+            k.len() as ffi::Py_ssize_t,
+        );
+        if kobj.is_null() {
+            ffi::Py_DECREF(dict);
+            return std::ptr::null_mut();
+        }
+        let vobj = ffi::PyUnicode_FromStringAndSize(
+            v.as_ptr() as *const c_char,
+            v.len() as ffi::Py_ssize_t,
+        );
+        if vobj.is_null() {
+            ffi::Py_DECREF(kobj);
+            ffi::Py_DECREF(dict);
+            return std::ptr::null_mut();
+        }
+        ffi::PyDict_SetItem(dict, kobj, vobj);
+        ffi::Py_DECREF(kobj);
+        ffi::Py_DECREF(vobj);
+    }
+    dict
+}
+
+unsafe extern "C" fn get_params(
+    obj: *mut ffi::PyObject,
+    _closure: *mut c_void,
+) -> *mut ffi::PyObject {
+    let inner = obj as *mut RequestInner;
+    if !(*inner).params_cache.is_null() {
+        let p = (*inner).params_cache;
+        ffi::Py_INCREF(p);
+        return p;
+    }
+    let built = if !(*inner).lazy_maps.is_null() {
+        build_str_dict_from_pairs(&(*(*inner).lazy_maps).params)
+    } else {
+        ffi::PyDict_New()
+    };
+    if built.is_null() {
+        return std::ptr::null_mut();
+    }
+    // Cache owns 1 ref, return value gets +1.
+    (*inner).params_cache = built;
+    ffi::Py_INCREF(built);
+    built
+}
+
+unsafe extern "C" fn get_headers(
+    obj: *mut ffi::PyObject,
+    _closure: *mut c_void,
+) -> *mut ffi::PyObject {
+    let inner = obj as *mut RequestInner;
+    if !(*inner).headers_cache.is_null() {
+        let p = (*inner).headers_cache;
+        ffi::Py_INCREF(p);
+        return p;
+    }
+    let built = if !(*inner).lazy_maps.is_null() {
+        build_str_dict_from_hashmap(&(*(*inner).lazy_maps).headers)
+    } else {
+        ffi::PyDict_New()
+    };
+    if built.is_null() {
+        return std::ptr::null_mut();
+    }
+    (*inner).headers_cache = built;
+    ffi::Py_INCREF(built);
+    built
+}
+
+// Setters: allow `req.headers = ...` / `req.params = ...` — swaps the
+// cache slot. Rarely used but keeps the attribute writable for tests
+// / monkey-patching parity with the old PyMemberDef path (which was
+// READONLY — tightening now would break handlers that assign).
+unsafe extern "C" fn set_params(
+    obj: *mut ffi::PyObject,
+    value: *mut ffi::PyObject,
+    _closure: *mut c_void,
+) -> c_int {
+    let inner = obj as *mut RequestInner;
+    if !value.is_null() {
+        ffi::Py_INCREF(value);
+    }
+    let old = (*inner).params_cache;
+    (*inner).params_cache = value;
+    ffi::Py_XDECREF(old);
+    0
+}
+
+unsafe extern "C" fn set_headers(
+    obj: *mut ffi::PyObject,
+    value: *mut ffi::PyObject,
+    _closure: *mut c_void,
+) -> c_int {
+    let inner = obj as *mut RequestInner;
+    if !value.is_null() {
+        ffi::Py_INCREF(value);
+    }
+    let old = (*inner).headers_cache;
+    (*inner).headers_cache = value;
+    ffi::Py_XDECREF(old);
+    0
+}
+
+// --- PyMemberDef table (eager slots only) -------------------------------
 
 const READONLY: c_int = 1; // Py_READONLY
 const TYPE_OBJECT_EX: c_int = ffi::Py_T_OBJECT_EX;
 
 static MEMBER_NAME_METHOD: &[u8] = b"method\0";
 static MEMBER_NAME_PATH: &[u8] = b"path\0";
-static MEMBER_NAME_PARAMS: &[u8] = b"params\0";
 static MEMBER_NAME_QUERY: &[u8] = b"query\0";
 static MEMBER_NAME_BODY_BYTES: &[u8] = b"body_bytes\0";
-static MEMBER_NAME_HEADERS: &[u8] = b"headers\0";
 static MEMBER_NAME_CLIENT_IP: &[u8] = b"client_ip\0";
 
-fn members_table() -> [ffi::PyMemberDef; 8] {
+fn members_table() -> [ffi::PyMemberDef; 6] {
     use std::mem::offset_of;
     [
         ffi::PyMemberDef {
@@ -282,13 +444,6 @@ fn members_table() -> [ffi::PyMemberDef; 8] {
             name: MEMBER_NAME_PATH.as_ptr() as *const c_char,
             type_code: TYPE_OBJECT_EX,
             offset: offset_of!(RequestInner, path) as ffi::Py_ssize_t,
-            flags: READONLY,
-            doc: std::ptr::null(),
-        },
-        ffi::PyMemberDef {
-            name: MEMBER_NAME_PARAMS.as_ptr() as *const c_char,
-            type_code: TYPE_OBJECT_EX,
-            offset: offset_of!(RequestInner, params) as ffi::Py_ssize_t,
             flags: READONLY,
             doc: std::ptr::null(),
         },
@@ -307,20 +462,12 @@ fn members_table() -> [ffi::PyMemberDef; 8] {
             doc: std::ptr::null(),
         },
         ffi::PyMemberDef {
-            name: MEMBER_NAME_HEADERS.as_ptr() as *const c_char,
-            type_code: TYPE_OBJECT_EX,
-            offset: offset_of!(RequestInner, headers) as ffi::Py_ssize_t,
-            flags: READONLY,
-            doc: std::ptr::null(),
-        },
-        ffi::PyMemberDef {
             name: MEMBER_NAME_CLIENT_IP.as_ptr() as *const c_char,
             type_code: TYPE_OBJECT_EX,
             offset: offset_of!(RequestInner, client_ip) as ffi::Py_ssize_t,
             flags: READONLY,
             doc: std::ptr::null(),
         },
-        // Null-terminator sentinel.
         ffi::PyMemberDef {
             name: std::ptr::null(),
             type_code: 0,
@@ -331,25 +478,44 @@ fn members_table() -> [ffi::PyMemberDef; 8] {
     ]
 }
 
+// --- PyGetSetDef table (lazy slots) -------------------------------------
+
+static GETSET_NAME_PARAMS: &[u8] = b"params\0";
+static GETSET_NAME_HEADERS: &[u8] = b"headers\0";
+
+fn getset_table() -> [ffi::PyGetSetDef; 3] {
+    [
+        ffi::PyGetSetDef {
+            name: GETSET_NAME_PARAMS.as_ptr() as *const c_char,
+            get: Some(get_params),
+            set: Some(set_params),
+            doc: std::ptr::null(),
+            closure: std::ptr::null_mut(),
+        },
+        ffi::PyGetSetDef {
+            name: GETSET_NAME_HEADERS.as_ptr() as *const c_char,
+            get: Some(get_headers),
+            set: Some(set_headers),
+            doc: std::ptr::null(),
+            closure: std::ptr::null_mut(),
+        },
+        ffi::PyGetSetDef {
+            name: std::ptr::null(),
+            get: None,
+            set: None,
+            doc: std::ptr::null(),
+            closure: std::ptr::null_mut(),
+        },
+    ]
+}
+
 // --- Type registration --------------------------------------------------
 
 static TYPE_NAME: &[u8] = b"pyronova._Request\0";
 
-/// Build the `_Request` type for the current sub-interpreter.
-///
-/// Returns a new owned reference to the type object. Caller is expected
-/// to install it in the sub-interp's globals under the name
-/// `_Request` (the Python bootstrap script uses this name).
-///
-/// # Safety
-/// Must be called with the current sub-interpreter's GIL held.
 pub(crate) unsafe fn register_type() -> Result<*mut ffi::PyObject, String> {
-    // Members and slots must live at least as long as the type object.
-    // PyType_FromSpec copies the slot array but NOT the Py_tp_members
-    // table — the pointer in the slot is retained. So the members array
-    // must outlive every instance of the type. We leak a Box per
-    // sub-interp (there's a bounded number of them) to guarantee that.
     let members = Box::leak(Box::new(members_table()));
+    let getset = Box::leak(Box::new(getset_table()));
 
     let slots = Box::leak(Box::new([
         ffi::PyType_Slot {
@@ -365,6 +531,10 @@ pub(crate) unsafe fn register_type() -> Result<*mut ffi::PyObject, String> {
             pfunc: members.as_mut_ptr() as *mut c_void,
         },
         ffi::PyType_Slot {
+            slot: ffi::Py_tp_getset,
+            pfunc: getset.as_mut_ptr() as *mut c_void,
+        },
+        ffi::PyType_Slot {
             slot: 0,
             pfunc: std::ptr::null_mut(),
         },
@@ -374,8 +544,6 @@ pub(crate) unsafe fn register_type() -> Result<*mut ffi::PyObject, String> {
         name: TYPE_NAME.as_ptr() as *const c_char,
         basicsize: std::mem::size_of::<RequestInner>() as c_int,
         itemsize: 0,
-        // Intentionally NO Py_TPFLAGS_BASETYPE — see module docstring.
-        // Intentionally NO Py_TPFLAGS_HAVE_GC — see tp_dealloc comment.
         flags: ffi::Py_TPFLAGS_DEFAULT as u32,
         slots: slots.as_mut_ptr(),
     }));
@@ -387,20 +555,15 @@ pub(crate) unsafe fn register_type() -> Result<*mut ffi::PyObject, String> {
     Ok(ty)
 }
 
-/// Allocate a fresh `_Request` instance with the given slot values.
+// --- Allocation: eager path (tp_init-compatible) ------------------------
+
+/// Legacy eager constructor. Each `*mut PyObject` is a new owned ref
+/// transferred into the instance. On failure they are DECREF'd.
 ///
-/// Each `*mut PyObject` argument is a **new owned reference** whose
-/// ownership is transferred into the slot. The caller must NOT DECREF
-/// them after this call — the instance's `tp_dealloc` will.
-///
-/// On failure the arguments are DECREF'd (responsibility transfer was
-/// atomic: either the slot owns them, or we dispose of them).
-///
-/// # Safety
-/// * `type_obj` must be the type returned by `register_type` for the
-///   CURRENT sub-interpreter.
-/// * The current sub-interpreter's GIL must be held.
-#[allow(clippy::too_many_arguments)]
+/// Still used when the caller has already built PyObjects (e.g. the
+/// Python-side `_Request(...)` constructor via tp_init). For the
+/// Rust fast path — see `alloc_and_init_lazy` below.
+#[allow(clippy::too_many_arguments, dead_code)]
 pub(crate) unsafe fn alloc_and_init(
     type_obj: *mut ffi::PyObject,
     method: *mut ffi::PyObject,
@@ -416,7 +579,6 @@ pub(crate) unsafe fn alloc_and_init(
 
     let obj = ffi::PyType_GenericAlloc(type_obj as *mut ffi::PyTypeObject, 0);
     if obj.is_null() {
-        // Alloc failed — dispose of transferred refs and report.
         ffi::Py_XDECREF(method);
         ffi::Py_XDECREF(path);
         ffi::Py_XDECREF(params);
@@ -427,14 +589,63 @@ pub(crate) unsafe fn alloc_and_init(
         return Err("PyType_GenericAlloc(_Request) failed".to_string());
     }
     let inner = obj as *mut RequestInner;
-    // PyType_GenericAlloc zero-initializes the basicsize region, so
-    // the seven pointers are already NULL. Overwrite with owned refs.
+    // PyType_GenericAlloc zero-initializes basicsize. Overwrite eager
+    // slots and pre-populate caches (raw data path skipped — caller
+    // already built PyObjects).
     (*inner).method = method;
     (*inner).path = path;
-    (*inner).params = params;
     (*inner).query = query;
     (*inner).body_bytes = body_bytes;
-    (*inner).headers = headers;
     (*inner).client_ip = client_ip;
+    (*inner).params_cache = params;
+    (*inner).headers_cache = headers;
+    (*inner).lazy_maps = std::ptr::null_mut();
+    Ok(obj)
+}
+
+// --- Allocation: lazy fast path -----------------------------------------
+
+/// Fast allocator for the Rust→Python handler bridge. Eager slots take
+/// already-built PyObjects (cheap to build — single UTF-8 string / bytes
+/// each). The two expensive dict slots stay null and are built on first
+/// getter access.
+///
+/// `maps` ownership transfers into the instance; its Box is reclaimed
+/// in `pyronova_request_dealloc`.
+///
+/// On alloc failure, the eager PyObjects are DECREF'd and `maps` is
+/// dropped.
+#[allow(clippy::too_many_arguments)]
+pub(crate) unsafe fn alloc_and_init_lazy(
+    type_obj: *mut ffi::PyObject,
+    method: *mut ffi::PyObject,
+    path: *mut ffi::PyObject,
+    query: *mut ffi::PyObject,
+    body_bytes: *mut ffi::PyObject,
+    client_ip: *mut ffi::PyObject,
+    maps: Box<LazyMaps>,
+) -> Result<*mut ffi::PyObject, String> {
+    #[cfg(feature = "leak_detect")]
+    ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
+
+    let obj = ffi::PyType_GenericAlloc(type_obj as *mut ffi::PyTypeObject, 0);
+    if obj.is_null() {
+        ffi::Py_XDECREF(method);
+        ffi::Py_XDECREF(path);
+        ffi::Py_XDECREF(query);
+        ffi::Py_XDECREF(body_bytes);
+        ffi::Py_XDECREF(client_ip);
+        drop(maps);
+        return Err("PyType_GenericAlloc(_Request) failed".to_string());
+    }
+    let inner = obj as *mut RequestInner;
+    (*inner).method = method;
+    (*inner).path = path;
+    (*inner).query = query;
+    (*inner).body_bytes = body_bytes;
+    (*inner).client_ip = client_ip;
+    (*inner).params_cache = std::ptr::null_mut();
+    (*inner).headers_cache = std::ptr::null_mut();
+    (*inner).lazy_maps = Box::into_raw(maps);
     Ok(obj)
 }
