@@ -77,7 +77,7 @@ fn log_startup(mode: &str, addr: &SocketAddr, n_threads: usize, n_cpus: usize) {
         %addr,
         tpc_threads = n_threads,
         cpus = n_cpus,
-        "Pyronova TPC started"
+        "Pyronova started"
     );
     println!(
         "\n  Pyronova v{} [TPC mode, {mode}]",

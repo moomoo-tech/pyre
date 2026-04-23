@@ -37,9 +37,20 @@ use std::sync::OnceLock;
 use bytes::Bytes;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::handlers::{call_handler_with_hooks, HandlerResult};
+use crate::handlers::{call_handler_with_hooks, HandlerResult, StreamInfo};
 use crate::router::FrozenRoutes;
 use crate::types::{LazyHeaders, PyronovaRequest, ResponseData};
+
+/// Bridge reply can be either a buffered response or a streaming one.
+/// Stream handlers (SSE, chunked upload replies, long-poll) need to
+/// hand an mpsc::Receiver back to the TPC thread so the hyper body
+/// writer can drive it. The oneshot channel is Send + one-shot, and
+/// tokio's mpsc::Receiver is Send, so transferring StreamInfo
+/// across the main-interp → TPC thread boundary is safe.
+pub(crate) enum BridgeResponse {
+    Resp(ResponseData),
+    Stream(StreamInfo),
+}
 
 /// Work request for the main-interp bridge. Carries everything a GIL
 /// handler needs plus the oneshot reply channel.
@@ -52,7 +63,7 @@ pub(crate) struct GilWorkItem {
     pub headers: HashMap<String, String>,
     pub client_ip: IpAddr,
     pub handler_idx: usize,
-    pub response_tx: oneshot::Sender<Result<ResponseData, String>>,
+    pub response_tx: oneshot::Sender<Result<BridgeResponse, String>>,
 }
 
 /// Handle returned to callers. Cheap to Arc-share across all TPC
@@ -159,12 +170,9 @@ fn dispatch_one(routes: &FrozenRoutes, item: GilWorkItem) {
 
     let result = call_handler_with_hooks(routes.clone(), handler_idx, sky_req);
     let resp = match result {
-        HandlerResult::PyronovaResponse(r) => r,
-        HandlerResult::PyronovaStream(_) => Err(
-            "stream=True is not supported on the main-interp bridge path; \
-             register the route without gil=True or use non-TPC mode"
-                .to_string(),
-        ),
+        HandlerResult::PyronovaResponse(Ok(rd)) => Ok(BridgeResponse::Resp(rd)),
+        HandlerResult::PyronovaResponse(Err(e)) => Err(e),
+        HandlerResult::PyronovaStream(info) => Ok(BridgeResponse::Stream(info)),
     };
     let _ = response_tx.send(resp);
 }

@@ -19,11 +19,18 @@ import pytest
 
 
 def start_server(script_path, port):
+    # This test validates the old pool's 30s zombie-handler watchdog —
+    # TPC's inline execution model has no way to interrupt a running
+    # Python handler from another thread. Explicitly opt out of TPC
+    # via env so we exercise the pool path.
+    env = dict(os.environ)
+    env["PYRONOVA_TPC"] = "0"
     proc = subprocess.Popen(
         [sys.executable, script_path],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         preexec_fn=os.setsid,
+        env=env,
     )
     for _ in range(50):
         time.sleep(0.1)

@@ -23,11 +23,16 @@ import pytest
 
 
 def start_server(script_path, port):
+    # Old pool 28s async-handler watchdog — no TPC equivalent, see
+    # test_subinterp_timeout for the same rationale.
+    env = dict(os.environ)
+    env["PYRONOVA_TPC"] = "0"
     proc = subprocess.Popen(
         [sys.executable, script_path],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         preexec_fn=os.setsid,
+        env=env,
     )
     for _ in range(50):
         time.sleep(0.1)

@@ -81,19 +81,11 @@ pub(crate) async fn handle_request_tpc_inline(
         .to_string();
     let body_obj = req.into_body();
 
-    // Router lookup.
-    let lookup = routes
-        .routers
-        .get(method.as_ref())
-        .and_then(|r| r.at(&path).ok())
-        .map(|m| {
-            let params: Vec<(String, String)> = m
-                .params
-                .iter()
-                .map(|(k, v)| (k.to_string(), v.to_string()))
-                .collect();
-            (*m.value, params)
-        });
+    // Router lookup. Use RouteTable::lookup to get percent-decoding
+    // of path params for free — raw matchit param iteration would
+    // leave `john%20doe` undecoded. (This was the bug in v2.3.0's
+    // first TPC draft; test_path_params_are_url_decoded caught it.)
+    let lookup = routes.lookup(&method, &path);
 
     // Static files — only on GET/HEAD miss.
     if lookup.is_none() && (method.as_ref() == "GET" || method.as_ref() == "HEAD") {
@@ -192,15 +184,20 @@ pub(crate) async fn handle_request_tpc_inline(
                 return Ok(r);
             }
         };
-        // Apply compression to the response body (same contract as
-        // sub-interp path). build_response takes the Result directly.
+        // Bridge can return either a buffered response or a stream.
+        // Buffered path: compress, build response, wrap. Stream path:
+        // hand the mpsc receiver to hyper via build_stream_response,
+        // which returns a Response<BoxBody> backed by StreamBody.
         let mut http_resp = match result {
-            Ok(mut resp_data) => {
+            Ok(crate::main_bridge::BridgeResponse::Resp(mut resp_data)) => {
                 crate::compression::maybe_compress(&mut resp_data, &accept_encoding);
                 match build_response(Ok(resp_data)) {
                     Ok(r) => full_body(r),
                     Err(_) => full_body(error_response("response build failed")),
                 }
+            }
+            Ok(crate::main_bridge::BridgeResponse::Stream(info)) => {
+                build_stream_response(info)
             }
             Err(e) => full_body(error_response(&e)),
         };

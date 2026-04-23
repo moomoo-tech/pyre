@@ -509,12 +509,16 @@ impl PyronovaApp {
         // test. Kernel SO_REUSEPORT + per-core current_thread runtime
         // + physical-core pinning + zero cross-thread handler dispatch
         // is a strict win for the common "sync handler" shape.
-        // gil=True is TPC-compatible as of Phase 3 (routed through the
-        // main-interp bridge). async def and stream=True still require
-        // the old pool path.
-        let has_async = frozen.is_async.iter().any(|&a| a);
-        let has_stream = frozen.is_stream.iter().any(|&s| s);
-        let tpc_incompatible = has_async || has_stream;
+        // After Phase 3+4+5 TPC covers:
+        //   gil=True     → main-interp bridge
+        //   async def    → sub-interp asyncio loop (inline, blocking)
+        //   stream=True  → main-interp bridge with stream response
+        //                  (already requires gil=True per route registration)
+        //
+        // Nothing known to be TPC-incompatible as of v2.3 — we leave
+        // the escape hatch `PYRONOVA_TPC=0` alive as a safety valve
+        // for unforeseen bugs or niche C-extension loading issues.
+        let tpc_incompatible = false;
         let tpc_forced_off = matches!(
             std::env::var("PYRONOVA_TPC").ok().as_deref(),
             Some("0") | Some("off") | Some("no") | Some("false")
@@ -1089,20 +1093,27 @@ impl PyronovaApp {
         routes: FrozenRoutes,
         tls_acceptor: Option<Arc<tokio_rustls::TlsAcceptor>>,
     ) -> PyResult<()> {
-        // gil=True routes are now supported via the main-interp bridge
-        // (Phase 3). async def and stream=True still need their own
-        // Phase-4 work (pyo3-async-runtimes LocalSet integration and
-        // per-thread streaming body plumbing, respectively).
+        // gil=True routes: main-interp bridge (Phase 3).
+        // async def: sub-interp path already drives coroutines via the
+        //   persistent asyncio loop (SubInterpreterWorker::resolve_coroutine
+        //   fires when call_handler returns an awaitable — line 1768 in
+        //   interp.rs). Each sub-interp already has its own asyncio event
+        //   loop cached at init. No extra work needed for correctness.
+        //   Note: this is "blocking async" — the TPC thread is blocked
+        //   for the coroutine's entire execution. Awaits inside the
+        //   coroutine still run via asyncio's event loop on that same
+        //   thread, so `await asyncio.sleep()` or `await client.get()`
+        //   work correctly; they just don't yield to OTHER requests on
+        //   the same TPC thread. Since SO_REUSEPORT distributes new
+        //   connections across threads, this is fine for throughput —
+        //   a slow async handler only blocks its one thread.
+        // stream=True: already gated by gil=True in route registration,
+        //   so all stream routes flow through the main-interp bridge.
+        //   Phase 5 wires stream responses back through the bridge
+        //   oneshot (BridgeResponse enum).
         let gil_count = routes.requires_gil.iter().filter(|&&g| g).count();
-        let async_count = routes.is_async.iter().filter(|&&a| a).count();
-        let stream_count = routes.is_stream.iter().filter(|&&s| s).count();
-        if async_count > 0 || stream_count > 0 {
-            return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
-                "TPC does not yet support `async def` or `stream=True` routes. \
-                 Offenders: {async_count} async def, {stream_count} stream=True. \
-                 Drop `tpc=True` / `PYRONOVA_TPC` to fall back to the multi-thread path."
-            )));
-        }
+        let _async_count = routes.is_async.iter().filter(|&&a| a).count();
+        let _stream_count = routes.is_stream.iter().filter(|&&s| s).count();
 
         let script_path = if let Some(ref p) = self.script_path {
             p.clone()
