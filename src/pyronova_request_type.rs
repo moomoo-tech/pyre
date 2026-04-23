@@ -394,6 +394,123 @@ unsafe extern "C" fn get_headers(
     built
 }
 
+// ---------------------------------------------------------------------------
+// Buffer protocol — zero-copy body access via `memoryview(req)`
+// ---------------------------------------------------------------------------
+//
+// Users of big-body workloads (AI agent 10 MB JSON, file upload, arena
+// upload profile) care about avoiding the PyBytes_FromStringAndSize
+// memcpy. The buffer protocol lets Python get a direct view into our
+// Rust-owned `LazyMaps.body: Vec<u8>` without copying a byte:
+//
+//     view = memoryview(req)          # zero-copy view of body
+//     arr  = np.frombuffer(view, dtype=np.uint8)  # numpy view, no copy
+//     text = bytes(view)              # if user wants a copy, one call
+//
+// Safety story: `PyMemoryView_FromObject(req)` INCREFs `req` and stores
+// it as the memoryview's backing object. As long as the memoryview is
+// alive, `req` is alive → `lazy_maps` is alive → `Vec<u8>` is alive →
+// the raw pointer we handed out is valid. Our tp_dealloc only fires
+// after the memoryview releases its ref. No UAF.
+//
+// We support flat readonly 1D views only. Callers requesting writable
+// get -1 (PyExc_BufferError). Callers on the tp_init-built request
+// (where `lazy_maps` is null, e.g. the async_engine bridge) also get
+// -1 — they should read `req.body_bytes` instead.
+
+static BUFFER_FORMAT_UBYTE: &[u8] = b"B\0";
+
+unsafe extern "C" fn request_getbuffer(
+    obj: *mut ffi::PyObject,
+    view: *mut ffi::Py_buffer,
+    flags: c_int,
+) -> c_int {
+    if view.is_null() {
+        ffi::PyErr_SetString(
+            ffi::PyExc_BufferError,
+            c"NULL view in request_getbuffer".as_ptr(),
+        );
+        return -1;
+    }
+    // Refuse writable requests — body is readonly once request is built.
+    // PyBUF_WRITABLE bit is 0x0001 relative to PyBUF_SIMPLE; checked via
+    // the `PyBUF_WRITABLE` mask.
+    if (flags & ffi::PyBUF_WRITABLE) == ffi::PyBUF_WRITABLE {
+        ffi::PyErr_SetString(
+            ffi::PyExc_BufferError,
+            c"pyronova _Request buffer is readonly".as_ptr(),
+        );
+        (*view).obj = std::ptr::null_mut();
+        return -1;
+    }
+
+    let inner = obj as *mut RequestInner;
+    if (*inner).lazy_maps.is_null() {
+        // tp_init-constructed request has no Rust-owned body buffer.
+        // Users on that path should access `req.body_bytes` directly.
+        ffi::PyErr_SetString(
+            ffi::PyExc_BufferError,
+            c"_Request has no buffer (Python-constructed — use body_bytes instead)".as_ptr(),
+        );
+        (*view).obj = std::ptr::null_mut();
+        return -1;
+    }
+
+    let body = &(*(*inner).lazy_maps).body;
+    let len = body.len() as ffi::Py_ssize_t;
+
+    // Fill view. `shape` and `strides` point INTO the Py_buffer itself
+    // (the `len` and `itemsize` fields act as the single-element arrays
+    // for a 1D contiguous buffer). CPython's PyBuffer_Release will NOT
+    // free those — it assumes they're either heap-owned by the filler
+    // or self-contained in the view. Pointing at struct fields is the
+    // CPython convention for "stored by-value in the Py_buffer itself."
+    (*view).buf = body.as_ptr() as *mut std::ffi::c_void;
+    (*view).len = len;
+    (*view).itemsize = 1;
+    (*view).readonly = 1;
+    (*view).ndim = 1;
+    // Format: only report it if caller asked for PyBUF_FORMAT.
+    (*view).format = if (flags & ffi::PyBUF_FORMAT) == ffi::PyBUF_FORMAT {
+        BUFFER_FORMAT_UBYTE.as_ptr() as *mut c_char
+    } else {
+        std::ptr::null_mut()
+    };
+    // Shape / strides: required when caller asks for PyBUF_ND or
+    // PyBUF_STRIDES. For a 1D contiguous bytes buffer we point at the
+    // `len` / `itemsize` fields in the Py_buffer itself.
+    if (flags & ffi::PyBUF_ND) == ffi::PyBUF_ND {
+        (*view).shape = &mut (*view).len;
+    } else {
+        (*view).shape = std::ptr::null_mut();
+    }
+    if (flags & ffi::PyBUF_STRIDES) == ffi::PyBUF_STRIDES {
+        (*view).strides = &mut (*view).itemsize;
+    } else {
+        (*view).strides = std::ptr::null_mut();
+    }
+    (*view).suboffsets = std::ptr::null_mut();
+    (*view).internal = std::ptr::null_mut();
+
+    // INCREF self — the view now owns a strong ref to keep `req` alive
+    // for the duration of the view. CPython's PyBuffer_Release will
+    // DECREF this automatically when the memoryview is dropped.
+    ffi::Py_INCREF(obj);
+    (*view).obj = obj;
+    0
+}
+
+unsafe extern "C" fn request_releasebuffer(
+    _obj: *mut ffi::PyObject,
+    _view: *mut ffi::Py_buffer,
+) {
+    // No-op: we didn't allocate anything in getbuffer that needs
+    // freeing. PyBuffer_Release handles DECREF(view.obj) itself — we
+    // just have to not do it again. The Vec's backing storage is
+    // owned by `lazy_maps`, freed in tp_dealloc of `req` — which can
+    // only fire once all memoryviews of it have been released.
+}
+
 unsafe extern "C" fn get_body_bytes(
     obj: *mut ffi::PyObject,
     _closure: *mut c_void,
@@ -547,6 +664,15 @@ pub(crate) unsafe fn register_type() -> Result<*mut ffi::PyObject, String> {
         ffi::PyType_Slot {
             slot: ffi::Py_tp_getset,
             pfunc: getset.as_mut_ptr() as *mut c_void,
+        },
+        // Buffer protocol — `memoryview(req)` zero-copy into Rust body.
+        ffi::PyType_Slot {
+            slot: ffi::Py_bf_getbuffer,
+            pfunc: request_getbuffer as *mut c_void,
+        },
+        ffi::PyType_Slot {
+            slot: ffi::Py_bf_releasebuffer,
+            pfunc: request_releasebuffer as *mut c_void,
         },
         ffi::PyType_Slot {
             slot: 0,
