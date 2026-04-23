@@ -178,7 +178,7 @@ def login(req, creds: UserLogin):
     return set_cookie(resp, "session_token", token, httponly=True, max_age=86400)
 
 
-@app.get("/auth/me", gil=True)
+@app.get("/auth/me")
 def me(req):
     auth = require_auth(req)
     if isinstance(auth, Response):
@@ -186,7 +186,7 @@ def me(req):
     return auth
 
 
-@app.post("/auth/logout", gil=True)
+@app.post("/auth/logout")
 def logout(req):
     token = get_cookie(req, "session_token")
     if token:
@@ -195,7 +195,7 @@ def logout(req):
     return delete_cookie(resp, "session_token")
 
 
-@app.post("/auth/avatar", gil=True)
+@app.post("/auth/avatar")
 def upload_avatar(req):
     auth = require_auth(req)
     if isinstance(auth, Response):
@@ -226,7 +226,7 @@ def upload_avatar(req):
 # CRUD — Items
 # ---------------------------------------------------------------------------
 
-@app.get("/items", gil=True)
+@app.get("/items")
 def list_items(req):
     items_json = app.state.get("items_db")
     items = json.loads(items_json) if items_json else []
@@ -270,7 +270,7 @@ def create_item(req, item: ItemCreate):
     )
 
 
-@app.get("/items/{item_id}", gil=True)
+@app.get("/items/{item_id}")
 def get_item(req):
     item_id = int(req.params["item_id"])
     items = json.loads(app.state.get("items_db") or "[]")
@@ -304,7 +304,7 @@ def update_item(req, updates: ItemUpdate):
                        content_type="application/json")
 
 
-@app.delete("/items/{item_id}", gil=True)
+@app.delete("/items/{item_id}")
 def delete_item(req):
     auth = require_auth(req)
     if isinstance(auth, Response):
