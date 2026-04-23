@@ -39,6 +39,43 @@ use pyo3::types::{PyList, PyString, PyTuple};
 
 use crate::db::{bind_params_raw, column_to_py, extract_param, pool_ref, row_to_dict, runtime};
 
+/// Run a `Send + 'static` future on the dedicated DB runtime and
+/// synchronously wait for the result on the calling thread.
+///
+/// Motivation: sub-interpreter workers under TPC run on a tokio
+/// `current_thread` runtime (one per TPC thread). Calling
+/// `rt.block_on(...)` from inside another tokio runtime context
+/// panics with "Cannot start a runtime from within a runtime", which
+/// is the whole reason DB-backed sub-interp routes used to be pinned
+/// to `gil=True` (main-interp bridge, which is on a plain std::thread).
+///
+/// `rt.spawn(...)` has no such check — it just queues a task onto the
+/// target runtime's worker pool. Pairing spawn with a sync mpsc
+/// channel gives us "block the caller while the DB future runs on
+/// the DB runtime", with no nested-runtime hazard.
+///
+/// The caller is responsible for releasing the GIL (via `py.detach`)
+/// around this call so peer sub-interpreters can make progress while
+/// we wait.
+fn run_on_db_rt<F, T>(fut: F) -> T
+where
+    F: std::future::Future<Output = T> + Send + 'static,
+    T: Send + 'static,
+{
+    let rt = runtime();
+    let (tx, rx) = std::sync::mpsc::sync_channel::<T>(1);
+    rt.spawn(async move {
+        // Channel recv can only fail if the sender is dropped without
+        // sending, which happens only if this spawned task panics. Use
+        // `let _ = ...` so a panic here doesn't double-panic the
+        // runtime — the caller's `rx.recv()` will see the dropped
+        // sender and return Err.
+        let _ = tx.send(fut.await);
+    });
+    rx.recv()
+        .expect("pyronova-db runtime task dropped without sending a result")
+}
+
 // ---------------------------------------------------------------------------
 // Shared plumbing
 // ---------------------------------------------------------------------------
@@ -115,12 +152,18 @@ pub(crate) unsafe extern "C" fn pyronova_db_fetch_all_cfunc(
 ) -> *mut ffi::PyObject {
     dispatch(args, |py, sql, params| {
         let pool = pool_ref()?;
-        let rt = runtime();
+        // Clone onto owned storage: the future we spawn onto the DB
+        // runtime must be 'static, so borrowed `sql` / `params` from
+        // the Python argument unpacker can't be captured directly.
+        // One clone per query is a rounding error next to the PG
+        // round-trip.
+        let sql = sql.to_string();
+        let params = params.to_vec();
         let rows = py
             .detach(|| {
-                rt.block_on(async {
-                    let q = sqlx::query(sql);
-                    bind_params_raw(q, params).fetch_all(pool).await
+                run_on_db_rt(async move {
+                    let q = sqlx::query(&sql);
+                    bind_params_raw(q, &params).fetch_all(pool).await
                 })
             })
             .map_err(|e| PyRuntimeError::new_err(format!("db fetch_all: {e}")))?;
@@ -144,12 +187,13 @@ pub(crate) unsafe extern "C" fn pyronova_db_fetch_one_cfunc(
 ) -> *mut ffi::PyObject {
     dispatch(args, |py, sql, params| {
         let pool = pool_ref()?;
-        let rt = runtime();
+        let sql = sql.to_string();
+        let params = params.to_vec();
         let row_opt = py
             .detach(|| {
-                rt.block_on(async {
-                    let q = sqlx::query(sql);
-                    bind_params_raw(q, params).fetch_optional(pool).await
+                run_on_db_rt(async move {
+                    let q = sqlx::query(&sql);
+                    bind_params_raw(q, &params).fetch_optional(pool).await
                 })
             })
             .map_err(|e| PyRuntimeError::new_err(format!("db fetch_one: {e}")))?;
@@ -172,12 +216,13 @@ pub(crate) unsafe extern "C" fn pyronova_db_fetch_scalar_cfunc(
     dispatch(args, |py, sql, params| {
         use sqlx::Row;
         let pool = pool_ref()?;
-        let rt = runtime();
+        let sql = sql.to_string();
+        let params = params.to_vec();
         let row_opt = py
             .detach(|| {
-                rt.block_on(async {
-                    let q = sqlx::query(sql);
-                    bind_params_raw(q, params).fetch_optional(pool).await
+                run_on_db_rt(async move {
+                    let q = sqlx::query(&sql);
+                    bind_params_raw(q, &params).fetch_optional(pool).await
                 })
             })
             .map_err(|e| PyRuntimeError::new_err(format!("db fetch_scalar: {e}")))?;
@@ -202,12 +247,13 @@ pub(crate) unsafe extern "C" fn pyronova_db_execute_cfunc(
 ) -> *mut ffi::PyObject {
     dispatch(args, |py, sql, params| {
         let pool = pool_ref()?;
-        let rt = runtime();
+        let sql = sql.to_string();
+        let params = params.to_vec();
         let result = py
             .detach(|| {
-                rt.block_on(async {
-                    let q = sqlx::query(sql);
-                    bind_params_raw(q, params).execute(pool).await
+                run_on_db_rt(async move {
+                    let q = sqlx::query(&sql);
+                    bind_params_raw(q, &params).execute(pool).await
                 })
             })
             .map_err(|e| PyRuntimeError::new_err(format!("db execute: {e}")))?;

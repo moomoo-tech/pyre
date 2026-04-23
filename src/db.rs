@@ -68,6 +68,7 @@ pub(crate) fn pool_ref() -> PyResult<&'static sqlx::PgPool> {
 /// concrete Rust type sqlx expects. This sidesteps the need for trait-object
 /// parameter binding (which sqlx doesn't directly support) — we build a
 /// `sqlx::query::Query` and call the matching `bind::<T>()` per param.
+#[derive(Clone)]
 pub(crate) enum BoundParam {
     Null,
     Bool(bool),

@@ -193,15 +193,18 @@ PG_SQL = (
 )
 
 
-@app.get("/async-db", gil=True)
+@app.get("/async-db")
 def async_db_endpoint(req: "Request"):
-    # `gil=True` is load-bearing: our Rust PgPool lives in a
-    # OnceLock populated by the MAIN interpreter's import-time
-    # `PgPool.connect(...)`. Sub-interpreters run their own copy of
-    # `app.py` but import the mock pyronova.db stub, so `PG_POOL`
-    # stays None in every worker. Routing through the main interp
-    # gives the handler access to the real pool. Validator fails with
-    # `count=0` if we drop `gil=True`.
+    # Runs on a sub-interpreter worker. `PG_POOL` here is the mock
+    # `_PgPool` proxy installed by `_bootstrap.py` — calls forward to
+    # four C-FFI entry points (`_pyronova_db_fetch_{all,one,scalar}`,
+    # `_pyronova_db_execute`) that Rust injected into each worker's
+    # globals at startup. Those entry points queue the sqlx future
+    # onto the dedicated DB tokio runtime via `rt.spawn + channel`
+    # (see `src/bridge/db_bridge.rs::run_on_db_rt`) and block the
+    # sub-interp thread until the result lands — no nested runtime,
+    # no main-interp GIL bottleneck, parallelism ceiling is
+    # `min(sub_interp_workers, DATABASE_MAX_CONN)`.
     if PG_POOL is None:
         return _EMPTY_DB_RESPONSE
     q = req.query_params

@@ -1,5 +1,52 @@
 # Changelog
 
+## v2.3.1 (2026-04-23) — Sub-interpreter DB bridge unlocked under TPC
+
+### Sub-interpreter DB bridge now works under TPC
+
+`src/bridge/db_bridge.rs` previously panicked the moment a DB-backed
+route without `gil=True` ran under TPC:
+
+    thread 'pyronova-tpc-N' panicked at tokio ... multi_thread/mod.rs:88:
+    Cannot start a runtime from within a runtime.
+
+Cause: the bridge's C-FFI entry points called `rt.block_on(fut)` on
+the dedicated DB runtime, from inside the TPC worker thread's own
+tokio `current_thread` runtime. tokio forbids nested `block_on`.
+
+Fix: `rt.spawn(fut)` + `std::sync::mpsc::sync_channel` + `rx.recv()`.
+`spawn` imposes no runtime-context check — it only queues the task
+onto the DB runtime's worker pool. The sub-interp worker blocks on
+the channel with the GIL released (`py.detach`), so peer
+sub-interpreters keep making progress while the query is in flight.
+Parallelism ceiling becomes `min(sub_interp_workers,
+DATABASE_MAX_CONN)` instead of the main-interp GIL.
+
+`BoundParam` gained `#[derive(Clone)]` so params can be moved into
+the spawned future (which must be `'static`). One clone per query is
+rounding error next to the PG round-trip.
+
+Arena `/async-db` route drops `gil=True` as a result:
+
+    bench (7840HS, wrk -t8, PG sidecar on 5433):
+      main_bridge 16 workers (v2.3.0-rc):   15k req/s @ c=4096
+      sub-interp DB bridge (v2.3.0):        **35k req/s @ c=4096**, 0 drops
+
+crud routes keep `gil=True` because their cache-aside semantics
+require a single interpreter's `_CRUD_CACHE` dict (sub-interp workers
+have independent heaps — the HttpArena validator's "MISS then HIT"
+check would fail if two consecutive requests hashed to different
+sub-interps via SO_REUSEPORT).
+
+### Arena submission tuning
+
+`arena_submission/launcher.py` now exports
+`PYRONOVA_GIL_BRIDGE_WORKERS=16` +
+`PYRONOVA_GIL_BRIDGE_CAPACITY=8192` so the remaining gil=True routes
+(crud) don't 503 under HttpArena's 1024-4096 concurrency profiles.
+`arena_submission/app.py::crud_get_one` emits `X-Cache: MISS|HIT`
+header for the HttpArena cache-aside validator.
+
 ## v2.3.0 (2026-04-23) — Multi-worker GIL bridge + observability knobs
 
 Mechanical improvements on top of the v2.2 sub-interpreter foundation:
