@@ -391,6 +391,16 @@ def hit_counter(req):
 - [ ] Native gRPC (tonic crate)
 - [ ] Connection pooling for upstream services
 - [ ] PyO3 上游 sub-interpreter 支持 (tracking: PyO3#3451)
+- [ ] **Arena allocator (bumpalo) for per-request allocations**
+  - Target: Bytes/header-extract/body-collect buffers on the Rust-only
+    side of the request. Excludes PyronovaRequest itself (pyclass,
+    can't cross Arena lifetime).
+  - Expected gain: 5-10% on workloads where mimalloc cross-thread
+    arena contention shows up (mostly relevant at >1M rps per core).
+    On darwin localhost, TCP stack dominates — Arena改不动那层天花板.
+  - Gating decision: wait for Linux 64-core benchmark data before
+    committing effort. If per-worker loses >5% to allocator
+    metadata contention there, revisit.
 
 ### 长期
 - [ ] HTTP/3 QUIC
