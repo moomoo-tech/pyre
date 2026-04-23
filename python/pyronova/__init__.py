@@ -5,6 +5,7 @@ from pyronova.app import Pyronova
 from pyronova.rpc import RPCClient
 from pyronova.cookies import get_cookies, get_cookie, set_cookie, delete_cookie
 from pyronova.uploads import parse_multipart, UploadFile
+from pyronova.cache import cached_json
 
 
 def redirect(url: str, status_code: int = 302) -> Response:
@@ -26,7 +27,7 @@ def redirect(url: str, status_code: int = 302) -> Response:
         headers={"location": url},
     )
 
-__all__ = ["Pyronova", "PyronovaApp", "Request", "Response", "WebSocket", "SharedState", "Stream", "get_gil_metrics", "init_logger", "emit_python_log"]
+__all__ = ["Pyronova", "PyronovaApp", "Request", "Response", "WebSocket", "SharedState", "Stream", "get_gil_metrics", "init_logger", "emit_python_log", "cached_json"]
 try:
     from importlib.metadata import version as _get_version
     __version__ = _get_version("pyronova")

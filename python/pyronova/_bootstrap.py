@@ -237,11 +237,60 @@ _mock_pyron.Pyronova = _MockPyron
 # App module mock
 _mock_app = types.ModuleType("pyronova.app")
 _mock_app.Pyronova = _MockPyron
+# pyronova.cache imports `from .app import Response`, so the mock
+# `pyronova.app` must expose a Response symbol too.
+_mock_app.Response = _Response
 
 sys.modules["pyronova"] = _mock_pyron
 sys.modules["pyronova.engine"] = _mock_engine
 sys.modules["pyronova.app"] = _mock_app
 sys.modules["pyronova.mcp"] = types.ModuleType("pyronova.mcp")
+
+# -- pyronova.cache — @cached_json decorator (pure Python, sub-interp safe) --
+#
+# Inlined rather than imported: the real `pyronova.cache` module sits
+# under `pyronova/`, which the sub-interp's mock `pyronova` ModuleType
+# doesn't carry a `__path__` for, so importlib can't resolve it. Keep
+# this in sync with python/pyronova/cache.py — the behavior must match.
+
+import functools as _functools
+import json as _json
+import threading as _threading
+import time as _time
+
+def _cached_json(ttl, key=None):
+    if ttl <= 0:
+        raise ValueError("cached_json ttl must be > 0")
+    _key_fn = key if key is not None else (lambda req: req.path)
+    def decorator(handler):
+        _cache = {}
+        _lock = _threading.Lock()
+        @_functools.wraps(handler)
+        def wrapper(req):
+            now = _time.monotonic()
+            k = _key_fn(req)
+            entry = _cache.get(k)
+            if entry is not None and entry[1] > now:
+                return _Response(body=entry[0], content_type="application/json")
+            result = handler(req)
+            if isinstance(result, _Response):
+                return result
+            if isinstance(result, (bytes, bytearray)):
+                body = bytes(result)
+            elif isinstance(result, str):
+                body = result.encode("utf-8")
+            else:
+                body = _json.dumps(result, separators=(",", ":")).encode("utf-8")
+            with _lock:
+                _cache[k] = (body, now + ttl)
+            return _Response(body=body, content_type="application/json")
+        return wrapper
+    return decorator
+
+_mock_pyron.cached_json = _cached_json
+_cache_mod = types.ModuleType("pyronova.cache")
+_cache_mod.cached_json = _cached_json
+sys.modules["pyronova.cache"] = _cache_mod
 
 # -- Cookie utilities (pure Python) -------------------------------------------
 
