@@ -52,7 +52,7 @@ pub(crate) fn run_inmem_bench(
     duration_s: u64,
     mut workers: Vec<SubInterpreterWorker>,
     mut per_worker_routes: Vec<FrozenRoutes>,
-    main_bridge: Option<Arc<crate::main_bridge::MainInterpBridge>>,
+    main_bridge: Option<Arc<crate::bridge::main_bridge::MainInterpBridge>>,
 ) -> Result<(u64, f64), String> {
     if workers.len() != n_threads {
         return Err(format!(
@@ -258,7 +258,7 @@ pub(crate) fn run_loopback_bench(
     duration_s: u64,
     mut workers: Vec<SubInterpreterWorker>,
     routes: FrozenRoutes,
-    main_bridge: Option<Arc<crate::main_bridge::MainInterpBridge>>,
+    main_bridge: Option<Arc<crate::bridge::main_bridge::MainInterpBridge>>,
 ) -> Result<(u64, f64, u16), String> {
     if workers.len() != n_threads {
         return Err(format!(

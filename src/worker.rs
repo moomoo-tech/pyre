@@ -66,7 +66,7 @@ pub(crate) async fn drive_conn<IO>(
     routes: &'static RouteTable,
     routes_for_ws: Option<FrozenRoutes>,
     conn_token: CancellationToken,
-    main_bridge: Option<Arc<crate::main_bridge::MainInterpBridge>>,
+    main_bridge: Option<Arc<crate::bridge::main_bridge::MainInterpBridge>>,
 ) where
     IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -157,7 +157,7 @@ pub(crate) async fn drive_tcp_conn(
     routes_for_ws: FrozenRoutes,
     conn_token: CancellationToken,
     tls_acceptor: Option<Arc<tokio_rustls::TlsAcceptor>>,
-    main_bridge: Option<Arc<crate::main_bridge::MainInterpBridge>>,
+    main_bridge: Option<Arc<crate::bridge::main_bridge::MainInterpBridge>>,
 ) {
     let tls_stream = match tls_acceptor {
         Some(acc) => match crate::tls::wrap_tls(&acc, stream).await {

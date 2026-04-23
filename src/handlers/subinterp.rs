@@ -1,0 +1,354 @@
+//! Sub-interpreter pool handler.
+//!
+//! Non-TPC dispatch: hands work to a shared `InterpreterPool` of
+//! sub-interpreter workers. Each worker runs on its own OS thread
+//! and pulls from a crossbeam MPMC channel. Used when TPC is off
+//! (opt-out) or not applicable.
+//!
+//! Extracted out of the monolithic `src/handlers.rs`. Shared helpers
+//! live in the parent and are imported via `super::`.
+
+use std::sync::Arc;
+
+use bytes::Bytes;
+use http_body_util::{BodyExt, Full};
+use hyper::body::Incoming;
+use hyper::{Request, Response, StatusCode};
+
+use crate::interp;
+use crate::response::{
+    build_response, error_response, gateway_timeout_response, not_found_response,
+    overloaded_response, payload_too_large_response,
+};
+use crate::router::FrozenRoutes;
+use crate::static_fs::try_static_file;
+use crate::types::{extract_headers, PyronovaRequest};
+
+use super::{
+    apply_cors, build_fast_response, build_stream_response, call_handler_with_hooks, full_body,
+    max_body_size, stream_body_feeder, BoxBody, HandlerResult, SharedPool,
+};
+
+pub(crate) async fn handle_request_subinterp(
+    req: Request<Incoming>,
+    pool: SharedPool,
+    routes: FrozenRoutes,
+    client_ip_addr: std::net::IpAddr,
+) -> Result<Response<BoxBody>, hyper::Error> {
+    // gRPC short-circuit — see handle_request above.
+    if crate::grpc::is_grpc_request(&req) {
+        return crate::grpc::handle_grpc(req).await;
+    }
+    crate::monitor::count_request();
+    let start = std::time::Instant::now();
+
+    // Fast-path: zero-alloc lookup (see handle_request).
+    if !routes.fast_responses.is_empty() {
+        if let Some(fr) = routes
+            .fast_responses
+            .get(req.method().as_str())
+            .and_then(|m| m.get(req.uri().path()))
+        {
+            return Ok(full_body(build_fast_response(
+                fr,
+                routes.cors_config.as_ref(),
+            )));
+        }
+    }
+
+    let method: Arc<str> = Arc::from(req.method().as_str());
+    let uri = req.uri().clone();
+    let path: Arc<str> = Arc::from(uri.path());
+    let query = uri.query().unwrap_or("").to_string();
+
+    // Defer header extraction — only convert if needed (sub-interp path).
+    let raw_headers = req.headers().clone();
+    let accept_encoding = raw_headers
+        .get(hyper::header::ACCEPT_ENCODING)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+
+    // Take ownership of the body before routing so we can decide whether
+    // to collect (buffered path) or hand it to a feeder task (streaming
+    // path). Mirrors the restructure done in handle_request().
+    let body_obj = req.into_body();
+
+    let lookup = pool.lookup(&method, &path);
+    let has_fallback = routes.fallback_handler.is_some();
+
+    if lookup.is_none() && (method.as_ref() == "GET" || method.as_ref() == "HEAD") {
+        if let Some(resp) = try_static_file(&path, &pool.static_dirs).await {
+            // Same CORS fix as handle_request — don't short-circuit
+            // past apply_cors on static-file hits.
+            let mut r = full_body(resp);
+            apply_cors(&mut r, pool.cors_config.as_ref());
+            return Ok(r);
+        }
+    }
+
+    let (handler_idx, params) = match lookup {
+        Some(v) => v,
+        None if has_fallback => (usize::MAX, Vec::new()),
+        None => {
+            let mut r = full_body(not_found_response());
+            apply_cors(&mut r, pool.cors_config.as_ref());
+            return Ok(r);
+        }
+    };
+
+    // ── Hybrid dispatch: GIL routes use main interpreter ──
+    let is_gil_route =
+        handler_idx == usize::MAX || pool.requires_gil.get(handler_idx).copied().unwrap_or(false);
+
+    // Admission gate (sub-interp, large-body path only): take a permit
+    // BEFORE a potentially-large body collect so that N concurrent
+    // uploads can't pile N × max_body_size into RAM. The gate is
+    // deliberately SKIPPED for small/no-body requests — HTTP/2
+    // multiplexes hundreds of streams per connection and gcannon's
+    // baseline-h2 profile easily puts 25k+ concurrent small requests
+    // in flight at once. A blanket permit budget sized for "the
+    // queue" (n × 128) would reject 99% of them and destroy h2
+    // throughput; a budget sized for "the worst-case RAM cost of a
+    // body flood" would be too large to protect against it. The
+    // split: small bodies (<= ADMISSION_SKIP_BYTES) pass through,
+    // large bodies (> threshold) require a permit.
+    const ADMISSION_SKIP_BYTES: u64 = 64 * 1024; // 64 KiB
+    let content_length = raw_headers
+        .get(hyper::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(0);
+    let _submit_permit = if !is_gil_route && content_length > ADMISSION_SKIP_BYTES {
+        match pool.submit_semaphore.clone().try_acquire_owned() {
+            Ok(p) => Some(p),
+            Err(_) => {
+                crate::monitor::DROPPED_REQUESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let mut r = full_body(overloaded_response("server overloaded"));
+                apply_cors(&mut r, pool.cors_config.as_ref());
+                return Ok(r);
+            }
+        }
+    } else {
+        None
+    };
+
+    // Streaming is only honored on GIL routes (v1). A sub-interp route
+    // with stream=True falls through to the buffered path — but that's
+    // impossible by construction because add_route rejects non-GIL
+    // streaming at registration time.
+    let is_stream_route = is_gil_route
+        && handler_idx != usize::MAX
+        && routes.is_stream.get(handler_idx).copied().unwrap_or(false);
+
+    // Invariant guard: registering a stream=True route requires gil=True
+    // (`add_route` enforces this). If somehow that constraint is bypassed
+    // — a future refactor, a router hack — we'd spawn the feeder task and
+    // then send the resulting empty `body_bytes` to a sub-interpreter
+    // worker, silently discarding the client's upload. Fail closed with
+    // a 500 instead of the black hole.
+    let is_stream_on_subinterp = handler_idx != usize::MAX
+        && !is_gil_route
+        && routes.is_stream.get(handler_idx).copied().unwrap_or(false);
+    if is_stream_on_subinterp {
+        let mut r = full_body(error_response(
+            "stream=True routes must be registered with gil=True (framework invariant violated)",
+        ));
+        apply_cors(&mut r, pool.cors_config.as_ref());
+        return Ok(r);
+    }
+
+    // Decide body handling: stream-capable GIL routes bypass the collect
+    // (proper streaming), everyone else collects up front.
+    let (body_bytes, body_stream_rx_early) = if is_stream_route {
+        let (tx, rx) = tokio::sync::mpsc::channel::<crate::body_stream::ChunkMsg>(
+            crate::body_stream::CHANNEL_CAPACITY,
+        );
+        let cap = max_body_size();
+        tokio::spawn(stream_body_feeder(body_obj, tx, cap));
+        (
+            Bytes::new(),
+            Some(Arc::new(std::sync::Mutex::new(Some(rx)))),
+        )
+    } else {
+        use http_body_util::Limited;
+        let limited = Limited::new(body_obj, max_body_size());
+        match tokio::time::timeout(std::time::Duration::from_secs(30), limited.collect()).await {
+            Ok(Ok(c)) => (c.to_bytes(), None),
+            Ok(Err(_)) => {
+                let mut r = full_body(payload_too_large_response());
+                apply_cors(&mut r, pool.cors_config.as_ref());
+                return Ok(r);
+            }
+            Err(_) => {
+                let mut r = full_body(crate::response::gateway_timeout_response());
+                apply_cors(&mut r, pool.cors_config.as_ref());
+                return Ok(r);
+            }
+        }
+    };
+
+    if is_gil_route {
+        let method_log = Arc::clone(&method);
+        let path_log = Arc::clone(&path);
+        let body_stream_rx = if let Some(rx) = body_stream_rx_early.clone() {
+            rx
+        } else if is_stream_route {
+            // Defensive dead-branch: the `is_stream_route` arm above
+            // always populates body_stream_rx_early, so control never
+            // reaches here. Keep it type-correct and `try_send` (non-
+            // awaiting) so a future refactor doesn't accidentally
+            // reintroduce a pre-awaited send on a channel nobody reads.
+            let (tx, rx) = tokio::sync::mpsc::channel::<crate::body_stream::ChunkMsg>(
+                crate::body_stream::CHANNEL_CAPACITY,
+            );
+            if !body_bytes.is_empty() {
+                let _ = tx.try_send(crate::body_stream::ChunkMsg::Data(body_bytes.clone()));
+            }
+            let _ = tx.try_send(crate::body_stream::ChunkMsg::Eof);
+            Arc::new(std::sync::Mutex::new(Some(rx)))
+        } else {
+            Arc::new(std::sync::Mutex::new(None))
+        };
+        // For stream routes, the body is served through the stream —
+        // keep body_bytes empty so handler code that reads `.body`
+        // doesn't double-consume.
+        let body_bytes_for_req = if is_stream_route {
+            Bytes::new()
+        } else {
+            body_bytes
+        };
+        let sky_req = PyronovaRequest {
+            method,
+            path,
+            params,
+            query,
+            headers_source: crate::types::LazyHeaders::Raw(raw_headers),
+            headers_cache: std::sync::OnceLock::new(),
+            client_ip_addr,
+            body_bytes: body_bytes_for_req,
+            body_stream_rx,
+            query_cache: std::sync::OnceLock::new(),
+        };
+
+        let routes_ref = Arc::clone(&routes);
+        let handler_result = tokio::task::spawn_blocking(move || {
+            call_handler_with_hooks(routes_ref, handler_idx, sky_req)
+        })
+        .await
+        .unwrap_or_else(|_| {
+            HandlerResult::PyronovaResponse(Err("handler thread panicked".to_string()))
+        });
+
+        let mut resp = match handler_result {
+            HandlerResult::PyronovaResponse(mut result) => {
+                if let Ok(data) = result.as_mut() {
+                    crate::compression::maybe_compress(data, &accept_encoding);
+                }
+                full_body(build_response(result)?)
+            }
+            HandlerResult::PyronovaStream(info) => build_stream_response(info),
+        };
+        apply_cors(&mut resp, routes.cors_config.as_ref());
+        let latency_us = start.elapsed().as_micros() as u64;
+        let status = resp.status().as_u16();
+        if routes.request_logging {
+            tracing::info!(
+                target: "pyronova::access",
+                method = %method_log,
+                path = %path_log,
+                status,
+                latency_us,
+                mode = "gil",
+                "PyronovaRequest handled"
+            );
+        }
+        return Ok(resp);
+    }
+
+    // ── Default: sub-interpreter (fast path) ──
+    // Sub-interp FFI bridge needs pre-converted headers.
+    let headers = extract_headers(&raw_headers);
+    let method_log = Arc::clone(&method);
+    let path_log = Arc::clone(&path);
+    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+
+    interp::WorkRequest::inc_created();
+    if let Err(e) = pool.submit(interp::WorkRequest {
+        handler_idx,
+        method: method.to_string(),
+        path: path.to_string(),
+        params,
+        query,
+        body: body_bytes,
+        headers,
+        client_ip: client_ip_addr.to_string(),
+        response_tx,
+    }) {
+        crate::monitor::DROPPED_REQUESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut r = full_body(overloaded_response(&e));
+        apply_cors(&mut r, pool.cors_config.as_ref());
+        return Ok(r);
+    }
+
+    let result = match tokio::time::timeout(std::time::Duration::from_secs(30), response_rx).await {
+        Ok(Ok(r)) => r,
+        Ok(Err(_)) => Err("worker thread dropped response".to_string()),
+        Err(_) => {
+            crate::monitor::DROPPED_REQUESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let mut r = full_body(gateway_timeout_response());
+            apply_cors(&mut r, pool.cors_config.as_ref());
+            return Ok(r);
+        }
+    };
+
+    let mut http_resp = match result {
+        Ok(mut resp) => {
+            let ct_owned: String = resp.content_type.clone().unwrap_or_else(|| {
+                if resp.is_json || resp.body.starts_with(b"{") || resp.body.starts_with(b"[") {
+                    "application/json".to_string()
+                } else {
+                    "text/plain; charset=utf-8".to_string()
+                }
+            });
+            crate::compression::maybe_compress_subinterp(
+                &mut resp.body,
+                &ct_owned,
+                &mut resp.headers,
+                &accept_encoding,
+            );
+            let status = StatusCode::from_u16(resp.status).unwrap_or(StatusCode::OK);
+            let mut builder = Response::builder()
+                .status(status)
+                .header("content-type", &ct_owned)
+                .header("server", crate::response::SERVER_HEADER);
+            for (k, v) in &resp.headers {
+                builder = builder.header(k.as_str(), v.as_str());
+            }
+            match builder.body(Full::new(Bytes::from(resp.body))) {
+                Ok(r) => full_body(r),
+                Err(_) => full_body(error_response("invalid response headers")),
+            }
+        }
+        Err(e) => full_body(error_response(&e)),
+    };
+    // Apply CORS uniformly to both Ok and Err paths. Previously the Err
+    // path returned a bare 500 with no CORS headers, so a browser would
+    // surface the real error as an opaque CORS failure — a classic
+    // debugging trap where the server error is invisible client-side.
+    apply_cors(&mut http_resp, pool.cors_config.as_ref());
+    let latency_us = start.elapsed().as_micros() as u64;
+    let status = http_resp.status().as_u16();
+    if routes.request_logging {
+        tracing::info!(
+            target: "pyronova::access",
+            method = %method_log,
+            path = %path_log,
+            status,
+            latency_us,
+            mode = "subinterp",
+            "PyronovaRequest handled"
+        );
+    }
+    Ok(http_resp)
+}

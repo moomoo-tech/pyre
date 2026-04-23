@@ -308,7 +308,7 @@ pub(crate) fn run_tpc_subinterp(
     mut workers: Vec<SubInterpreterWorker>,
     routes: FrozenRoutes,
     tls_acceptor: Option<Arc<tokio_rustls::TlsAcceptor>>,
-    main_bridge: Option<Arc<crate::main_bridge::MainInterpBridge>>,
+    main_bridge: Option<Arc<crate::bridge::main_bridge::MainInterpBridge>>,
 ) -> Result<(), String> {
     if workers.len() != n_threads {
         return Err(format!(
@@ -374,7 +374,7 @@ fn run_tpc_subinterp_per_thread_listener(
     workers: &mut Vec<SubInterpreterWorker>,
     routes: FrozenRoutes,
     tls_acceptor: Option<Arc<tokio_rustls::TlsAcceptor>>,
-    main_bridge: Option<Arc<crate::main_bridge::MainInterpBridge>>,
+    main_bridge: Option<Arc<crate::bridge::main_bridge::MainInterpBridge>>,
 ) -> Result<(), String> {
     log_startup("hybrid-inline", &addr, n_threads, n_cpus);
 
@@ -462,7 +462,7 @@ fn run_tpc_subinterp_fanout(
     mut workers: Vec<SubInterpreterWorker>,
     routes: FrozenRoutes,
     tls_acceptor: Option<Arc<tokio_rustls::TlsAcceptor>>,
-    main_bridge: Option<Arc<crate::main_bridge::MainInterpBridge>>,
+    main_bridge: Option<Arc<crate::bridge::main_bridge::MainInterpBridge>>,
 ) -> Result<(), String> {
     log_startup("hybrid-inline-fanout", &addr, n_threads, n_cpus);
 
@@ -649,7 +649,7 @@ async fn tpc_worker_loop_fanout(
     routes_arc: FrozenRoutes,
     shutdown: CancellationToken,
     tls_acceptor: Option<Arc<tokio_rustls::TlsAcceptor>>,
-    main_bridge: Option<Arc<crate::main_bridge::MainInterpBridge>>,
+    main_bridge: Option<Arc<crate::bridge::main_bridge::MainInterpBridge>>,
 ) {
     // Fanout path supports the Count GC mode only. Idle mode's drained-
     // queue signal lives in the acceptor now, not the worker, and the
@@ -767,7 +767,7 @@ pub(crate) async fn tpc_accept_loop_inline(
     routes_arc: FrozenRoutes,
     shutdown: CancellationToken,
     tls_acceptor: Option<Arc<tokio_rustls::TlsAcceptor>>,
-    main_bridge: Option<Arc<crate::main_bridge::MainInterpBridge>>,
+    main_bridge: Option<Arc<crate::bridge::main_bridge::MainInterpBridge>>,
 ) {
     let std_listener = match create_reuseport_listener(addr) {
         Ok(l) => l,

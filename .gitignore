@@ -10,3 +10,4 @@ dist/
 *.lock
 .arc/
 arc.log.jsonl
+python/pyronova/engine.cpython-314-darwin.so.dSYM/

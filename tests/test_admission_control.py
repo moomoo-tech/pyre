@@ -19,7 +19,7 @@ import pathlib
 
 
 def test_submit_semaphore_wired_before_body_collect():
-    src = pathlib.Path("src/handlers.rs").read_text()
+    src = pathlib.Path("src/handlers/subinterp.rs").read_text()
     # The permit must be taken BEFORE the body-collect phase. The
     # body-collect is guarded by `if is_stream_route` / `else` on
     # the `body_obj = req.into_body()` — find the submit_semaphore
@@ -44,7 +44,7 @@ def test_submit_semaphore_wired_before_body_collect():
 def test_semaphore_reject_returns_503():
     """Confirm the rejection branch is 503 + CORS-applied, not a panic
     or silent drop (the CORS 404 bug from round 3 — don't regress it)."""
-    src = pathlib.Path("src/handlers.rs").read_text()
+    src = pathlib.Path("src/handlers/subinterp.rs").read_text()
     # The Err branch of try_acquire_owned should construct an
     # overloaded_response and apply_cors before returning.
     # Search for the critical pieces close to the acquire site.

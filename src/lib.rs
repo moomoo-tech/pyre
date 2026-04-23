@@ -4,9 +4,9 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 mod app;
 mod bench;
 mod body_stream;
+mod bridge;
 mod compression;
 mod db;
-mod db_bridge;
 mod grpc;
 mod handlers;
 mod interp;
@@ -14,7 +14,6 @@ mod json;
 #[cfg(feature = "leak_detect")]
 mod leak_detect;
 mod logging;
-mod main_bridge;
 mod monitor;
 mod pyronova_request_type;
 mod response;

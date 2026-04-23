@@ -1208,7 +1208,7 @@ impl PyronovaApp {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(16);
-            Some(crate::main_bridge::MainInterpBridge::spawn(
+            Some(crate::bridge::main_bridge::MainInterpBridge::spawn(
                 Arc::clone(&routes),
                 capacity,
             ))
