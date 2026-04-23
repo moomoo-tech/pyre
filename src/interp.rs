@@ -631,14 +631,6 @@ pub(crate) unsafe fn py_str(s: &str) -> Option<PyObjRef> {
     ))
 }
 
-/// Create a new Python bytes object. Returns an owned `PyObjRef`.
-pub(crate) unsafe fn py_bytes(data: &[u8]) -> Option<PyObjRef> {
-    PyObjRef::from_owned(ffi::PyBytes_FromStringAndSize(
-        data.as_ptr() as *const _,
-        data.len() as isize,
-    ))
-}
-
 /// Create a new Python dict from a HashMap<String, String>. Returns owned `PyObjRef`.
 ///
 /// On any failure (str alloc OOM or PyDict_SetItem failure), clears the

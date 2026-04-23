@@ -131,7 +131,7 @@ pub(crate) struct LazyMaps {
 /// C-layout storage backing a `_Request` instance.
 ///
 /// Eager slots (method, path, query, body_bytes, client_ip) carry owned
-/// `*mut PyObject` strong refs, set by `alloc_and_init{,_lazy}` and
+/// `*mut PyObject` strong refs, set by `alloc_and_init_lazy` / `tp_init` and
 /// `Py_XDECREF`'d by `pyronova_request_dealloc`.
 ///
 /// Lazy slots (params_cache, headers_cache) start null on
@@ -696,52 +696,6 @@ pub(crate) unsafe fn register_type() -> Result<*mut ffi::PyObject, String> {
 }
 
 // --- Allocation: eager path (tp_init-compatible) ------------------------
-
-/// Legacy eager constructor. Each `*mut PyObject` is a new owned ref
-/// transferred into the instance. On failure they are DECREF'd.
-///
-/// Still used when the caller has already built PyObjects (e.g. the
-/// Python-side `_Request(...)` constructor via tp_init). For the
-/// Rust fast path — see `alloc_and_init_lazy` below.
-#[allow(clippy::too_many_arguments, dead_code)]
-pub(crate) unsafe fn alloc_and_init(
-    type_obj: *mut ffi::PyObject,
-    method: *mut ffi::PyObject,
-    path: *mut ffi::PyObject,
-    params: *mut ffi::PyObject,
-    query: *mut ffi::PyObject,
-    body_bytes: *mut ffi::PyObject,
-    headers: *mut ffi::PyObject,
-    client_ip: *mut ffi::PyObject,
-) -> Result<*mut ffi::PyObject, String> {
-    #[cfg(feature = "leak_detect")]
-    ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
-
-    let obj = ffi::PyType_GenericAlloc(type_obj as *mut ffi::PyTypeObject, 0);
-    if obj.is_null() {
-        ffi::Py_XDECREF(method);
-        ffi::Py_XDECREF(path);
-        ffi::Py_XDECREF(params);
-        ffi::Py_XDECREF(query);
-        ffi::Py_XDECREF(body_bytes);
-        ffi::Py_XDECREF(headers);
-        ffi::Py_XDECREF(client_ip);
-        return Err("PyType_GenericAlloc(_Request) failed".to_string());
-    }
-    let inner = obj as *mut RequestInner;
-    // PyType_GenericAlloc zero-initializes basicsize. Overwrite eager
-    // slots and pre-populate caches (raw data path skipped — caller
-    // already built PyObjects).
-    (*inner).method = method;
-    (*inner).path = path;
-    (*inner).query = query;
-    (*inner).client_ip = client_ip;
-    (*inner).params_cache = params;
-    (*inner).headers_cache = headers;
-    (*inner).body_bytes_cache = body_bytes;
-    (*inner).lazy_maps = std::ptr::null_mut();
-    Ok(obj)
-}
 
 // --- Allocation: lazy fast path -----------------------------------------
 
