@@ -2,10 +2,12 @@
 
 Thin Python-side re-export of the Rust `PgPool` class. Initialize once at
 startup, then call `pool.fetch_one(...)`, `.fetch_all(...)`, `.fetch_scalar(...)`,
-`.execute(...)` from any handler — sub-interpreter routes work natively
-via the C-FFI DB bridge (see src/bridge/db_bridge.rs), so `gil=True` is
-no longer needed for basic DB access. Parallelism ceiling is
-min(sub_interp_workers, max_connections).
+`.execute(...)` from any handler. DB routes currently require
+`gil=True`: the sub-interp bridge (`src/bridge/db_bridge.rs`) exists but
+calls `rt.block_on(...)` inside the worker, which panics under TPC mode
+because the TPC worker thread is already driving a tokio current_thread
+runtime. Remove the pin once the bridge is refactored to channel work
+to the DB runtime without `block_on`.
 
 v1 is a sync API — handler threads block on `rt.block_on()` while the
 dedicated DB runtime drives the sqlx future. The GIL is released during
@@ -19,7 +21,7 @@ Example::
     app = Pyronova()
     pool = PgPool.connect("postgres://localhost/mydb", max_connections=20)
 
-    @app.get("/users/{id}")
+    @app.get("/users/{id}", gil=True)
     def get_user(req):
         row = pool.fetch_one(
             "SELECT id, name, email FROM users WHERE id = $1",

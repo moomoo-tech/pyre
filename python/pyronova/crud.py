@@ -115,13 +115,17 @@ def register_crud(
     non_id_cols = [c for c in columns if c != id_column]
 
     # --- GET /prefix --------------------------------------------------------
-    # Routes deliberately run on sub-interpreters: PgPool calls go through
-    # the C-FFI DB bridge (src/bridge/db_bridge.rs) which shares the sqlx
-    # pool across all sub-interps. Parallelism ceiling is
-    # min(sub_interp_workers, max_connections) instead of 1 under gil=True.
+    # All routes pinned to gil=True. The sub-interp DB bridge
+    # (src/bridge/db_bridge.rs) looks ready on paper but uses
+    # `rt.block_on(...)` inside the sub-interp worker, which panics under
+    # TPC mode because the TPC worker thread is already driving a tokio
+    # current_thread runtime. Until the bridge is refactored to channel
+    # work to the DB runtime without block_on, CRUD stays on the main
+    # interp. Tracked as TODO: refactor db_bridge to channel-based
+    # dispatch (mirror src/bridge/main_bridge.rs).
     list_sql = f"SELECT {col_list} FROM {table} ORDER BY {id_column} LIMIT $1 OFFSET $2"
 
-    @app.get(prefix)
+    @app.get(prefix, gil=True)
     def list_rows(req):
         q = req.query_params
         try:
@@ -138,7 +142,7 @@ def register_crud(
     # --- GET /prefix/{id} ---------------------------------------------------
     get_sql = f"SELECT {col_list} FROM {table} WHERE {id_column} = $1"
 
-    @app.get(f"{prefix}/{{id}}")
+    @app.get(f"{prefix}/{{id}}", gil=True)
     def get_row(req):
         try:
             id_val = id_type(req.params["id"])
@@ -153,7 +157,7 @@ def register_crud(
     # Insert with an arbitrary subset of columns from body. We build the
     # column list dynamically from the intersection of body keys and the
     # allowlist so the caller can't inject columns.
-    @app.post(prefix)
+    @app.post(prefix, gil=True)
     def create_row(req):
         try:
             body = req.json()
@@ -182,7 +186,7 @@ def register_crud(
         return Response(body=row, status_code=201)
 
     # --- PUT /prefix/{id} ---------------------------------------------------
-    @app.put(f"{prefix}/{{id}}")
+    @app.put(f"{prefix}/{{id}}", gil=True)
     def update_row(req):
         try:
             id_val = id_type(req.params["id"])
@@ -220,7 +224,7 @@ def register_crud(
     # --- DELETE /prefix/{id} ------------------------------------------------
     delete_sql = f"DELETE FROM {table} WHERE {id_column} = $1"
 
-    @app.delete(f"{prefix}/{{id}}")
+    @app.delete(f"{prefix}/{{id}}", gil=True)
     def delete_row(req):
         try:
             id_val = id_type(req.params["id"])
