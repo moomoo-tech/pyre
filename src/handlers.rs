@@ -47,6 +47,7 @@ pub(crate) async fn handle_request_tpc_inline(
     routes: FrozenRoutes,
     worker: std::rc::Rc<std::cell::RefCell<interp::SubInterpreterWorker>>,
     client_ip_addr: std::net::IpAddr,
+    main_bridge: Option<Arc<crate::main_bridge::MainInterpBridge>>,
 ) -> Result<Response<BoxBody>, hyper::Error> {
     // gRPC short-circuit — fully handled in Rust, doesn't touch the sub-interp.
     if crate::grpc::is_grpc_request(&req) {
@@ -125,6 +126,101 @@ pub(crate) async fn handle_request_tpc_inline(
     let headers = extract_headers(&raw_headers);
     let method_log = Arc::clone(&method);
     let path_log = Arc::clone(&path);
+
+    // ── Phase 3: gil=True route → main-interp bridge ──────────────────
+    // If the matched route is registered with gil=True (C-extension /
+    // pydantic-core / numpy / torch etc. that can't run in a sub-interp),
+    // send the work to the dedicated main-interp bridge thread and await
+    // its oneshot reply. TPC accept thread pays an MPSC try_send +
+    // oneshot.await — everything else stays on the main interp. Full
+    // MPSC queue → 503 fast (GIL-bound path mustn't back up and stall
+    // the 440k rps sub-interp fleet). See src/main_bridge.rs for design.
+    let is_gil_route = routes.requires_gil.get(handler_idx).copied().unwrap_or(false);
+    if is_gil_route {
+        let bridge = match main_bridge {
+            Some(b) => b,
+            None => {
+                // Shouldn't happen: accept-loop bootstrap builds the
+                // bridge iff `routes.requires_gil` contains any true.
+                // If we got here with None, startup wiring is wrong.
+                let mut r = full_body(error_response(
+                    "gil=True route requested but main-interp bridge is not initialized",
+                ));
+                apply_cors(&mut r, routes.cors_config.as_ref());
+                return Ok(r);
+            }
+        };
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+        let item = crate::main_bridge::GilWorkItem {
+            method: Arc::clone(&method),
+            path: Arc::clone(&path),
+            params,
+            query,
+            body: Bytes::from(body_bytes),
+            headers,
+            client_ip: client_ip_addr,
+            handler_idx,
+            response_tx,
+        };
+        if let Err((_dropped_item, err)) = bridge.try_dispatch(item) {
+            crate::monitor::DROPPED_REQUESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let resp = match err {
+                crate::main_bridge::TryDispatchError::Full => {
+                    overloaded_response("gil=True bridge queue full")
+                }
+                crate::main_bridge::TryDispatchError::Closed => {
+                    error_response("gil=True bridge thread stopped")
+                }
+            };
+            let mut r = full_body(resp);
+            apply_cors(&mut r, routes.cors_config.as_ref());
+            return Ok(r);
+        }
+        let result = match tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            response_rx,
+        )
+        .await
+        {
+            Ok(Ok(r)) => r,
+            Ok(Err(_)) => Err("bridge dropped response".to_string()),
+            Err(_) => {
+                crate::monitor::DROPPED_REQUESTS
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let mut r = full_body(gateway_timeout_response());
+                apply_cors(&mut r, routes.cors_config.as_ref());
+                return Ok(r);
+            }
+        };
+        // Apply compression to the response body (same contract as
+        // sub-interp path). build_response takes the Result directly.
+        let mut http_resp = match result {
+            Ok(mut resp_data) => {
+                crate::compression::maybe_compress(&mut resp_data, &accept_encoding);
+                match build_response(Ok(resp_data)) {
+                    Ok(r) => full_body(r),
+                    Err(_) => full_body(error_response("response build failed")),
+                }
+            }
+            Err(e) => full_body(error_response(&e)),
+        };
+        apply_cors(&mut http_resp, routes.cors_config.as_ref());
+        let latency_us = start.elapsed().as_micros() as u64;
+        let status = http_resp.status().as_u16();
+        if routes.request_logging {
+            tracing::info!(
+                target: "pyronova::access",
+                method = %method_log,
+                path = %path_log,
+                status,
+                latency_us,
+                mode = "tpc-gil-bridge",
+                "PyronovaRequest handled"
+            );
+        }
+        return Ok(http_resp);
+    }
+
     let handler_name = routes.handler_names[handler_idx].clone();
 
     // The inline dispatch: acquire the TPC thread's sub-interp GIL,
@@ -243,12 +339,12 @@ pub(crate) fn max_body_size() -> usize {
 }
 
 /// Result from handler: either a normal response or a stream.
-enum HandlerResult {
+pub(crate) enum HandlerResult {
     PyronovaResponse(Result<ResponseData, String>),
     PyronovaStream(StreamInfo),
 }
 
-struct StreamInfo {
+pub(crate) struct StreamInfo {
     rx: tokio::sync::mpsc::Receiver<Result<Bytes, std::convert::Infallible>>,
     content_type: String,
     status: u16,
@@ -662,7 +758,7 @@ pub(crate) async fn handle_request(
 // Shared: call handler with full middleware chain (runs in blocking thread)
 // ---------------------------------------------------------------------------
 
-fn call_handler_with_hooks(
+pub(crate) fn call_handler_with_hooks(
     routes: FrozenRoutes,
     handler_idx: usize,
     sky_req: PyronovaRequest,

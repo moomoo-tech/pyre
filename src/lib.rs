@@ -13,6 +13,7 @@ mod json;
 #[cfg(feature = "leak_detect")]
 mod leak_detect;
 mod logging;
+mod main_bridge;
 mod monitor;
 mod pyronova_request_type;
 mod response;

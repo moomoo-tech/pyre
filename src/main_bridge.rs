@@ -1,0 +1,170 @@
+//! Main-interpreter dispatch bridge for `gil=True` routes under TPC.
+//!
+//! TPC's default Phase 2 inline handler can only run sub-interpreter-safe
+//! code. Legacy C extensions (numpy / pandas / torch / pydantic-core)
+//! force `gil=True` on their handlers and require execution on the main
+//! interpreter. This bridge makes that compatible with TPC.
+//!
+//! Architecture:
+//!
+//!   N TPC threads ──(tokio::sync::mpsc::channel, capacity=16)──▶ 1 main-interp thread
+//!                            ↑                                          │
+//!                            │ bounded                                  │ Python::attach
+//!                       try_send → 503 on full                          │ (main GIL)
+//!                            │                                          │
+//!                            ◀─────────(tokio::sync::oneshot)─────────── ◁
+//!                              response via oneshot per request
+//!
+//! Throughput contract: the bridge is a *cold path*. CPython's GIL caps
+//! the main-interp thread at the single-thread rate of whatever the
+//! handler's work is (typically ≤ 10k rps for numpy-class workloads,
+//! often much less). The channel capacity is deliberately small (16) so
+//! that when the bridge is saturated, TPC threads 503 *fast* rather
+//! than accumulating memory on a queue that services slower than the
+//! fleet's inbound rate. The rest of the fleet (pure sub-interp routes)
+//! keeps running at TPC speed — the GIL-bound slowdown stays contained.
+//!
+//! `dispatch_one` reuses the existing `call_handler_with_hooks` from
+//! `handlers.rs` — same semantics as the non-TPC GIL path: before hooks
+//! → handler → after hooks → response extraction. Coroutines and
+//! streams fall through the same logic.
+
+use std::collections::HashMap;
+use std::net::IpAddr;
+use std::sync::Arc;
+use std::sync::OnceLock;
+
+use bytes::Bytes;
+use tokio::sync::{mpsc, oneshot};
+
+use crate::handlers::{call_handler_with_hooks, HandlerResult};
+use crate::router::FrozenRoutes;
+use crate::types::{LazyHeaders, PyronovaRequest, ResponseData};
+
+/// Work request for the main-interp bridge. Carries everything a GIL
+/// handler needs plus the oneshot reply channel.
+pub(crate) struct GilWorkItem {
+    pub method: Arc<str>,
+    pub path: Arc<str>,
+    pub params: Vec<(String, String)>,
+    pub query: String,
+    pub body: Bytes,
+    pub headers: HashMap<String, String>,
+    pub client_ip: IpAddr,
+    pub handler_idx: usize,
+    pub response_tx: oneshot::Sender<Result<ResponseData, String>>,
+}
+
+/// Handle returned to callers. Cheap to Arc-share across all TPC
+/// threads.
+pub(crate) struct MainInterpBridge {
+    tx: mpsc::Sender<GilWorkItem>,
+    // Join handle deliberately dropped-detached. The bridge thread
+    // exits when the mpsc Sender count hits zero (server shutdown
+    // dropping Arcs). At that point main interp cleanup runs naturally.
+}
+
+impl MainInterpBridge {
+    /// Spawn the main-interp bridge thread with an mpsc channel of the
+    /// given capacity. Returns an Arc-safe handle for cloning to every
+    /// TPC thread's dispatch path. Channel capacity should be small
+    /// (default 16) — see module doc for why.
+    pub(crate) fn spawn(routes: FrozenRoutes, capacity: usize) -> Arc<Self> {
+        let (tx, mut rx) = mpsc::channel::<GilWorkItem>(capacity);
+        let routes_owned = routes;
+
+        std::thread::Builder::new()
+            .name("pyronova-main-bridge".into())
+            .spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("main bridge runtime");
+                rt.block_on(async move {
+                    while let Some(item) = rx.recv().await {
+                        dispatch_one(&routes_owned, item);
+                    }
+                });
+                tracing::info!(
+                    target: "pyronova::server",
+                    "main-interp bridge thread exiting (channel closed)"
+                );
+            })
+            .expect("spawn main bridge thread");
+
+        Arc::new(MainInterpBridge { tx })
+    }
+
+    /// Non-blocking dispatch. Returns Err with the original work item
+    /// when the channel is full (caller should respond 503) or when
+    /// the bridge thread has exited (caller should respond 500).
+    pub(crate) fn try_dispatch(
+        &self,
+        item: GilWorkItem,
+    ) -> Result<(), (GilWorkItem, TryDispatchError)> {
+        match self.tx.try_send(item) {
+            Ok(()) => Ok(()),
+            Err(mpsc::error::TrySendError::Full(item)) => {
+                Err((item, TryDispatchError::Full))
+            }
+            Err(mpsc::error::TrySendError::Closed(item)) => {
+                Err((item, TryDispatchError::Closed))
+            }
+        }
+    }
+}
+
+pub(crate) enum TryDispatchError {
+    Full,
+    Closed,
+}
+
+fn dispatch_one(routes: &FrozenRoutes, item: GilWorkItem) {
+    let GilWorkItem {
+        method,
+        path,
+        params,
+        query,
+        body,
+        headers,
+        client_ip,
+        handler_idx,
+        response_tx,
+    } = item;
+
+    // Fast bailout if the caller's TPC task has already given up
+    // waiting (client disconnect, upstream timeout). Don't burn main
+    // interp's single GIL on a request nobody is going to read.
+    if response_tx.is_closed() {
+        return;
+    }
+
+    // Reconstruct the pyo3 PyronovaRequest from raw parts. Same shape
+    // as what `handle_request` builds in non-TPC GIL mode, so the
+    // downstream call_handler_with_hooks path is byte-for-byte the
+    // same behavior.
+    let sky_req = PyronovaRequest {
+        method,
+        path,
+        params,
+        query,
+        headers_source: LazyHeaders::Converted(headers),
+        headers_cache: OnceLock::new(),
+        query_cache: OnceLock::new(),
+        client_ip_addr: client_ip,
+        body_bytes: body,
+        // Bridge path serves fully-buffered bodies; no streaming.
+        body_stream_rx: Arc::new(std::sync::Mutex::new(None)),
+    };
+
+    let result = call_handler_with_hooks(routes.clone(), handler_idx, sky_req);
+    let resp = match result {
+        HandlerResult::PyronovaResponse(r) => r,
+        HandlerResult::PyronovaStream(_) => Err(
+            "stream=True is not supported on the main-interp bridge path; \
+             register the route without gil=True or use non-TPC mode"
+                .to_string(),
+        ),
+    };
+    let _ = response_tx.send(resp);
+}

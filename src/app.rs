@@ -509,10 +509,12 @@ impl PyronovaApp {
         // test. Kernel SO_REUSEPORT + per-core current_thread runtime
         // + physical-core pinning + zero cross-thread handler dispatch
         // is a strict win for the common "sync handler" shape.
-        let has_gil = frozen.requires_gil.iter().any(|&g| g);
+        // gil=True is TPC-compatible as of Phase 3 (routed through the
+        // main-interp bridge). async def and stream=True still require
+        // the old pool path.
         let has_async = frozen.is_async.iter().any(|&a| a);
         let has_stream = frozen.is_stream.iter().any(|&s| s);
-        let tpc_incompatible = has_gil || has_async || has_stream;
+        let tpc_incompatible = has_async || has_stream;
         let tpc_forced_off = matches!(
             std::env::var("PYRONOVA_TPC").ok().as_deref(),
             Some("0") | Some("off") | Some("no") | Some("false")
@@ -1087,16 +1089,18 @@ impl PyronovaApp {
         routes: FrozenRoutes,
         tls_acceptor: Option<Arc<tokio_rustls::TlsAcceptor>>,
     ) -> PyResult<()> {
-        // Reject unsupported route shapes before touching Python state.
+        // gil=True routes are now supported via the main-interp bridge
+        // (Phase 3). async def and stream=True still need their own
+        // Phase-4 work (pyo3-async-runtimes LocalSet integration and
+        // per-thread streaming body plumbing, respectively).
         let gil_count = routes.requires_gil.iter().filter(|&&g| g).count();
         let async_count = routes.is_async.iter().filter(|&&a| a).count();
         let stream_count = routes.is_stream.iter().filter(|&&s| s).count();
-        if gil_count > 0 || async_count > 0 || stream_count > 0 {
+        if async_count > 0 || stream_count > 0 {
             return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
-                "TPC Phase 2 (inline) requires all routes to be sync + non-GIL + non-streaming. \
-                 Offenders: {gil_count} gil=True, {async_count} async def, {stream_count} stream=True. \
-                 Drop `tpc=True` / `PYRONOVA_TPC` to fall back to the multi-thread path, or rewrite \
-                 these routes as sync sub-interp handlers."
+                "TPC does not yet support `async def` or `stream=True` routes. \
+                 Offenders: {async_count} async def, {stream_count} stream=True. \
+                 Drop `tpc=True` / `PYRONOVA_TPC` to fall back to the multi-thread path."
             )));
         }
 
@@ -1145,9 +1149,34 @@ impl PyronovaApp {
             workers.push(w);
         }
 
+        // Phase 3 gil=True bridge: spawn a dedicated main-interp thread
+        // when at least one route is gil=True. The bridge serves those
+        // routes on a single MPSC-fed worker with the main GIL, while
+        // TPC threads handle the rest inline. See src/main_bridge.rs.
+        let main_bridge = if gil_count > 0 {
+            let capacity: usize = std::env::var("PYRONOVA_GIL_BRIDGE_CAPACITY")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(16);
+            Some(crate::main_bridge::MainInterpBridge::spawn(
+                Arc::clone(&routes),
+                capacity,
+            ))
+        } else {
+            None
+        };
+
         py.detach(move || -> PyResult<()> {
-            crate::tpc::run_tpc_subinterp(addr, n_threads, num_cpus, workers, routes, tls_acceptor)
-                .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+            crate::tpc::run_tpc_subinterp(
+                addr,
+                n_threads,
+                num_cpus,
+                workers,
+                routes,
+                tls_acceptor,
+                main_bridge,
+            )
+            .map_err(pyo3::exceptions::PyRuntimeError::new_err)
         })
     }
 }
