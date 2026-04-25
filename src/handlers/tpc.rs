@@ -312,7 +312,15 @@ pub(crate) async fn handle_request_tpc_inline(
             }
             match builder.body(Full::new(Bytes::from(resp.body))) {
                 Ok(r) => full_body(r),
-                Err(_) => full_body(error_response("invalid response headers")),
+                Err(e) => {
+                    tracing::error!(
+                        target: "pyronova::handler",
+                        error = %e,
+                        handler = %routes.handler_names.get(handler_idx).map(|s| s.as_str()).unwrap_or("?"),
+                        "handler returned invalid response headers"
+                    );
+                    full_body(error_response("invalid response headers"))
+                }
             }
         }
         Err(e) => full_body(error_response(&e)),

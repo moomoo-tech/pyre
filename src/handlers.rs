@@ -377,7 +377,17 @@ pub(crate) fn call_handler_with_hooks(
         let after_hooks = &routes.after_hooks;
 
         let handler = if handler_idx == usize::MAX {
-            routes.fallback_handler.as_ref().unwrap()
+            match routes.fallback_handler.as_ref() {
+                Some(h) => h,
+                None => {
+                    return HandlerResult::PyronovaResponse(Ok(crate::types::ResponseData {
+                        body: bytes::Bytes::from_static(b"{\"error\":\"Not Found\"}"),
+                        content_type: "application/json".to_string(),
+                        status: 404,
+                        headers: Default::default(),
+                    }))
+                }
+            }
         } else {
             &routes.handlers[handler_idx]
         };

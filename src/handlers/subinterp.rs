@@ -175,8 +175,13 @@ pub(crate) async fn handle_request_subinterp(
         let limited = Limited::new(body_obj, max_body_size());
         match tokio::time::timeout(std::time::Duration::from_secs(30), limited.collect()).await {
             Ok(Ok(c)) => (c.to_bytes(), None),
-            Ok(Err(_)) => {
-                let mut r = full_body(payload_too_large_response());
+            Ok(Err(e)) => {
+                let mut r = if e.downcast_ref::<http_body_util::LengthLimitError>().is_some() {
+                    full_body(payload_too_large_response())
+                } else {
+                    tracing::warn!(target: "pyronova::handler", error = %e, "body read error");
+                    full_body(crate::response::error_response("body read failed"))
+                };
                 apply_cors(&mut r, pool.cors_config.as_ref());
                 return Ok(r);
             }
