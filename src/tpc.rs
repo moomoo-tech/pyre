@@ -792,33 +792,24 @@ fn idle_tick_ms_from_env() -> u64 {
 /// to import at sub-interp init — unreachable in practice).
 fn fire_gc(worker: &std::rc::Rc<std::cell::RefCell<SubInterpreterWorker>>) {
     use pyo3::ffi;
-    // Extract gc_collect_func and tstate under a short borrow, then drop
-    // the borrow before entering Python GC. GC finalizers and weakref
-    // callbacks can re-enter Rust code that borrows worker — holding a
-    // RefMut across the FFI call would cause a BorrowMutError panic.
-    let gc_collect_func;
-    let tstate_cell;
-    {
-        let w = worker.borrow();
-        if w.gc_collect_func.is_null() {
-            return;
-        }
-        gc_collect_func = w.gc_collect_func;
-        tstate_cell = std::cell::Cell::new(w.tstate);
+    let mut w = worker.borrow_mut();
+    if w.gc_collect_func.is_null() {
+        return;
     }
+    let tstate_cell = std::cell::Cell::new(w.tstate);
     unsafe {
         let _guard =
             crate::python::interp::SubInterpGilGuard::acquire(tstate_cell.get(), &tstate_cell);
         // PyObject_CallNoArgs: skip the empty-tuple alloc the generic
         // PyObject_Call path requires. Idiomatic 3.9+ invocation.
-        let res = ffi::PyObject_CallNoArgs(gc_collect_func);
+        let res = ffi::PyObject_CallNoArgs(w.gc_collect_func);
         if !res.is_null() {
             ffi::Py_DECREF(res);
         } else {
             ffi::PyErr_Clear();
         }
     }
-    worker.borrow_mut().tstate = tstate_cell.get();
+    w.tstate = tstate_cell.get();
 }
 
 pub(crate) async fn tpc_accept_loop_inline(
