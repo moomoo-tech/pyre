@@ -33,6 +33,8 @@ def _load_app(target: str) -> "Pyronova":
     runs its top-level code, which registers routes on the app."""
     if ":" in target:
         module_name, attr = target.split(":", 1)
+        if not attr:
+            sys.exit(f"pyronova: invalid target {target!r}: attribute name must not be empty")
     else:
         module_name, attr = target, "app"
 
@@ -43,7 +45,7 @@ def _load_app(target: str) -> "Pyronova":
 
     try:
         module = importlib.import_module(module_name)
-    except ModuleNotFoundError as e:
+    except ImportError as e:
         sys.exit(f"pyronova: cannot import {module_name!r}: {e}")
 
     try:
@@ -60,6 +62,8 @@ def _load_app(target: str) -> "Pyronova":
 
 
 def _cmd_run(args: argparse.Namespace) -> None:
+    if bool(args.tls_cert) != bool(args.tls_key):
+        sys.exit("pyronova: --tls-cert and --tls-key must be specified together")
     app = _load_app(args.target)
     app.run(
         host=args.host,
@@ -97,9 +101,19 @@ def _cmd_routes(args: argparse.Namespace) -> None:
             flags.append("async")
         if r.get("model"):
             flags.append(f"model={r['model']}")
-        rows.append((r["method"], r["path"], r["handler"], ",".join(flags)))
+        rows.append((
+            r.get("method", "?"),
+            r.get("path", "?"),
+            r.get("handler", "?"),
+            ",".join(flags),
+        ))
     for r in app.fast_routes:
-        rows.append((r["method"], r["path"], f"<fast:{r['bytes']}B>", f"status={r['status_code']}"))
+        rows.append((
+            r.get("method", "?"),
+            r.get("path", "?"),
+            f"<fast:{r.get('bytes', '?')}B>",
+            f"status={r.get('status_code', '?')}",
+        ))
 
     if not rows:
         print("(no routes registered)")

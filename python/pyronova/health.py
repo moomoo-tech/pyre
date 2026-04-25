@@ -53,13 +53,16 @@ def _run_checks_sync(checks: list[tuple[str, CheckFn]]) -> tuple[bool, dict[str,
     for name, fn in checks:
         try:
             if inspect.iscoroutinefunction(fn):
-                # Drive the coroutine on a private loop — readyz is a
-                # cold-path call, the throwaway loop is fine.
-                res = asyncio.new_event_loop().run_until_complete(fn())
+                # Drive the coroutine on a temporary loop — readyz is a
+                # cold-path call. Use asyncio.run() which creates and
+                # closes the loop properly (no fd leak).
+                res = asyncio.run(fn())
             else:
                 res = fn()
-            if res is False:
-                results[name] = {"ok": False, "error": "check returned False"}
+            # Treat False OR any other falsy non-None value as failure,
+            # matching the docstring contract.
+            if res is not None and not res:
+                results[name] = {"ok": False, "error": "check returned falsy value"}
                 all_ok = False
             else:
                 results[name] = {"ok": True}
@@ -84,7 +87,7 @@ def _build_readyz_handler(checks: list[tuple[str, CheckFn]]):
         payload = json.dumps({
             "status": "ready" if ok else "not_ready",
             "checks": results,
-        })
+        }).encode("utf-8")
         return Response(
             body=payload,
             status_code=200 if ok else 503,

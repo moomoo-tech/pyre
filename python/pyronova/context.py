@@ -38,7 +38,8 @@ from typing import Any
 
 _REQUEST_ID_KEY = "__pyronova_request_id__"
 
-_current: ContextVar[dict[str, Any]] = ContextVar("pyronova_ctx", default={})
+_DEFAULT: dict[str, Any] = {}
+_current: ContextVar[dict[str, Any]] = ContextVar("pyronova_ctx", default=_DEFAULT)
 
 
 class _Ctx:
@@ -74,7 +75,6 @@ class _Ctx:
         return dict(_current.get())
 
 
-_DEFAULT: dict[str, Any] = {}
 ctx = _Ctx()
 
 

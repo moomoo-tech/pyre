@@ -38,10 +38,13 @@ POST/PUT, so a caller can't sneak in columns the developer didn't
 intend to expose.
 """
 
+import logging
 import re
 from typing import Callable, TYPE_CHECKING
 
 from .app import Response
+
+_log = logging.getLogger("pyronova.crud")
 
 if TYPE_CHECKING:
     from .app import Pyronova
@@ -129,7 +132,7 @@ def register_crud(
     def list_rows(req):
         q = req.query_params
         try:
-            limit = min(int(q.get("limit", default_limit)), max_limit)
+            limit = max(1, min(int(q.get("limit", default_limit)), max_limit))
             offset = max(int(q.get("offset", 0)), 0)
         except (TypeError, ValueError):
             return Response(
@@ -144,8 +147,11 @@ def register_crud(
 
     @app.get(f"{prefix}/{{id}}", gil=True)
     def get_row(req):
+        raw_id = req.params.get("id")
+        if raw_id is None:
+            return Response(body={"error": "missing id"}, status_code=400)
         try:
-            id_val = id_type(req.params["id"])
+            id_val = id_type(raw_id)
         except (TypeError, ValueError):
             return Response(body={"error": "invalid id"}, status_code=400)
         row = pool.fetch_one(get_sql, id_val)
@@ -162,6 +168,7 @@ def register_crud(
         try:
             body = req.json()
         except Exception:
+            _log.exception("create_row: failed to parse request body")
             return Response(body={"error": "invalid JSON"}, status_code=400)
         if not isinstance(body, dict):
             return Response(body={"error": "body must be a JSON object"}, status_code=400)
@@ -181,20 +188,25 @@ def register_crud(
         args = [body[c] for c in present]
         try:
             row = pool.fetch_one(insert_sql, *args)
-        except RuntimeError as e:
-            return Response(body={"error": str(e)}, status_code=400)
+        except RuntimeError:
+            _log.exception("create_row: DB error on INSERT into %s", table)
+            return Response(body={"error": "database error"}, status_code=400)
         return Response(body=row, status_code=201)
 
     # --- PUT /prefix/{id} ---------------------------------------------------
     @app.put(f"{prefix}/{{id}}", gil=True)
     def update_row(req):
+        raw_id = req.params.get("id")
+        if raw_id is None:
+            return Response(body={"error": "missing id"}, status_code=400)
         try:
-            id_val = id_type(req.params["id"])
+            id_val = id_type(raw_id)
         except (TypeError, ValueError):
             return Response(body={"error": "invalid id"}, status_code=400)
         try:
             body = req.json()
         except Exception:
+            _log.exception("update_row: failed to parse request body")
             return Response(body={"error": "invalid JSON"}, status_code=400)
         if not isinstance(body, dict):
             return Response(body={"error": "body must be a JSON object"}, status_code=400)
@@ -215,8 +227,9 @@ def register_crud(
         args = [body[c] for c in present] + [id_val]
         try:
             row = pool.fetch_one(update_sql, *args)
-        except RuntimeError as e:
-            return Response(body={"error": str(e)}, status_code=400)
+        except RuntimeError:
+            _log.exception("update_row: DB error on UPDATE in %s", table)
+            return Response(body={"error": "database error"}, status_code=400)
         if row is None:
             return Response(body={"error": "not found"}, status_code=404)
         return row
@@ -226,11 +239,18 @@ def register_crud(
 
     @app.delete(f"{prefix}/{{id}}", gil=True)
     def delete_row(req):
+        raw_id = req.params.get("id")
+        if raw_id is None:
+            return Response(body={"error": "missing id"}, status_code=400)
         try:
-            id_val = id_type(req.params["id"])
+            id_val = id_type(raw_id)
         except (TypeError, ValueError):
             return Response(body={"error": "invalid id"}, status_code=400)
-        affected = pool.execute(delete_sql, id_val)
+        try:
+            affected = pool.execute(delete_sql, id_val)
+        except RuntimeError:
+            _log.exception("delete_row: DB error on DELETE from %s", table)
+            return Response(body={"error": "database error"}, status_code=500)
         if affected == 0:
             return Response(body={"error": "not found"}, status_code=404)
         return Response(body=b"", status_code=204)

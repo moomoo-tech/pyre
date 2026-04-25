@@ -92,8 +92,9 @@ class TestResponse:
     def raise_for_status(self) -> None:
         """Raise ``RuntimeError`` if the status code is 4xx or 5xx."""
         if self.status_code >= 400:
+            snippet = self.text[:200] if self.body else ""
             raise RuntimeError(
-                f"TestClient: {self.status_code} for {self.headers.get('X-Request-URL', '?')}"
+                f"TestClient HTTP {self.status_code}: {snippet!r}"
             )
 
 
@@ -119,7 +120,7 @@ class TestClient:
         self,
         app,
         host: str = "127.0.0.1",
-        port: int | None = 19876,
+        port: int | None = None,
         *,
         timeout: float = 10.0,
         follow_redirects: bool = True,
@@ -154,12 +155,17 @@ class TestClient:
         # it's still starting.
         for _ in range(50):
             time.sleep(0.1)
+            if not self._thread.is_alive():
+                raise RuntimeError("TestClient: server thread exited before accepting connections")
             try:
-                urllib.request.urlopen(f"{self.base_url}/", timeout=1)
+                resp = self._opener.open(f"{self.base_url}/", timeout=1)
+                resp.close()
                 return
             except urllib.error.HTTPError:
                 return
-            except Exception:
+            except urllib.error.URLError:
+                pass
+            except OSError:
                 pass
 
         raise RuntimeError("TestClient: server failed to start within 5s")
@@ -208,18 +214,20 @@ class TestClient:
         eff_timeout = timeout if timeout is not None else self.timeout
 
         try:
-            resp = self._opener.open(req, timeout=eff_timeout)
-            return TestResponse(
-                status_code=resp.status,
-                body=resp.read(),
-                headers=_collapse_headers(resp.headers),
-            )
+            with self._opener.open(req, timeout=eff_timeout) as resp:
+                return TestResponse(
+                    status_code=resp.status,
+                    body=resp.read(),
+                    headers=_collapse_headers(resp.headers),
+                )
         except urllib.error.HTTPError as e:
             return TestResponse(
                 status_code=e.code,
                 body=e.read(),
                 headers=_collapse_headers(e.headers),
             )
+        except urllib.error.URLError as e:
+            raise RuntimeError(f"TestClient: request failed: {e.reason}") from e
 
     def get(self, path: str, **kwargs) -> TestResponse:
         return self.request("GET", path, **kwargs)

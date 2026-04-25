@@ -26,18 +26,18 @@ if TYPE_CHECKING:
 # Characters forbidden in cookie name/value per RFC 6265. CR (\r) and LF
 # (\n) in particular enable HTTP Response Splitting: an attacker crafts a
 # value containing `\r\nSet-Cookie: admin=1` and injects arbitrary headers
-# into the response. NUL is a control-char trap too. We reject rather than
-# silently escape — cookies with these bytes are always the result of
-# unsanitized user input reaching set_cookie(), and silent acceptance
-# (e.g. encoding) would mask the real bug upstream.
-_COOKIE_FORBIDDEN = ("\r", "\n", "\0")
+# into the response. NUL is a control-char trap too. Semicolons and commas
+# are also forbidden to prevent header value smuggling via the separator chars.
+_COOKIE_FORBIDDEN = ("\r", "\n", "\0", ";", ",")
+
+_SAMESITE_VALID = {"Strict", "Lax", "None"}
 
 
 def _reject_control_chars(field: str, value: str) -> None:
     for ch in _COOKIE_FORBIDDEN:
         if ch in value:
             raise ValueError(
-                f"cookie {field} contains forbidden control character "
+                f"cookie {field} contains forbidden character "
                 f"{ch!r}; refusing to emit (HTTP response splitting risk)"
             )
 
@@ -55,7 +55,11 @@ def get_cookies(req: Request) -> dict[str, str]:
         pair = pair.strip()
         if "=" in pair:
             name, _, value = pair.partition("=")
-            cookies[name.strip()] = value.strip()
+            value = value.strip()
+            # RFC 6265 allows DQUOTE-wrapped cookie values
+            if value.startswith('"') and value.endswith('"') and len(value) >= 2:
+                value = value[1:-1]
+            cookies[name.strip()] = value
     return cookies
 
 
@@ -79,7 +83,9 @@ def set_cookie(
 ) -> "Response":
     """Set a cookie on a Response.
 
-    Returns a new Response with the Set-Cookie header added.
+    Returns a new Response with the Set-Cookie header appended.
+    Multiple calls produce multiple Set-Cookie headers (required for
+    sending more than one cookie in a single response).
     """
     from pyronova.engine import Response
 
@@ -91,8 +97,6 @@ def set_cookie(
         _reject_control_chars("path", path)
     if expires is not None:
         _reject_control_chars("expires", expires)
-    if samesite is not None:
-        _reject_control_chars("samesite", samesite)
 
     parts = [f"{name}={value}"]
     if max_age is not None:
@@ -107,12 +111,27 @@ def set_cookie(
         parts.append("Secure")
     if httponly:
         parts.append("HttpOnly")
-    if samesite:
-        parts.append(f"SameSite={samesite}")
+    if samesite is not None:
+        samesite_norm = str(samesite).strip().title()
+        if samesite_norm not in _SAMESITE_VALID:
+            raise ValueError(
+                f"invalid samesite={samesite!r}; must be 'Strict', 'Lax', or 'None'"
+            )
+        parts.append(f"SameSite={samesite_norm}")
 
     cookie_str = "; ".join(parts)
+    # Build headers with case-normalised key to avoid duplicate set-cookie entries
     headers = dict(getattr(response, "headers", {}) or {})
-    headers["set-cookie"] = cookie_str
+    # Normalise existing key case (response may carry "Set-Cookie" or "set-cookie")
+    existing_key = next((k for k in headers if k.lower() == "set-cookie"), None)
+    if existing_key is None:
+        headers["set-cookie"] = cookie_str
+    else:
+        existing = headers[existing_key]
+        if isinstance(existing, list):
+            headers[existing_key] = existing + [cookie_str]
+        else:
+            headers[existing_key] = [existing, cookie_str]
 
     return Response(
         body=response.body,
@@ -122,9 +141,25 @@ def set_cookie(
     )
 
 
-def delete_cookie(response: Response, name: str, *, path: str = "/") -> Response:
-    """Delete a cookie by setting it expired."""
+def delete_cookie(
+    response: Response,
+    name: str,
+    *,
+    path: str = "/",
+    domain: str | None = None,
+    secure: bool = False,
+    samesite: str | None = "Lax",
+) -> Response:
+    """Delete a cookie by setting it expired.
+
+    Forwards domain/secure/samesite so the browser's deletion matches the
+    original cookie's scope.
+    """
     return set_cookie(
         response, name, "",
-        max_age=0, path=path,
+        max_age=0,
+        path=path,
+        domain=domain,
+        secure=secure,
+        samesite=samesite,
     )

@@ -37,7 +37,9 @@ need query-aware caching, pre-compose the key yourself:
 
 from __future__ import annotations
 
+import asyncio
 import functools
+import inspect
 import json
 import threading
 import time
@@ -63,33 +65,53 @@ def cached_json(ttl: float, key: Callable | None = None):
     def decorator(handler):
         _cache: dict[str, tuple[bytes, float]] = {}
         _lock = threading.Lock()
+        _is_async = inspect.iscoroutinefunction(handler)
+
+        def _serialize(result) -> bytes:
+            if isinstance(result, (bytes, bytearray)):
+                return bytes(result)
+            if isinstance(result, str):
+                return result.encode("utf-8")
+            return json.dumps(result, separators=(",", ":")).encode("utf-8")
+
+        def _hit_or_miss(k: str, now: float):
+            entry = _cache.get(k)
+            if entry is not None and entry[1] > now:
+                return Response(body=entry[0], content_type="application/json")
+            return None
+
+        if _is_async:
+            @functools.wraps(handler)
+            async def async_wrapper(req):
+                now = time.monotonic()
+                k = key_fn(req)
+                cached = _hit_or_miss(k, now)
+                if cached is not None:
+                    return cached
+                result = await handler(req)
+                if isinstance(result, Response):
+                    return result
+                body = _serialize(result)
+                with _lock:
+                    _cache[k] = (body, now + ttl)
+                return Response(body=body, content_type="application/json")
+            return async_wrapper
 
         @functools.wraps(handler)
         def wrapper(req):
             now = time.monotonic()
             k = key_fn(req)
-
-            entry = _cache.get(k)
-            if entry is not None and entry[1] > now:
-                return Response(body=entry[0], content_type="application/json")
-
+            cached = _hit_or_miss(k, now)
+            if cached is not None:
+                return cached
             result = handler(req)
-
             # Handler returned an explicit Response — user is signalling
             # a custom status / headers; don't cache, don't rewrap.
             if isinstance(result, Response):
                 return result
-
-            if isinstance(result, (bytes, bytearray)):
-                body = bytes(result)
-            elif isinstance(result, str):
-                body = result.encode("utf-8")
-            else:
-                body = json.dumps(result, separators=(",", ":")).encode("utf-8")
-
+            body = _serialize(result)
             with _lock:
                 _cache[k] = (body, now + ttl)
-
             return Response(body=body, content_type="application/json")
 
         return wrapper

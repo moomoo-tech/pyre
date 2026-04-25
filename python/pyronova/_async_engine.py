@@ -36,7 +36,12 @@ _HANDLER_TIMEOUT = 28
 
 async def _process_request(req_id, handler_idx, method, path, params, query, body_bytes, headers, client_ip):
     try:
-        handler_name = HANDLER_NAMES[int(handler_idx)]
+        try:
+            handler_name = HANDLER_NAMES[int(handler_idx)]
+        except (ValueError, IndexError) as e:
+            _log.error("worker=%s invalid handler_idx=%r: %s", WORKER_ID, handler_idx, e)
+            _pyronova_send(WORKER_ID, _pyronova_pool_id, req_id, 500, "text/plain", b"routing error")
+            return
         handler = globals().get(handler_name)
         if handler is None:
             _pyronova_send(WORKER_ID, _pyronova_pool_id, req_id, 500, "text/plain", b"handler not found")
@@ -45,10 +50,12 @@ async def _process_request(req_id, handler_idx, method, path, params, query, bod
         req = _Request(method, path, params, query, body_bytes, headers, client_ip)
         res = handler(req)
 
-        if asyncio.iscoroutine(res):
+        if asyncio.iscoroutine(res) or asyncio.isfuture(res) or hasattr(res, '__await__'):
             # Bracket pattern: bound the coroutine's lifetime so cancelled/timed-out
             # requests don't accumulate as phantom load in the event loop.
-            res = await asyncio.wait_for(res, timeout=_HANDLER_TIMEOUT)
+            # ensure_future wraps any awaitable (coroutine, Future, __await__) into
+            # a Task so wait_for can cancel it uniformly on timeout.
+            res = await asyncio.wait_for(asyncio.ensure_future(res), timeout=_HANDLER_TIMEOUT)
 
         if isinstance(res, _Response):
             body = (
@@ -75,11 +82,14 @@ async def _process_request(req_id, handler_idx, method, path, params, query, bod
             )
         elif isinstance(res, bytes):
             _pyronova_send(WORKER_ID, _pyronova_pool_id, req_id, 200, "application/octet-stream", res)
+        elif res is None:
+            _pyronova_send(WORKER_ID, _pyronova_pool_id, req_id, 200, "text/plain", b"")
         else:
             body = str(res).encode("utf-8")
+            body_stripped = body.lstrip()
             ct = (
                 "application/json"
-                if body.startswith(b"{") or body.startswith(b"[")
+                if body_stripped.startswith(b"{") or body_stripped.startswith(b"[")
                 else "text/plain"
             )
             _pyronova_send(WORKER_ID, _pyronova_pool_id, req_id, 200, ct, body)

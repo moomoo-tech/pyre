@@ -32,7 +32,7 @@ class UploadFile:
 
     @property
     def text(self) -> str:
-        return self.data.decode("utf-8", errors="replace")
+        return self.data.decode("utf-8")
 
     @property
     def size(self) -> int:
@@ -61,9 +61,11 @@ def parse_multipart(req) -> dict[str, UploadFile]:
     if not boundary:
         raise ValueError("Missing boundary in Content-Type")
 
-    body = req.body if isinstance(req.body, bytes) else req.body.encode()
+    raw = req.body
+    if raw is None:
+        raise ValueError("parse_multipart: request body is empty")
+    body = raw if isinstance(raw, bytes) else raw.encode()
     boundary_bytes = f"--{boundary}".encode()
-    end_boundary = f"--{boundary}--".encode()
 
     parts = body.split(boundary_bytes)
     result = {}

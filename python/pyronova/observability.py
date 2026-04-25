@@ -29,6 +29,7 @@ atomic DashMap op shared by every interpreter.
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 import uuid
@@ -39,10 +40,6 @@ from pyronova.engine import Response
 if TYPE_CHECKING:
     from pyronova.app import Pyronova
 
-
-_METRIC_KEYS = [
-    ("_m:req:total", "pyronova_http_requests_total", "Total HTTP requests handled.", "counter"),
-]
 
 _STATUS_CLASSES = ("1xx", "2xx", "3xx", "4xx", "5xx")
 _TRACKED_METHODS = ("GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS")
@@ -74,7 +71,7 @@ def install_request_id(app: "Pyronova", header: str) -> None:
         rid = getattr(_tls, "request_id", None)
         if rid is None:
             return resp
-        merged = {**resp.headers, header: rid}
+        merged = {**resp.headers, header.lower(): rid}
         return Response(
             body=resp.body,
             status_code=resp.status_code,
@@ -107,6 +104,7 @@ def install_metrics(app: "Pyronova", path: str) -> None:
             state.incr(f"_m:req:method:{method}", 1)
 
         start = getattr(_tls, "metrics_start_ns", None)
+        _tls.metrics_start_ns = None
         if start is not None:
             elapsed_us = max(0, (time.monotonic_ns() - start) // 1000)
             state.incr("_m:lat:sum_us", int(elapsed_us))
@@ -128,13 +126,17 @@ def install_metrics(app: "Pyronova", path: str) -> None:
     app.get(path, gil=True)(_metrics_handler)
 
 
+_log = logging.getLogger("pyronova.observability")
+
+
 def _read_int(state, key: str) -> int:
     v = state.get(key)
     if v is None:
         return 0
     try:
         return int(v)
-    except ValueError:
+    except (ValueError, TypeError):
+        _log.warning("metrics key %r has non-integer value %r", key, v)
         return 0
 
 

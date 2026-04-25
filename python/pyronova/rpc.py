@@ -6,9 +6,11 @@ Client: RPCClient with __getattr__ magic for local-like calls.
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import inspect
+import urllib.parse
 from typing import Callable
 
 _log = logging.getLogger("pyronova.rpc")
@@ -29,18 +31,25 @@ class RPCClient:
         result = client.get_market_snapshot(tickers=["AAPL", "TSLA"])
     """
 
-    def __init__(self, base_url: str, use_msgpack: bool = True):
-        import httpx
+    def __init__(self, base_url: str, use_msgpack: bool = True, timeout: float = 30.0):
+        try:
+            import httpx
+        except ImportError as e:
+            raise ImportError("RPCClient requires httpx; install with: pip install httpx") from e
         self.base_url = base_url.rstrip("/")
         self.use_msgpack = use_msgpack and HAS_MSGPACK
+        self.timeout = timeout
         self._client = httpx.Client(
             http2=False,
+            timeout=timeout,
             limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
         )
 
     def __getattr__(self, method_name: str):
         if method_name.startswith("_"):
             raise AttributeError(method_name)
+
+        encoded_name = urllib.parse.quote(method_name, safe="")
 
         def remote_call(**kwargs):
             if self.use_msgpack:
@@ -51,7 +60,7 @@ class RPCClient:
                 content_type = "application/json"
 
             resp = self._client.post(
-                f"{self.base_url}/rpc/{method_name}",
+                f"{self.base_url}/rpc/{encoded_name}",
                 content=payload,
                 headers={
                     "Content-Type": content_type,
@@ -60,13 +69,21 @@ class RPCClient:
             )
             resp.raise_for_status()
 
-            if self.use_msgpack and "msgpack" in resp.headers.get("content-type", ""):
-                data = msgpack.unpackb(resp.content, raw=False)
-            else:
-                data = resp.json()
+            try:
+                if self.use_msgpack and "msgpack" in resp.headers.get("content-type", ""):
+                    data = msgpack.unpackb(resp.content, raw=False)
+                else:
+                    data = resp.json()
+            except Exception as e:
+                raise RuntimeError(
+                    f"RPC {method_name}: failed to decode response "
+                    f"(status={resp.status_code}): {e}"
+                ) from e
 
-            if not data.get("ok", True):
-                raise RuntimeError(f"RPC Error: {data.get('error')}")
+            if not data.get("ok", False):
+                raise RuntimeError(
+                    f"RPC {method_name} at {self.base_url}: {data.get('error')}"
+                )
 
             return data.get("result", data)
 
@@ -143,9 +160,7 @@ def rpc_decorator(app, path: str, proto_model=None):
                 _log.exception("RPC handler %s raised", fn.__qualname__)
                 return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
-        handler = async_wrapper if is_async else sync_wrapper
-        handler.__name__ = fn.__name__
-        handler.__qualname__ = fn.__qualname__
+        handler = functools.wraps(fn)(async_wrapper if is_async else sync_wrapper)
 
         # Register as POST route with gil=True (RPC typically needs full Python)
         app._engine.route("POST", path, handler, True)

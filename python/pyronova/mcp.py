@@ -27,6 +27,7 @@ Usage::
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 import typing
@@ -152,6 +153,7 @@ class MCPServer:
                 "arguments": arguments or [
                     {"name": p, "required": param.default is inspect.Parameter.empty}
                     for p, param in inspect.signature(fn).parameters.items()
+                    if p not in ("self", "cls")
                 ],
                 "handler": fn,
             }
@@ -214,7 +216,7 @@ class MCPServer:
                 "resources": {"subscribe": False, "listChanged": False},
                 "prompts": {"listChanged": False},
             },
-            "serverInfo": {"name": "pyronova-mcp", "version": __import__("pyronova").__version__},
+            "serverInfo": {"name": "pyronova-mcp", "version": getattr(__import__("pyronova"), "__version__", "dev")},
         }
 
     def _handle_tools_list(self, params: dict) -> dict:
@@ -235,7 +237,13 @@ class MCPServer:
             raise ValueError(f"Unknown tool: {tool_name}")
 
         arguments = params.get("arguments", {})
-        result = tool["handler"](**arguments)
+        if not isinstance(arguments, dict):
+            raise ValueError(f"tool arguments must be an object, got {type(arguments).__name__}")
+        handler = tool["handler"]
+        result = handler(**arguments)
+        # Await async tools
+        if inspect.iscoroutine(result):
+            result = asyncio.run(result)
 
         # Convert result to MCP content format
         if isinstance(result, str):
