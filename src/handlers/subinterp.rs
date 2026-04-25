@@ -293,7 +293,6 @@ pub(crate) async fn handle_request_subinterp(
     let path_log = Arc::clone(&path);
     let (response_tx, response_rx) = tokio::sync::oneshot::channel();
 
-    interp::WorkRequest::inc_created();
     if let Err(e) = pool.submit(interp::WorkRequest {
         handler_idx,
         method: method.to_string(),
@@ -310,6 +309,7 @@ pub(crate) async fn handle_request_subinterp(
         apply_cors(&mut r, pool.cors_config.as_ref());
         return Ok(r);
     }
+    interp::WorkRequest::inc_created();
 
     let result = match tokio::time::timeout(std::time::Duration::from_secs(30), response_rx).await {
         Ok(Ok(r)) => r,

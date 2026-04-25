@@ -86,9 +86,10 @@ fn negotiate(accept_encoding: &str, mask: usize) -> Option<Algo> {
             Some((n, rest)) => {
                 let mut q = 1.0f32;
                 for param in rest.split(';') {
-                    let p = param.trim();
+                    let p = param.trim().to_ascii_lowercase();
                     if let Some(v) = p.strip_prefix("q=") {
-                        q = v.trim().parse().unwrap_or(1.0);
+                        // Malformed q-value → 0.0 (disabled), not 1.0 (max preference).
+                        q = v.trim().parse().unwrap_or(0.0);
                     }
                 }
                 (n.trim(), q)
@@ -224,7 +225,8 @@ fn set_compression_headers(
                 .split(',')
                 .any(|tok| tok.trim().eq_ignore_ascii_case("accept-encoding"))
             {
-                headers.insert(k, format!("{}, Accept-Encoding", v.trim_end()));
+                let v_clean = v.trim_end().trim_end_matches(',').trim_end();
+                headers.insert(k, format!("{v_clean}, Accept-Encoding"));
             }
         }
         None => {
@@ -251,7 +253,8 @@ fn set_compression_headers_vec(
                 .split(',')
                 .any(|tok| tok.trim().eq_ignore_ascii_case("accept-encoding"))
             {
-                let new_val = format!("{}, Accept-Encoding", v.trim_end());
+                let v_clean = v.trim_end().trim_end_matches(',').trim_end();
+                let new_val = format!("{v_clean}, Accept-Encoding");
                 if let Some(entry) = headers.iter_mut().find(|(ek, _)| ek == &k) {
                     entry.1 = new_val;
                 }

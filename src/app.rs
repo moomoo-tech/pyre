@@ -446,10 +446,9 @@ impl PyronovaApp {
         // `PYRONOVA_TPC=0` remains as an escape hatch for unforeseen bugs
         // or niche C-extension loading issues.
         let tpc_incompatible = false;
-        let tpc_forced_off = matches!(
-            std::env::var("PYRONOVA_TPC").ok().as_deref(),
-            Some("0") | Some("off") | Some("no") | Some("false")
-        );
+        let tpc_forced_off = std::env::var("PYRONOVA_TPC")
+            .map(|v| matches!(v.to_ascii_lowercase().as_str(), "0" | "off" | "no" | "false"))
+            .unwrap_or(false);
         let tpc_explicit_opt_in = tpc.unwrap_or(false) || self.tpc || crate::tpc::env_enabled();
         // Explicit opt-in on an incompatible route set is a startup
         // error (existing behavior in run_tpc_subinterp). Implicit
