@@ -429,9 +429,9 @@ impl PyronovaApp {
         // Extra TLS ports: read from PYRONOVA_TLS_PORTS env if not provided.
         let extra_tls_ports: Vec<u16> = extra_tls_ports
             .or_else(|| {
-                std::env::var("PYRONOVA_TLS_PORTS").ok().map(|s| {
-                    s.split(',').filter_map(|p| p.trim().parse().ok()).collect()
-                })
+                std::env::var("PYRONOVA_TLS_PORTS")
+                    .ok()
+                    .map(|s| s.split(',').filter_map(|p| p.trim().parse().ok()).collect())
             })
             .unwrap_or_default();
 
@@ -472,7 +472,12 @@ impl PyronovaApp {
         // or niche C-extension loading issues.
         let tpc_incompatible = false;
         let tpc_forced_off = std::env::var("PYRONOVA_TPC")
-            .map(|v| matches!(v.to_ascii_lowercase().as_str(), "0" | "off" | "no" | "false"))
+            .map(|v| {
+                matches!(
+                    v.to_ascii_lowercase().as_str(),
+                    "0" | "off" | "no" | "false"
+                )
+            })
             .unwrap_or(false);
         let tpc_explicit_opt_in = tpc.unwrap_or(false) || self.tpc || crate::tpc::env_enabled();
         // Explicit opt-in on an incompatible route set is a startup

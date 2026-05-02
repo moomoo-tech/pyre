@@ -247,10 +247,7 @@ fn set_compression_headers(
 /// Same as [`set_compression_headers`] but for the sub-interpreter path where
 /// headers are stored as `Vec<(String, String)>` to support duplicate keys
 /// (e.g. multiple `Set-Cookie` values).
-fn set_compression_headers_vec(
-    headers: &mut Vec<(String, String)>,
-    encoding: &'static str,
-) {
+fn set_compression_headers_vec(headers: &mut Vec<(String, String)>, encoding: &'static str) {
     headers.push(("content-encoding".to_string(), encoding.to_string()));
     // Remove any handler-supplied Content-Length — it reflected the pre-compression
     // size and is now wrong. hyper will recompute from the compressed body.

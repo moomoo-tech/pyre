@@ -208,7 +208,9 @@ pub(crate) fn run_tpc_gil(
 
     for h in handles {
         if let Err(e) = h.join() {
-            let msg = e.downcast_ref::<String>().map(|s| s.as_str())
+            let msg = e
+                .downcast_ref::<String>()
+                .map(|s| s.as_str())
                 .or_else(|| e.downcast_ref::<&str>().copied())
                 .unwrap_or("unknown panic");
             tracing::error!(target: "pyronova::server", panic = msg, "TPC GIL worker thread panicked");
@@ -500,7 +502,9 @@ fn run_tpc_subinterp_per_thread_listener(
 
     for h in handles {
         if let Err(e) = h.join() {
-            let msg = e.downcast_ref::<String>().map(|s| s.as_str())
+            let msg = e
+                .downcast_ref::<String>()
+                .map(|s| s.as_str())
                 .or_else(|| e.downcast_ref::<&str>().copied())
                 .unwrap_or("unknown panic");
             tracing::error!(target: "pyronova::server", panic = msg, "TPC inline worker thread panicked");
@@ -726,7 +730,9 @@ fn run_tpc_subinterp_fanout(
 
     for h in handles {
         if let Err(e) = h.join() {
-            let msg = e.downcast_ref::<String>().map(|s| s.as_str())
+            let msg = e
+                .downcast_ref::<String>()
+                .map(|s| s.as_str())
                 .or_else(|| e.downcast_ref::<&str>().copied())
                 .unwrap_or("unknown panic");
             tracing::error!(target: "pyronova::server", panic = msg, "TPC fanout worker/acceptor thread panicked");

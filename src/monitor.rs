@@ -179,7 +179,11 @@ pub fn stop_rss_sampler() {
 fn page_size_bytes() -> u64 {
     // SAFETY: sysconf with _SC_PAGESIZE is always well-defined, never fails.
     let ps = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
-    if ps > 0 { ps as u64 } else { 4096 }
+    if ps > 0 {
+        ps as u64
+    } else {
+        4096
+    }
 }
 
 /// Get current process RSS in bytes (platform-specific, zero dependencies).

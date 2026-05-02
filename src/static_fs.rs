@@ -75,8 +75,12 @@ pub(crate) async fn try_static_file(
             continue;
         }
         let after_prefix = &req_path[prefix_str.len()..];
-        if !after_prefix.is_empty() && !after_prefix.starts_with('/') {
-            continue; // /static must not match /staticfoo
+        // Guard: /static must not match /staticfoo. Only needed when the
+        // prefix has no trailing slash; a prefix ending in '/' already anchors
+        // the boundary, and after_prefix won't start with '/' in that case.
+        if !prefix_str.ends_with('/') && !after_prefix.is_empty() && !after_prefix.starts_with('/')
+        {
+            continue;
         }
         let rel = after_prefix.trim_start_matches('/');
         if rel.is_empty() {
@@ -191,7 +195,8 @@ pub(crate) async fn try_static_file(
         let bytes = Bytes::from(contents);
         // Atomically reserve space: fetch_add first, then check the new total.
         // If we overshoot the soft cap, roll back and skip caching.
-        let new_total = cache_bytes().fetch_add(bytes.len() as u64, std::sync::atomic::Ordering::Relaxed)
+        let new_total = cache_bytes()
+            .fetch_add(bytes.len() as u64, std::sync::atomic::Ordering::Relaxed)
             + bytes.len() as u64;
         if new_total <= STATIC_CACHE_MAX_BYTES {
             cache().insert(

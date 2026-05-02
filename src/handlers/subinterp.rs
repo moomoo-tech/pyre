@@ -176,7 +176,10 @@ pub(crate) async fn handle_request_subinterp(
         match tokio::time::timeout(std::time::Duration::from_secs(30), limited.collect()).await {
             Ok(Ok(c)) => (c.to_bytes(), None),
             Ok(Err(e)) => {
-                let mut r = if e.downcast_ref::<http_body_util::LengthLimitError>().is_some() {
+                let mut r = if e
+                    .downcast_ref::<http_body_util::LengthLimitError>()
+                    .is_some()
+                {
                     full_body(payload_too_large_response())
                 } else {
                     tracing::warn!(target: "pyronova::handler", error = %e, "body read error");
@@ -242,7 +245,9 @@ pub(crate) async fn handle_request_subinterp(
         let task = tokio::task::spawn_blocking(move || {
             call_handler_with_hooks(routes_ref, handler_idx, sky_req)
         });
-        let handler_result = match tokio::time::timeout(std::time::Duration::from_secs(30), task).await {
+        let handler_result = match tokio::time::timeout(std::time::Duration::from_secs(30), task)
+            .await
+        {
             Ok(Ok(r)) => r,
             Ok(Err(e)) => {
                 tracing::error!(
@@ -337,7 +342,8 @@ pub(crate) async fn handle_request_subinterp(
                 &mut resp.headers,
                 &accept_encoding,
             );
-            let status = StatusCode::from_u16(resp.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            let status =
+                StatusCode::from_u16(resp.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             let mut builder = Response::builder()
                 .status(status)
                 .header("content-type", &ct_owned)

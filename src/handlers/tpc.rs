@@ -322,7 +322,8 @@ pub(crate) async fn handle_request_tpc_inline(
                 &mut resp.headers,
                 &accept_encoding,
             );
-            let status = StatusCode::from_u16(resp.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            let status =
+                StatusCode::from_u16(resp.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             let mut builder = Response::builder()
                 .status(status)
                 .header("content-type", &ct_owned)
