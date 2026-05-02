@@ -27,8 +27,7 @@ pub(crate) fn extract_response_data(
 
         let (body_bytes, auto_ct) = if let Ok(s) = body_bound.cast::<PyString>() {
             let st = s.to_string();
-            let ct = if st.starts_with('{')
-                || (st.starts_with('[') && st.trim_end().ends_with(']'))
+            let ct = if st.starts_with('{') || (st.starts_with('[') && st.trim_end().ends_with(']'))
             {
                 "application/json"
             } else {
@@ -72,9 +71,7 @@ pub(crate) fn extract_response_data(
     // Plain string
     if let Ok(s) = obj.cast::<PyString>() {
         let st = s.to_string();
-        let ct = if st.starts_with('{')
-            || (st.starts_with('[') && st.trim_end().ends_with(']'))
-        {
+        let ct = if st.starts_with('{') || (st.starts_with('[') && st.trim_end().ends_with(']')) {
             "application/json"
         } else {
             "text/plain; charset=utf-8"

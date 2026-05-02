@@ -1368,7 +1368,8 @@ def _attach_pyronova_request_helpers(t):\n    from urllib.parse import parse_qs\
             Some(ct) => py_str(ct).ok_or("failed to create content_type")?,
             None => PyObjRef::from_borrowed(ffi::Py_None()).unwrap(),
         };
-        let py_headers = py_str_dict_from_vec(&resp.headers).ok_or("failed to create headers dict")?;
+        let py_headers =
+            py_str_dict_from_vec(&resp.headers).ok_or("failed to create headers dict")?;
 
         // _Response(body, status_code, content_type, headers)
         let args = PyObjRef::from_owned(ffi::PyTuple_New(0)).ok_or("failed to create args")?;
@@ -1553,7 +1554,9 @@ def _attach_pyronova_request_helpers(t):\n    from urllib.parse import parse_qs\
                                             ffi::PyErr_Clear();
                                             continue;
                                         }
-                                        if let Some(item_str) = PyObjRef::from_owned(ffi::PyObject_Str(item)) {
+                                        if let Some(item_str) =
+                                            PyObjRef::from_owned(ffi::PyObject_Str(item))
+                                        {
                                             if let Ok(v) = pyobj_to_string(item_str.as_ptr()) {
                                                 resp_headers.push((k.clone(), v));
                                             } else {
@@ -1564,7 +1567,8 @@ def _attach_pyronova_request_helpers(t):\n    from urllib.parse import parse_qs\
                                         }
                                     }
                                 } else {
-                                    let str_val = PyObjRef::from_owned(ffi::PyObject_Str(v_obj.as_ptr()));
+                                    let str_val =
+                                        PyObjRef::from_owned(ffi::PyObject_Str(v_obj.as_ptr()));
                                     if let Some(sv) = str_val {
                                         if let Ok(v) = pyobj_to_string(sv.as_ptr()) {
                                             resp_headers.push((k, v));
