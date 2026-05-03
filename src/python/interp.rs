@@ -2496,6 +2496,10 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
+    // Tests that write WORKER_STATES (a process-global) must not run
+    // concurrently — serialize them with this lock.
+    static WORKER_STATES_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// Helper: mint a fresh `Arc<WorkerState>` backed by a dedicated
     /// crossbeam channel so the test has observable state (the rx
     /// handle identifies which install the state came from).
@@ -2524,6 +2528,7 @@ mod tests {
     ///      whatever test-scope clones we held; no double-free).
     #[test]
     fn worker_states_can_be_reinstalled() {
+        let _guard = WORKER_STATES_TEST_LOCK.lock().unwrap();
         // --- Install #1 --------------------------------------------------
         let (s0_first, _tx0_first) = mint_state();
         let (s1_first, _tx1_first) = mint_state();
@@ -2586,6 +2591,7 @@ mod tests {
     /// plumbing.
     #[test]
     fn zombie_worker_rejected_by_pool_id_mismatch() {
+        let _guard = WORKER_STATES_TEST_LOCK.lock().unwrap();
         let (s_new, _tx) = mint_state(); // pool_id = N
         let old_pool_id = s_new.pool_id.wrapping_sub(1); // pretend we're from an earlier pool
 
