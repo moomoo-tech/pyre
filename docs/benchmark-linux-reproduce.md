@@ -29,7 +29,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ## 1. Clone + build
 
 ```bash
-git clone git@github.com:moomoo-tech/pyronova.git
+git clone git@github.com:leocaolab/pyronova.git
 cd pyronova
 python3.14 -m venv .venv
 source .venv/bin/activate

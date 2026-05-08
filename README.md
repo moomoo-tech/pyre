@@ -369,7 +369,7 @@ Pyronova auto-detects which routes need GIL and dispatches accordingly. Fast rou
 
 ```bash
 # From source (requires Rust toolchain + Python 3.12+)
-git clone https://github.com/moomoo-tech/pyronova.git
+git clone https://github.com/leocaolab/pyronova.git
 cd pyronova
 python -m venv .venv && source .venv/bin/activate
 pip install maturin
