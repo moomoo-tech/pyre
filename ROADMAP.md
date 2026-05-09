@@ -380,6 +380,27 @@ def hit_counter(req):
 ## Phase 10 — Next (规划中)
 
 ### 短期
+
+#### Benchmark 优化（HttpArena / TechEmpower 后续 PR）
+当前 PR 落地后的下一轮优化目标，按低分项倒序排列：
+
+- [ ] **CRUD (5.6 / 12k req/s)** — 见 [`docs/optimize-crud.md`](docs/optimize-crud.md)
+  - **前置**: SharedState C-FFI bridge（`src/bridge/state_bridge.rs`，~150 LOC Rust + ~30 LOC Python）—— 把 sub-interp 里的空 mock `SharedState` 换成 bridge-backed 实现，跟 `_PgPool` 同模式
+  - 关键 unlock: `_CRUD_CACHE` Python dict → `SharedState`，去掉所有 `/crud/*` 的 `gil=True`
+  - 预期: 12k → 60–100k（5–10x，从 GIL-bridge 4 worker 池解放到 sub-interp 64 worker）
+- [ ] **Async DB (13.3 / 27k req/s)** — 见 [`docs/optimize-async-db.md`](docs/optimize-async-db.md)
+  - 短期: bulk row decode + prepared statement cache (+15–20%)
+  - 中期: async handler + 并发 query（需要 phase-7.2 async bridge 通到 DB）
+- [ ] **JSON (30.8 / 329k req/s)** — 见 [`docs/optimize-json.md`](docs/optimize-json.md)
+  - 关键: 跳过 `serde_json::Value` 中间树，Python → bytes 直写
+  - 预期 +30–50%；CRUD HIT 路径和 async-db 响应都吃这个红利
+- [ ] **Static (23.3 / 250k req/s)** — 见 [`docs/arena-async-db-and-static.md`](docs/arena-async-db-and-static.md) Part 2 (Design B)
+  - 设计已就绪未落地: 注册时 walk 目录预加载进 fast-response map
+  - 预期: 250k → 500–800k（绕过 `try_static_file` 慢路径 + 两次 canonicalize syscall）
+
+执行顺序建议: optimize-json #1 先落（其余三项的杠杆都建在它上面）→ static preload（独立、无依赖）→ CRUD 迁 SharedState → async-db bulk decode/prepared stmt → async-db async bridge（最后，需 phase-7.2）。
+
+#### 其他短期
 - [ ] HTTP/2 full duplex
 - [ ] OpenTelemetry tracing 集成
 - [ ] Rate limiting middleware
