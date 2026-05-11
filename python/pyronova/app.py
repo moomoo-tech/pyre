@@ -309,6 +309,79 @@ class Pyronova:
         return self._route(method.upper(), path, handler, gil=gil, model=model, stream=stream)
 
     def _route(self, method: str, path: str, handler: Callable | None, *, gil: bool = False, model: type | None = None, stream: bool = False) -> Callable:
+        def _maybe_inject_path_params(fn: Callable) -> Callable:
+            """Wrap *fn* so path-template params land in matching kwargs.
+
+            Hot path stays untouched: handlers whose signature is exactly
+            ``(req)`` are returned unchanged — no shim, no extra frame, no
+            new code path. Only when the signature declares additional
+            parameters do we build a wrapper that pulls them from
+            ``req.params``.
+
+            Sub-interp note: each worker re-execs the user script and
+            looks up handlers by ``__name__`` from module globals, so we
+            return the shim (not the original) when wrapping — that's the
+            object the global binding must point to.
+            """
+            try:
+                sig = inspect.signature(fn)
+            except (TypeError, ValueError):
+                return fn
+            params = list(sig.parameters.values())
+            # First positional param is always the request — skip it.
+            extras = [
+                p for p in params[1:]
+                if p.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+            ]
+            if not extras:
+                return fn  # hot path — byte-identical to today
+            names = tuple(p.name for p in extras)
+            # Cross-check against the URL template so a typo'd kwarg fails
+            # loudly at registration instead of silently injecting None at
+            # request time. matchit accepts both `{id}` and `:id`; we strip
+            # the wrappers and collect param names from the path.
+            template_names = set()
+            i = 0
+            while i < len(path):
+                ch = path[i]
+                if ch == "{":
+                    end = path.find("}", i + 1)
+                    if end == -1:
+                        break
+                    template_names.add(path[i + 1 : end].split(":")[0])
+                    i = end + 1
+                elif ch == ":":
+                    j = i + 1
+                    while j < len(path) and (path[j].isalnum() or path[j] == "_"):
+                        j += 1
+                    if j > i + 1:
+                        template_names.add(path[i + 1 : j])
+                    i = j
+                else:
+                    i += 1
+            missing = [n for n in names if n not in template_names]
+            if missing:
+                raise ValueError(
+                    f"handler {fn.__name__!r} declares parameter(s) {missing!r} "
+                    f"that are not in the URL template {path!r}. Path-param "
+                    f"injection only fills names that appear as `{{name}}` "
+                    f"or `:name` in the route path."
+                )
+
+            is_async = inspect.iscoroutinefunction(fn)
+            if is_async:
+                async def shim(req):
+                    p = req.params
+                    return await fn(req, **{n: p.get(n) for n in names})
+            else:
+                def shim(req):
+                    p = req.params
+                    return fn(req, **{n: p.get(n) for n in names})
+            shim.__name__ = fn.__name__
+            shim.__qualname__ = fn.__qualname__
+            shim.__wrapped__ = fn  # Pylance / static analyzers see original sig
+            return shim
+
         def _wrap_with_model(fn: Callable, mdl: type) -> Callable:
             """Wrap handler to auto-validate request body with Pydantic model."""
             import inspect
@@ -371,15 +444,25 @@ class Pyronova:
         if handler is not None:
             if model is not None:
                 handler = _wrap_with_model(handler, model)
+            else:
+                handler = _maybe_inject_path_params(handler)
             self._engine.route(method, path, handler, gil, stream)
             _record(handler)
             return handler
 
         def decorator(fn: Callable) -> Callable:
-            wrapped = _wrap_with_model(fn, model) if model is not None else fn
+            if model is not None:
+                wrapped = _wrap_with_model(fn, model)
+            else:
+                wrapped = _maybe_inject_path_params(fn)
             self._engine.route(method, path, wrapped, gil, stream)
             _record(fn)
-            return fn  # Return original for type hints
+            # When wrapping was a no-op `wrapped is fn` — return fn for
+            # type hints (today's behavior). When we injected a shim,
+            # return the shim so the module-global binding points at it;
+            # sub-interp workers look handlers up by __name__ from globals
+            # and would otherwise resurrect the original on each worker.
+            return fn if wrapped is fn else wrapped
 
         return decorator
 
