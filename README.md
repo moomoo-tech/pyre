@@ -12,62 +12,95 @@ Built on Per-Interpreter GIL (PEP 684) and a Rust async core, Pyronova runs Pyth
 - Sustained **400k QPS**: RSS grew **4 MB over 73.8M requests** in 180s
   (≈0 B/req). Zero errors, zero leaks.
 
-### What's new in v1.6
+### What's new in v2.3 (2026-04-23)
 
-- **`pyronova` CLI** — `pyronova run <module:app>` (prod), `pyronova dev <module:app>`
-  (hot-reload + debug logging), `pyronova routes <module:app>` (print the
-  route table). `python -m pyronova ...` works the same way.
-- **Kubernetes health probes** — one-liner `app.enable_health_probes()`
-  registers `/livez` (always 200) and `/readyz` (runs every
+- **TPC GIL bridge: single thread → N workers.** I/O-bound `gil=True`
+  handlers (numpy, pandas, `time.sleep`, blocking DB drivers) used to
+  serialize on one bridge thread — the released GIL went unused while
+  work piled up to 503. v2.3 replaces it with a crossbeam-MPMC worker
+  pool; each released GIL is picked up by a peer worker. Default 4
+  workers, knobs: `PYRONOVA_GIL_BRIDGE_WORKERS`, `_CAPACITY`. Measured
+  on a 5 ms `time.sleep` handler at c=64: single-thread ~200 req/s with
+  99.96% 503s → 4-thread ~777 req/s with 0 drops.
+- **Sub-interpreter DB bridge now works under TPC.** The bridge used to
+  panic (`Cannot start a runtime from within a runtime`) the moment a
+  DB-backed handler without `gil=True` ran under TPC. Fix: `rt.spawn` +
+  `sync_channel` instead of nested `block_on`. Parallelism ceiling
+  becomes `min(sub_interp_workers, DATABASE_MAX_CONN)`. Arena
+  `/async-db` dropped `gil=True`: 15k → **35k req/s @ c=4096**.
+- **`@cached_json(ttl=...)`** — per-worker response cache for public
+  read endpoints. First call within TTL runs the handler and stashes
+  JSON bytes; hits short-circuit handler + `json.dumps`. 100-row JSON
+  on 7840HS: 68k → **336k req/s** (5.0× throughput).
+- **Access-log sampling** — `app.enable_logging(sample=100,
+  always_log_status=400)`. Logs 1-in-N requests, always logs ≥ 400.
+  Avoids the 25-30% throughput tax of full-traffic logging at 400k+ req/s.
+
+### v2.0 — Renamed to Pyronova (BREAKING)
+
+**Every import shape changed.** "Pyre" collided with Meta's type
+checker; we renamed to Pyronova.
+
+```python
+# v1.x
+from pyreframework import Pyre, PyreRequest, PyreResponse, PyreWebSocket, PyreStream
+app = Pyre()
+
+# v2.x
+from pyronova   import Pyronova, Request,    Response,    WebSocket,    Stream
+app = Pyronova()
+```
+
+Also changed: PyPI package (`pip install pyronova`), CLI (`pyronova
+run/dev/routes`), env vars (`PYRONOVA_HOST`, `PYRONOVA_PORT`,
+`PYRONOVA_WORKERS`, `PYRONOVA_TLS_CERT`, …), Rust crate, FFI symbols,
+log targets. **No alias layer** — clean break.
+
+Migration is mechanical:
+
+```bash
+git grep -l pyreframework | xargs sed -i 's/pyreframework/pyronova/g'
+git grep -l '\bPyre\b'    | xargs sed -i 's/\bPyre\b/Pyronova/g'
+git grep -l PyreRequest   | xargs sed -i 's/PyreRequest/Request/g'
+git grep -l PyreResponse  | xargs sed -i 's/PyreResponse/Response/g'
+# repeat for PyreWebSocket, PyreStream, PyreBodyStream, PyreRPCClient, PyreSettings
+git grep -l PYRE_         | xargs sed -i 's/PYRE_/PYRONOVA_/g'
+```
+
+Full migration table + rationale: [CHANGELOG.md#v200](CHANGELOG.md#v200-2026-04-21).
+
+### Other v2 features (carried over from v1.6 work)
+
+- **`pyronova` CLI** — `pyronova run <module:app>` (prod),
+  `pyronova dev <module:app>` (hot-reload + debug), `pyronova routes`
+  (print route table). `python -m pyronova …` works the same way.
+- **Kubernetes health probes** — `app.enable_health_probes()` registers
+  `/livez` (always 200) and `/readyz` (runs every
   `@app.readiness_check("name")`, sync or async; any failure → 503 with
   JSON diagnostics).
-- **Prometheus metrics** — `app.enable_metrics()` exposes
-  `GET /metrics` with RED-style counters (total, by status class, by
-  method, latency sum + count). Counters live in `app.state` so they
+- **Prometheus metrics** — `app.enable_metrics()` exposes `GET /metrics`
+  with RED-style counters. Counters live in `app.state` so they
   aggregate across sub-interpreter workers.
 - **X-Request-ID** — `app.enable_request_id()` mints a UUID if the
-  client didn't send one, echoes it back on every response, and pushes
-  it into the per-request `ctx` for downstream handlers.
+  client didn't send one, echoes it back, pushes it into per-request
+  `ctx`.
 - **Request-scoped context** — `from pyronova.context import ctx`;
-  `ContextVar`-backed `ctx.get/set/request_id()`, reset per request so
-  recycled worker threads don't leak state.
+  `ContextVar`-backed `ctx.get/set/request_id()`, reset per request.
 - **`Settings`** — thin pydantic-settings base (lazy import, opt-in)
-  with Pyronova-friendly defaults (case-insensitive, ignore unknown, `.env`).
+  with Pyronova-friendly defaults (case-insensitive, ignore unknown,
+  `.env`).
 - **TestClient v2** — `params=`, persistent cookie jar,
-  `follow_redirects=False`, `OPTIONS`/`HEAD`, `.ok`/`.raise_for_status()`,
-  `websocket_connect()` via the `websockets` package.
-- **Streaming DB cursor** — `pool.fetch_iter(sql, ...)` yields Postgres
-  rows with O(1) memory (see `docs/positioning-and-roadmap.md`).
-- **Misc.**: admission gate skipped for small bodies (fixes HTTP/2
-  regression), `drain_count()` on `BodyStream` for upload
-  throughput, fast-path responses with zero-cost guard, TLS handshake
-  10 s timeout (Slowloris).
+  `follow_redirects=False`, `OPTIONS`/`HEAD`, `.ok` /
+  `.raise_for_status()`, `websocket_connect()` via the `websockets`
+  package.
+- **Streaming DB cursor** — `pool.fetch_iter(sql, …)` yields Postgres
+  rows with O(1) memory.
 
-### What's new in v1.5.0
+### Earlier history
 
-- **Sub-interpreter memory-leak root cause closed.** Unbounded RSS growth
-  under sustained load, present since v1.4.0, traced to cross-thread
-  `PyThreadState` reuse and fixed via `PyThreadState_New` per worker.
-  See `docs/advisor-triage-2026-04-19.md` and
-  [CHANGELOG](CHANGELOG.md#v150-2026-04-19) for the full writeup.
-- **Raw C-API `_Request` type** built via `PyType_FromSpec` with
-  a deterministic Rust-owned `tp_dealloc` — replaces the Python-class
-  stub, closes a CPython `subtype_dealloc` hazard, restores proper
-  `__del__` / `tp_finalize` semantics in sub-interp handlers.
-- **22 correctness / hygiene fixes** from an adversarial review pass
-  (C-API reentrancy, graceful shutdown, TOCTOU in static file serving,
-  CORS misconfig warnings, URL-decoded path params, async middleware
-  driving, …).
-- **Awaitable detection via `tp_as_async->am_await` pointer probe**
-  replaces the μs-level `PyObject_HasAttrString("__await__")`.
-- **Benchmark infrastructure split** — `just bench-record` / `bench-compare`
-  gate on a minimal plaintext target; `just bench-features` measures
-  the full demo; `just bench-tfb-plaintext` runs TechEmpower pipeline=16.
-- **Breaking:** `requires-python = ">=3.13"` (was `>=3.10`). Uses
-  `PyThreadState_GetUnchecked` added in CPython 3.13.
-
-Full benchmark (v1.4.0 baseline, unchanged methodology):
-[benchmarks/benchmark-14-linux.en.md](benchmarks/benchmark-14-linux.en.md)
+For the sub-interpreter memory-leak root-cause fix (v1.5), raw C-API
+`_Request` type rebuild, 22-fix adversarial-review pass, and the
+v1.4.0 Linux 420k req/s milestone, see [CHANGELOG.md](CHANGELOG.md).
 
 ### What others can't do, Pyronova has built-in
 
@@ -368,7 +401,7 @@ Pyronova auto-detects which routes need GIL and dispatches accordingly. Fast rou
 ## Install
 
 ```bash
-# From source (requires Rust toolchain + Python 3.12+)
+# From source (requires Rust toolchain + Python 3.13+)
 git clone https://github.com/leocaolab/pyronova.git
 cd pyronova
 python -m venv .venv && source .venv/bin/activate
@@ -738,13 +771,16 @@ def analyze(req):
 
 **When fixed:** When PyO3 ([#3451](https://github.com/PyO3/pyo3/issues/3451)) and numpy ([#24003](https://github.com/numpy/numpy/issues/24003)) add PEP 684 support.
 
-### Python 3.12+ required
+### Python 3.13+ required
 
-**What:** Pyronova requires Python 3.12 or later.
+**What:** Pyronova requires Python 3.13 or later.
 
-**Why:** Per-Interpreter GIL (PEP 684) was introduced in Python 3.12. This is the core technology that enables Pyronova's parallelism.
+**Why:** Per-Interpreter GIL (PEP 684) was introduced in Python 3.12, but
+v1.5.0 onwards uses `PyThreadState_GetUnchecked` and the new tstate
+rebinding helper added in CPython 3.13 to close a per-request memory
+leak. Earlier 3.12 builds cannot run this code path safely.
 
-**Workaround:** None. Python 3.12+ is required. Consider using [pyenv](https://github.com/pyenv/pyenv) to manage multiple Python versions.
+**Workaround:** None. Python 3.13+ is required. Consider using [pyenv](https://github.com/pyenv/pyenv) to manage multiple Python versions.
 
 ### Build from source
 
@@ -768,7 +804,7 @@ def analyze(req):
 
 ## Requirements
 
-- Python 3.12+ (PEP 684 sub-interpreters)
+- Python 3.13+ (PEP 684 sub-interpreters + `PyThreadState_GetUnchecked`)
 - Rust toolchain (build from source)
 - macOS or Linux
 
