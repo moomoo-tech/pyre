@@ -38,7 +38,7 @@ def client():
     def decoded(req, slug):
         return {"slug": slug}
 
-    c = TestClient(app, port=19891)
+    c = TestClient(app)
     yield c
     c.close()
 

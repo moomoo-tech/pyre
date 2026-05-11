@@ -77,7 +77,7 @@ def client():
     def index(req):
         return {"ok": True}
 
-    c = TestClient(app, port=19891)
+    c = TestClient(app)
     yield c
     c.close()
 
