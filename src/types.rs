@@ -190,10 +190,11 @@ impl PyronovaRequest {
         Ok(pyo3::types::PyString::new(py, s))
     }
 
-    /// Parse JSON in Rust (serde_json) → convert to Python objects (pythonize).
-    /// ~3x faster than Python's json.loads for typical API payloads.
+    /// Parse JSON in Rust → convert to Python objects (pythonize).
+    /// Uses sonic-rs (SIMD-accelerated) for the parse step; output is a
+    /// serde_json::Value so pythonize can convert it to Python objects.
     fn json<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::PyAny>> {
-        let parsed: serde_json::Value = serde_json::from_slice(&self.body_bytes).map_err(|e| {
+        let parsed: serde_json::Value = sonic_rs::from_slice(&self.body_bytes).map_err(|e| {
             pyo3::exceptions::PyValueError::new_err(format!("JSON parse error: {e}"))
         })?;
         pythonize::pythonize(py, &parsed)
