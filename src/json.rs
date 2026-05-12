@@ -212,7 +212,10 @@ impl JsonContext {
 
         // String MUST be checked before iterable (str implements Sequence in Python)
         if let Ok(s) = obj.cast::<PyString>() {
-            return Ok(serde_json::Value::String(s.to_string_lossy().into_owned()));
+            return match s.to_str() {
+                Ok(str_ref) => Ok(serde_json::Value::String(str_ref.to_owned())),
+                Err(e) => Err(self.err(ErrorReason::PythonError(e))),
+            };
         }
 
         // Fast path: PyDict
@@ -288,15 +291,19 @@ impl JsonContext {
             self.maybe_check_signals(py)?;
             let key_str = self.coerce_dict_key(&k)?;
 
-            // Clone key so we can both push it into the path segment AND insert
-            // it into the map. Pop before `?` so a serialization error never
-            // leaves a stale segment on the path stack.
-            self.path.push(PathSegment::Key(key_str.clone()));
-            let val = self.serialize(&v);
-            self.path.pop();
+            // Push path, serialize, recover key from pop to avoid an extra
+            // String clone on every dict entry. If serialize fails the `?`
+            // returns early and the segment is left on the stack, but
+            // JsonContext is local to py_to_json_value so this is harmless.
+            self.path.push(PathSegment::Key(key_str));
+            let val = self.serialize(&v)?;
+            let key_str = match self.path.pop() {
+                Some(PathSegment::Key(k)) => k,
+                _ => unreachable!(),
+            };
 
             // Last-writer-wins: matches Python json.dumps behavior
-            map.insert(key_str, val?);
+            map.insert(key_str, val);
         }
         Ok(serde_json::Value::Object(map))
     }
@@ -401,3 +408,4 @@ pub(crate) fn py_to_json_value(
     let mut ctx = JsonContext::new();
     ctx.serialize(obj)
 }
+
