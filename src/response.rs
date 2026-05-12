@@ -20,7 +20,35 @@ pub(crate) fn extract_response_data(
     py: Python<'_>,
     obj: Bound<'_, pyo3::PyAny>,
 ) -> Result<ResponseData, String> {
-    // PyronovaResponse
+    // dict / list → JSON — most common return type; checked first to skip
+    // the PyronovaResponse cast on the hot path.
+    if obj.cast::<PyDict>().is_ok() || obj.cast::<PyList>().is_ok() {
+        let json_bytes = py_to_json_bytes(&obj).map_err(|e| format!("json error: {e}"))?;
+        return Ok(ResponseData {
+            body: json_bytes,
+            content_type: "application/json".to_string(),
+            status: 200,
+            headers: HashMap::new(),
+        });
+    }
+
+    // Plain string
+    if let Ok(s) = obj.cast::<PyString>() {
+        let st = s.to_string();
+        let ct = if st.starts_with('{') || (st.starts_with('[') && st.trim_end().ends_with(']')) {
+            "application/json"
+        } else {
+            "text/plain; charset=utf-8"
+        };
+        return Ok(ResponseData {
+            body: Bytes::from(st),
+            content_type: ct.to_string(),
+            status: 200,
+            headers: HashMap::new(),
+        });
+    }
+
+    // PyronovaResponse — custom status / headers / content-type
     if let Ok(resp) = obj.cast::<PyronovaResponse>() {
         let resp = resp.get();
         let body_bound = resp.body.bind(py);
@@ -64,33 +92,6 @@ pub(crate) fn extract_response_data(
             content_type,
             status: resp.status_code,
             headers: resp.headers.clone(),
-        });
-    }
-
-    // Plain string
-    if let Ok(s) = obj.cast::<PyString>() {
-        let st = s.to_string();
-        let ct = if st.starts_with('{') || (st.starts_with('[') && st.trim_end().ends_with(']')) {
-            "application/json"
-        } else {
-            "text/plain; charset=utf-8"
-        };
-        return Ok(ResponseData {
-            body: Bytes::from(st),
-            content_type: ct.to_string(),
-            status: 200,
-            headers: HashMap::new(),
-        });
-    }
-
-    // dict / list → JSON
-    if obj.cast::<PyDict>().is_ok() || obj.cast::<PyList>().is_ok() {
-        let json_bytes = py_to_json_bytes(&obj).map_err(|e| format!("json error: {e}"))?;
-        return Ok(ResponseData {
-            body: json_bytes,
-            content_type: "application/json".to_string(),
-            status: 200,
-            headers: HashMap::new(),
         });
     }
 
