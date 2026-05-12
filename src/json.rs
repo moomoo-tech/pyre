@@ -1,7 +1,7 @@
 use pyo3::prelude::*;
 use pyo3::types::{
-    PyBool, PyByteArray, PyBytes, PyDict, PyFloat, PyInt, PyList, PyMapping, PyNone, PyString,
-    PyTuple,
+    PyBool, PyByteArray, PyBytes, PyDict, PyFloat, PyFrozenSet, PyInt, PyList, PyMapping, PyNone,
+    PySet, PyString, PyTuple,
 };
 use std::collections::HashSet;
 use std::fmt::{self, Write as _};
@@ -30,10 +30,13 @@ pub(crate) enum ErrorReason {
     UnsupportedType(String),
     UnsupportedDictKey(String),
     InvalidFloat(f64),
-    Interrupted,
+    // Carries the original Python exception so callers can inspect or re-raise
+    // it with full traceback intact (e.g. KeyboardInterrupt, ValueError from a
+    // generator, TypeError from a custom Mapping).
+    PythonError(PyErr),
 }
 
-/// Structured error carrying the precise JSON Path where failure occurred.
+/// Structured error carrying the precise JSON path where failure occurred.
 #[derive(Debug)]
 pub(crate) struct PyJsonError {
     path: String,
@@ -70,14 +73,26 @@ impl fmt::Display for PyJsonError {
                     self.path, v
                 )
             }
-            ErrorReason::Interrupted => {
-                write!(f, "Serialization interrupted by signal at {}", self.path)
+            ErrorReason::PythonError(e) => {
+                write!(f, "Python exception at {}: {}", self.path, e)
             }
         }
     }
 }
 
 impl std::error::Error for PyJsonError {}
+
+/// Re-raise as the original Python exception when possible, otherwise wrap in
+/// TypeError. Lets call sites do `map_err(PyErr::from)?` without losing the
+/// original traceback.
+impl From<PyJsonError> for PyErr {
+    fn from(err: PyJsonError) -> Self {
+        match err.reason {
+            ErrorReason::PythonError(py_err) => py_err,
+            _ => pyo3::exceptions::PyTypeError::new_err(err.to_string()),
+        }
+    }
+}
 
 fn type_name_of(obj: &Bound<'_, pyo3::PyAny>) -> String {
     obj.get_type()
@@ -118,8 +133,10 @@ impl JsonContext {
     fn maybe_check_signals(&mut self, py: Python<'_>) -> Result<(), PyJsonError> {
         self.element_count += 1;
         if self.element_count.is_multiple_of(SIGNAL_CHECK_INTERVAL) {
+            // Preserve the original PyErr (e.g. KeyboardInterrupt) so callers
+            // can re-raise it rather than receiving a generic message.
             py.check_signals()
-                .map_err(|_| self.err(ErrorReason::Interrupted))?;
+                .map_err(|e| self.err(ErrorReason::PythonError(e)))?;
         }
         Ok(())
     }
@@ -157,10 +174,30 @@ impl JsonContext {
         }
 
         if let Ok(i) = obj.cast::<PyInt>() {
+            // i64 covers the common case (signed 64-bit).
             if let Ok(v) = i.extract::<i64>() {
                 return Ok(serde_json::Value::Number(v.into()));
             }
-            return Ok(serde_json::Value::String(i.to_string()));
+            // u64 covers positive values up to 2^64−1.
+            if let Ok(v) = i.extract::<u64>() {
+                return Ok(serde_json::Value::Number(v.into()));
+            }
+            // For integers beyond u64::MAX we convert to f64. Precision is
+            // lost above 2^53, but the value stays a JSON Number rather than
+            // being silently coerced to a String (wrong type for downstream).
+            // Enabling serde_json's `arbitrary_precision` feature would give
+            // exact round-trip, but allocates a heap String for every Number
+            // — too expensive at 400k+ req/s for the common i64/u64 case.
+            let fv = i
+                .extract::<f64>()
+                .unwrap_or(f64::MAX);
+            if let Some(n) = serde_json::Number::from_f64(fv) {
+                return Ok(serde_json::Value::Number(n));
+            }
+            return Err(self.err(ErrorReason::UnsupportedType(format!(
+                "int value not representable as JSON number: {}",
+                i.to_string()
+            ))));
         }
 
         if let Ok(f) = obj.cast::<PyFloat>() {
@@ -193,8 +230,16 @@ impl JsonContext {
             return self.serialize_seq(tuple.iter().map(Ok), tuple.len(), obj.py());
         }
 
-        // Reject bytes/bytearray — they implement Sequence but should not become int arrays
+        // Reject bytes/bytearray — they implement Sequence but must not become int arrays
         if obj.cast::<PyBytes>().is_ok() || obj.cast::<PyByteArray>().is_ok() {
+            return Err(self.err(ErrorReason::UnsupportedType(type_name_of(obj))));
+        }
+
+        // Reject set/frozenset explicitly. Without this guard the duck-type
+        // iterable fallback below would silently produce a JSON array with
+        // non-deterministic ordering. stdlib json.dumps raises TypeError for
+        // sets; surface the bug to the developer instead of hiding it.
+        if obj.cast::<PySet>().is_ok() || obj.cast::<PyFrozenSet>().is_ok() {
             return Err(self.err(ErrorReason::UnsupportedType(type_name_of(obj))));
         }
 
@@ -205,17 +250,27 @@ impl JsonContext {
                     let len = mapping.len().unwrap_or(0);
                     return self.serialize_mapping_items(&items, len, obj.py());
                 }
-                Err(_) => {
-                    return Err(self.err(ErrorReason::UnsupportedType(
-                        "Mapping.items() raised an exception".into(),
-                    )));
+                Err(e) => {
+                    return Err(self.err(ErrorReason::PythonError(e)));
                 }
             }
         }
 
-        // Duck type: any iterable (deque, generators, etc.) — O(1) per step
+        // Duck type: any iterable (deque, generators, etc.) — O(1) per step.
+        // Snapshot path before the iterator so the closure doesn't borrow
+        // `self` while `serialize_seq` holds `&mut self`.
         if let Ok(iter) = obj.try_iter() {
-            return self.serialize_seq(iter.map(|r| r.map_err(|_| ())), 0, obj.py());
+            let err_path = self.current_path();
+            return self.serialize_seq(
+                iter.map(move |r| {
+                    r.map_err(|e| PyJsonError {
+                        path: err_path.clone(),
+                        reason: ErrorReason::PythonError(e),
+                    })
+                }),
+                0,
+                obj.py(),
+            );
         }
 
         Err(self.err(ErrorReason::UnsupportedType(type_name_of(obj))))
@@ -233,16 +288,15 @@ impl JsonContext {
             self.maybe_check_signals(py)?;
             let key_str = self.coerce_dict_key(&k)?;
 
-            // Push path, serialize, pop — then recover key from the segment to avoid clone
-            self.path.push(PathSegment::Key(key_str));
-            let val = self.serialize(&v)?;
-            let key_str = match self.path.pop() {
-                Some(PathSegment::Key(k)) => k,
-                _ => unreachable!(),
-            };
+            // Clone key so we can both push it into the path segment AND insert
+            // it into the map. Pop before `?` so a serialization error never
+            // leaves a stale segment on the path stack.
+            self.path.push(PathSegment::Key(key_str.clone()));
+            let val = self.serialize(&v);
+            self.path.pop();
 
             // Last-writer-wins: matches Python json.dumps behavior
-            map.insert(key_str, val);
+            map.insert(key_str, val?);
         }
         Ok(serde_json::Value::Object(map))
     }
@@ -260,21 +314,18 @@ impl JsonContext {
 
             let k = item
                 .get_item(0)
-                .map_err(|_| self.err(ErrorReason::UnsupportedType("bad mapping item".into())))?;
+                .map_err(|e| self.err(ErrorReason::PythonError(e)))?;
             let v = item
                 .get_item(1)
-                .map_err(|_| self.err(ErrorReason::UnsupportedType("bad mapping item".into())))?;
+                .map_err(|e| self.err(ErrorReason::PythonError(e)))?;
 
             let key_str = self.coerce_dict_key(&k)?;
 
-            self.path.push(PathSegment::Key(key_str));
-            let val = self.serialize(&v)?;
-            let key_str = match self.path.pop() {
-                Some(PathSegment::Key(k)) => k,
-                _ => unreachable!(),
-            };
+            self.path.push(PathSegment::Key(key_str.clone()));
+            let val = self.serialize(&v);
+            self.path.pop();
 
-            map.insert(key_str, val);
+            map.insert(key_str, val?);
         }
         Ok(serde_json::Value::Object(map))
     }
@@ -283,21 +334,18 @@ impl JsonContext {
     /// Infallible iterators (PyList, PyTuple) pass `.map(Ok)`.
     fn serialize_seq<'py>(
         &mut self,
-        iter: impl Iterator<Item = Result<Bound<'py, pyo3::PyAny>, ()>>,
+        iter: impl Iterator<Item = Result<Bound<'py, pyo3::PyAny>, PyJsonError>>,
         capacity: usize,
         py: Python<'py>,
     ) -> Result<serde_json::Value, PyJsonError> {
         let mut arr = Vec::with_capacity(capacity);
         for (idx, item_result) in iter.enumerate() {
             self.maybe_check_signals(py)?;
-            let item = item_result.map_err(|_| {
-                self.err(ErrorReason::UnsupportedType(
-                    "iterator yielded an error".into(),
-                ))
-            })?;
+            let item = item_result?;
             self.path.push(PathSegment::Index(idx));
-            arr.push(self.serialize(&item)?);
+            let val = self.serialize(&item);
             self.path.pop();
+            arr.push(val?);
         }
         Ok(serde_json::Value::Array(arr))
     }
@@ -327,7 +375,14 @@ impl JsonContext {
             if fv.is_nan() || fv.is_infinite() {
                 return Err(self.err(ErrorReason::InvalidFloat(fv)));
             }
-            return Ok(fv.to_string());
+            // Match Python json.dumps: whole-number floats always include the
+            // decimal point (1.0 → "1.0", not "1" as Rust's Display produces).
+            let s = fv.to_string();
+            return Ok(if s.contains('.') || s.contains('e') || s.contains('E') {
+                s
+            } else {
+                format!("{s}.0")
+            });
         }
 
         if k.cast::<PyNone>().is_ok() {
@@ -339,7 +394,7 @@ impl JsonContext {
 }
 
 /// Convert a Python object to a serde_json::Value.
-/// Errors include JSON Path context (e.g. `$.users[2].score`).
+/// Errors include JSON path context (e.g. `$.users[2].score`).
 pub(crate) fn py_to_json_value(
     obj: &pyo3::Bound<'_, pyo3::PyAny>,
 ) -> Result<serde_json::Value, PyJsonError> {
