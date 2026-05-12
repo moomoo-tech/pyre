@@ -228,11 +228,13 @@ impl JsonContext {
 
         // Fast path: PyDict
         if let Ok(dict) = obj.cast::<PyDict>() {
+            self.out.reserve(dict.len().saturating_mul(16));
             return self.serialize_dict(dict.iter(), obj.py());
         }
 
         // Fast path: PyList
         if let Ok(list) = obj.cast::<PyList>() {
+            self.out.reserve(list.len().saturating_mul(8));
             return self.serialize_array(list.iter().map(Ok), obj.py());
         }
 
@@ -283,6 +285,7 @@ impl JsonContext {
 
         // Fast path: PyTuple
         if let Ok(tuple) = obj.cast::<PyTuple>() {
+            self.out.reserve(tuple.len().saturating_mul(8));
             return self.serialize_array(tuple.iter().map(Ok), obj.py());
         }
 
@@ -364,6 +367,7 @@ impl JsonContext {
         items: &Bound<'py, PyList>,
         py: Python<'py>,
     ) -> Result<(), PyJsonError> {
+        self.out.reserve(items.len().saturating_mul(16));
         self.out.push(b'{');
         let mut first = true;
         for item in items.iter() {
