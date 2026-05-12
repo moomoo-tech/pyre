@@ -117,6 +117,18 @@ impl PyronovaRequest {
         self.params.iter().cloned().collect()
     }
 
+    /// Look up a single path parameter by name.
+    ///
+    /// Avoids the Vec→HashMap conversion that `.params` triggers. Path
+    /// params are typically 0-3 entries, so a linear scan is O(1) in practice
+    /// and cheaper than building a HashMap for a single lookup.
+    fn param(&self, key: &str) -> Option<String> {
+        self.params
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.clone())
+    }
+
     /// Lazy headers: converts raw HeaderMap → dict only on first access.
     #[getter]
     fn headers(&self) -> HashMap<String, String> {
