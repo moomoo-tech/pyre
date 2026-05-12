@@ -9,20 +9,6 @@ use std::fmt::{self, Write as _};
 const MAX_DEPTH: usize = 256;
 const SIGNAL_CHECK_INTERVAL: usize = 1000;
 
-enum PathSegment {
-    Key(String),
-    Index(usize),
-}
-
-impl fmt::Display for PathSegment {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Key(k) => write!(f, ".{}", k),
-            Self::Index(i) => write!(f, "[{}]", i),
-        }
-    }
-}
-
 #[derive(Debug)]
 pub(crate) enum ErrorReason {
     CircularReference,
@@ -34,6 +20,12 @@ pub(crate) enum ErrorReason {
     // it with full traceback intact (e.g. KeyboardInterrupt, ValueError from a
     // generator, TypeError from a custom Mapping).
     PythonError(PyErr),
+}
+
+impl From<PyErr> for ErrorReason {
+    fn from(err: PyErr) -> Self {
+        ErrorReason::PythonError(err)
+    }
 }
 
 /// Structured error carrying the precise JSON path where failure occurred.
@@ -101,8 +93,14 @@ fn type_name_of(obj: &Bound<'_, pyo3::PyAny>) -> String {
 }
 
 pub(crate) struct JsonContext {
-    visited: HashSet<usize>,
-    path: Vec<PathSegment>,
+    // Raw pointer used directly — Rust implements Hash+Eq for *mut T via
+    // address, which is exactly the object-identity semantics we need.
+    visited: HashSet<*mut pyo3::ffi::PyObject>,
+    // Single reusable buffer: segments are appended on descent and truncated
+    // on ascent. One allocation for the entire serialization, zero per-key
+    // clones on the hot path.
+    path_buffer: String,
+    depth: usize,
     element_count: usize,
 }
 
@@ -110,22 +108,15 @@ impl JsonContext {
     fn new() -> Self {
         Self {
             visited: HashSet::new(),
-            path: Vec::new(),
+            path_buffer: String::from("$"),
+            depth: 0,
             element_count: 0,
         }
     }
 
-    fn current_path(&self) -> String {
-        let mut s = String::from("$");
-        for seg in &self.path {
-            write!(s, "{}", seg).ok();
-        }
-        s
-    }
-
     fn err(&self, reason: ErrorReason) -> PyJsonError {
         PyJsonError {
-            path: self.current_path(),
+            path: self.path_buffer.clone(),
             reason,
         }
     }
@@ -133,10 +124,7 @@ impl JsonContext {
     fn maybe_check_signals(&mut self, py: Python<'_>) -> Result<(), PyJsonError> {
         self.element_count += 1;
         if self.element_count.is_multiple_of(SIGNAL_CHECK_INTERVAL) {
-            // Preserve the original PyErr (e.g. KeyboardInterrupt) so callers
-            // can re-raise it rather than receiving a generic message.
-            py.check_signals()
-                .map_err(|e| self.err(ErrorReason::PythonError(e)))?;
+            py.check_signals().map_err(|e| self.err(e.into()))?;
         }
         Ok(())
     }
@@ -145,11 +133,11 @@ impl JsonContext {
         &mut self,
         obj: &Bound<'_, pyo3::PyAny>,
     ) -> Result<serde_json::Value, PyJsonError> {
-        if self.path.len() > MAX_DEPTH {
-            return Err(self.err(ErrorReason::MaxDepthExceeded(self.path.len())));
+        if self.depth > MAX_DEPTH {
+            return Err(self.err(ErrorReason::MaxDepthExceeded(self.depth)));
         }
 
-        let ptr = obj.as_ptr() as usize;
+        let ptr = obj.as_ptr();
         if !self.visited.insert(ptr) {
             return Err(self.err(ErrorReason::CircularReference));
         }
@@ -166,6 +154,25 @@ impl JsonContext {
     ) -> Result<serde_json::Value, PyJsonError> {
         if obj.is_none() {
             return Ok(serde_json::Value::Null);
+        }
+
+        // String first — most common leaf type in JSON payloads; also must
+        // precede the iterable fallback (str implements Sequence in Python).
+        if let Ok(s) = obj.cast::<PyString>() {
+            return match s.to_str() {
+                Ok(str_ref) => Ok(serde_json::Value::String(str_ref.to_owned())),
+                Err(e) => Err(self.err(e.into())),
+            };
+        }
+
+        // Fast path: PyDict
+        if let Ok(dict) = obj.cast::<PyDict>() {
+            return self.serialize_dict_pairs(dict.iter(), dict.len(), obj.py());
+        }
+
+        // Fast path: PyList
+        if let Ok(list) = obj.cast::<PyList>() {
+            return self.serialize_seq(list.iter().map(Ok), list.len(), obj.py());
         }
 
         // cast_exact: match PyBool before PyInt to prevent subclass confusion
@@ -188,9 +195,7 @@ impl JsonContext {
             // Enabling serde_json's `arbitrary_precision` feature would give
             // exact round-trip, but allocates a heap String for every Number
             // — too expensive at 400k+ req/s for the common i64/u64 case.
-            let fv = i
-                .extract::<f64>()
-                .unwrap_or(f64::MAX);
+            let fv = i.extract::<f64>().unwrap_or(f64::MAX);
             if let Some(n) = serde_json::Number::from_f64(fv) {
                 return Ok(serde_json::Value::Number(n));
             }
@@ -208,24 +213,6 @@ impl JsonContext {
             if let Some(n) = serde_json::Number::from_f64(v) {
                 return Ok(serde_json::Value::Number(n));
             }
-        }
-
-        // String MUST be checked before iterable (str implements Sequence in Python)
-        if let Ok(s) = obj.cast::<PyString>() {
-            return match s.to_str() {
-                Ok(str_ref) => Ok(serde_json::Value::String(str_ref.to_owned())),
-                Err(e) => Err(self.err(ErrorReason::PythonError(e))),
-            };
-        }
-
-        // Fast path: PyDict
-        if let Ok(dict) = obj.cast::<PyDict>() {
-            return self.serialize_dict_pairs(dict.iter(), dict.len(), obj.py());
-        }
-
-        // Fast path: PyList
-        if let Ok(list) = obj.cast::<PyList>() {
-            return self.serialize_seq(list.iter().map(Ok), list.len(), obj.py());
         }
 
         // Fast path: PyTuple
@@ -253,9 +240,7 @@ impl JsonContext {
                     let len = mapping.len().unwrap_or(0);
                     return self.serialize_mapping_items(&items, len, obj.py());
                 }
-                Err(e) => {
-                    return Err(self.err(ErrorReason::PythonError(e)));
-                }
+                Err(e) => return Err(self.err(e.into())),
             }
         }
 
@@ -263,12 +248,12 @@ impl JsonContext {
         // Snapshot path before the iterator so the closure doesn't borrow
         // `self` while `serialize_seq` holds `&mut self`.
         if let Ok(iter) = obj.try_iter() {
-            let err_path = self.current_path();
+            let err_path = self.path_buffer.clone();
             return self.serialize_seq(
                 iter.map(move |r| {
                     r.map_err(|e| PyJsonError {
                         path: err_path.clone(),
-                        reason: ErrorReason::PythonError(e),
+                        reason: e.into(),
                     })
                 }),
                 0,
@@ -291,19 +276,17 @@ impl JsonContext {
             self.maybe_check_signals(py)?;
             let key_str = self.coerce_dict_key(&k)?;
 
-            // Push path, serialize, recover key from pop to avoid an extra
-            // String clone on every dict entry. If serialize fails the `?`
-            // returns early and the segment is left on the stack, but
-            // JsonContext is local to py_to_json_value so this is harmless.
-            self.path.push(PathSegment::Key(key_str));
-            let val = self.serialize(&v)?;
-            let key_str = match self.path.pop() {
-                Some(PathSegment::Key(k)) => k,
-                _ => unreachable!(),
-            };
+            // Append the key segment, serialize the value, then truncate back.
+            // key_str is not moved into the buffer — only its chars are written —
+            // so it can be moved directly into the map after truncate: zero clones.
+            let orig = self.path_buffer.len();
+            write!(&mut self.path_buffer, ".{}", key_str).ok();
+            self.depth += 1;
+            let val = self.serialize(&v);
+            self.path_buffer.truncate(orig);
+            self.depth -= 1;
 
-            // Last-writer-wins: matches Python json.dumps behavior
-            map.insert(key_str, val);
+            map.insert(key_str, val?);
         }
         Ok(serde_json::Value::Object(map))
     }
@@ -319,18 +302,17 @@ impl JsonContext {
         for item in items.iter() {
             self.maybe_check_signals(py)?;
 
-            let k = item
-                .get_item(0)
-                .map_err(|e| self.err(ErrorReason::PythonError(e)))?;
-            let v = item
-                .get_item(1)
-                .map_err(|e| self.err(ErrorReason::PythonError(e)))?;
+            let k = item.get_item(0).map_err(|e| self.err(e.into()))?;
+            let v = item.get_item(1).map_err(|e| self.err(e.into()))?;
 
             let key_str = self.coerce_dict_key(&k)?;
 
-            self.path.push(PathSegment::Key(key_str.clone()));
+            let orig = self.path_buffer.len();
+            write!(&mut self.path_buffer, ".{}", key_str).ok();
+            self.depth += 1;
             let val = self.serialize(&v);
-            self.path.pop();
+            self.path_buffer.truncate(orig);
+            self.depth -= 1;
 
             map.insert(key_str, val?);
         }
@@ -349,9 +331,14 @@ impl JsonContext {
         for (idx, item_result) in iter.enumerate() {
             self.maybe_check_signals(py)?;
             let item = item_result?;
-            self.path.push(PathSegment::Index(idx));
+
+            let orig = self.path_buffer.len();
+            write!(&mut self.path_buffer, "[{}]", idx).ok();
+            self.depth += 1;
             let val = self.serialize(&item);
-            self.path.pop();
+            self.path_buffer.truncate(orig);
+            self.depth -= 1;
+
             arr.push(val?);
         }
         Ok(serde_json::Value::Array(arr))
@@ -361,7 +348,10 @@ impl JsonContext {
     /// Supports: str, bool, int, float, None (matching Python json.dumps).
     fn coerce_dict_key(&self, k: &Bound<'_, pyo3::PyAny>) -> Result<String, PyJsonError> {
         if let Ok(py_str) = k.cast::<PyString>() {
-            return Ok(py_str.to_string_lossy().into_owned());
+            return match py_str.to_str() {
+                Ok(s) => Ok(s.to_owned()),
+                Err(e) => Err(self.err(e.into())),
+            };
         }
 
         // bool before int (bool is int subclass in Python)
@@ -408,4 +398,3 @@ pub(crate) fn py_to_json_value(
     let mut ctx = JsonContext::new();
     ctx.serialize(obj)
 }
-
