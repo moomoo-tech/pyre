@@ -87,6 +87,24 @@ def client():
         # set inside a nested structure produces a TypeError with path context
         return {"users": [1, {1, 2}]}
 
+    @app.get("/escape")
+    def escape(req):
+        return {
+            "quote": '"',
+            "backslash": "\\",
+            "newline": "\n",
+            "carriage": "\r",
+            "tab": "\t",
+            "backspace": "\x08",
+            "formfeed": "\x0c",
+            "nul": "\x00",
+            "other_ctrl": "\x1f",
+        }
+
+    @app.get("/unicode")
+    def unicode_passthrough(req):
+        return {"msg": "你好，世界！🔥"}
+
     c = TestClient(app)
     yield c
     c.close()
@@ -200,3 +218,38 @@ def test_nested_error_includes_path(client):
     """A set inside a nested list must produce a 500 (not silently corrupt)."""
     r = client.get("/nested-error")
     assert r.status_code == 500
+
+
+def test_string_escaping(client):
+    """write_str_escaped must produce valid JSON for all special characters."""
+    r = client.get("/escape")
+    assert r.status_code == 200
+    # json.loads round-trip proves each character was correctly escaped
+    d = r.json()
+    assert d["quote"] == '"'
+    assert d["backslash"] == "\\"
+    assert d["newline"] == "\n"
+    assert d["carriage"] == "\r"
+    assert d["tab"] == "\t"
+    assert d["backspace"] == "\x08"
+    assert d["formfeed"] == "\x0c"
+    assert d["nul"] == "\x00"
+    assert d["other_ctrl"] == "\x1f"
+    # Raw bytes must use the short named escapes, not \u00XX, for the common ones
+    raw = r.text
+    assert r'\"' in raw
+    assert r'\\' in raw
+    assert r'\n' in raw
+    assert r'\r' in raw
+    assert r'\t' in raw
+    assert r'\b' in raw
+    assert r'\f' in raw
+
+
+def test_unicode_passthrough(client):
+    """Non-ASCII UTF-8 must pass through unescaped (ensure_ascii=False style)."""
+    r = client.get("/unicode")
+    assert r.status_code == 200
+    assert r.json() == {"msg": "你好，世界！🔥"}
+    # Characters must appear as UTF-8 bytes, not \uXXXX escapes
+    assert "你好" in r.text
