@@ -4,7 +4,7 @@ use pyo3::types::{
     PySet, PyString, PyTuple,
 };
 use std::collections::HashSet;
-use std::fmt::{self, Write as FmtWrite};
+use std::fmt;
 
 const MAX_DEPTH: usize = 256;
 const SIGNAL_CHECK_INTERVAL: usize = 1000;
@@ -350,7 +350,8 @@ impl JsonContext {
             self.out.push(b':');
 
             let orig = self.path_buffer.len();
-            write!(&mut self.path_buffer, ".{}", key_str).ok();
+            self.path_buffer.push('.');
+            self.path_buffer.push_str(&key_str);
             self.depth += 1;
             let result = self.serialize(&v);
             self.path_buffer.truncate(orig);
@@ -386,7 +387,8 @@ impl JsonContext {
             self.out.push(b':');
 
             let orig = self.path_buffer.len();
-            write!(&mut self.path_buffer, ".{}", key_str).ok();
+            self.path_buffer.push('.');
+            self.path_buffer.push_str(&key_str);
             self.depth += 1;
             let result = self.serialize(&v);
             self.path_buffer.truncate(orig);
@@ -416,7 +418,10 @@ impl JsonContext {
             first = false;
 
             let orig = self.path_buffer.len();
-            write!(&mut self.path_buffer, "[{}]", idx).ok();
+            self.path_buffer.push('[');
+            let mut ibuf = itoa::Buffer::new();
+            self.path_buffer.push_str(ibuf.format(idx));
+            self.path_buffer.push(']');
             self.depth += 1;
             let result = self.serialize(&item);
             self.path_buffer.truncate(orig);
