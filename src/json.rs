@@ -1,3 +1,5 @@
+use bytes::Bytes;
+use parking_lot::Mutex;
 use pyo3::prelude::*;
 use pyo3::types::{
     PyBool, PyByteArray, PyBytes, PyDict, PyFloat, PyFrozenSet, PyInt, PyList, PyMapping, PyNone,
@@ -25,6 +27,39 @@ const fn build_escape_table() -> [u8; 256] {
     t
 }
 static ESCAPE_TABLE: [u8; 256] = build_escape_table();
+
+// ---------------------------------------------------------------------------
+// Global output-buffer pool
+// ---------------------------------------------------------------------------
+
+// parking_lot::Mutex is const-constructible and uncontended at ~ns cost.
+// Bounded at 64 buffers (≈ 2× typical worker-thread count) so memory usage
+// is bounded; buffers over 1 MiB are discarded rather than hoarded.
+static BUFFER_POOL: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
+
+/// `Vec<u8>` wrapper that returns its buffer to `BUFFER_POOL` on drop.
+/// Wrapped in `Bytes::from_owner(...)` so the buffer lives until the HTTP
+/// layer finishes writing — then returns without an extra memcpy.
+struct PooledVec(Vec<u8>);
+
+impl AsRef<[u8]> for PooledVec {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl Drop for PooledVec {
+    fn drop(&mut self) {
+        let mut v = std::mem::take(&mut self.0);
+        if v.capacity() <= 1 << 20 {
+            v.clear();
+            let mut pool = BUFFER_POOL.lock();
+            if pool.len() < 64 {
+                pool.push(v);
+            }
+        }
+    }
+}
 
 #[derive(Debug)]
 pub(crate) enum ErrorReason {
@@ -177,6 +212,20 @@ impl JsonContext {
             signal_countdown: SIGNAL_CHECK_INTERVAL,
             out: Vec::with_capacity(512),
         }
+    }
+
+    fn new_with_buf(buf: Vec<u8>) -> Self {
+        Self {
+            visited: HashSet::new(),
+            path_buffer: String::from("$"),
+            depth: 0,
+            signal_countdown: SIGNAL_CHECK_INTERVAL,
+            out: buf,
+        }
+    }
+
+    fn into_buf(self) -> Vec<u8> {
+        self.out
     }
 
     fn err(&self, reason: ErrorReason) -> PyJsonError {
@@ -482,12 +531,16 @@ impl JsonContext {
 }
 
 /// Serialize a Python object directly to JSON bytes.
-/// Skips the serde_json::Value intermediate tree — single pass, one allocation.
-/// Errors include JSON path context (e.g. `$.users[2].score`).
+///
+/// Grabs a pre-warmed `Vec<u8>` from `BUFFER_POOL` (zero allocation after
+/// the first few requests), writes JSON in a single pass, then wraps the
+/// buffer in `Bytes::from_owner` so it is returned to the pool when the HTTP
+/// layer drops the response body — true zero-copy, zero per-request malloc.
 pub(crate) fn py_to_json_bytes(
     obj: &pyo3::Bound<'_, pyo3::PyAny>,
-) -> Result<Vec<u8>, PyJsonError> {
-    let mut ctx = JsonContext::new();
+) -> Result<Bytes, PyJsonError> {
+    let buf = BUFFER_POOL.lock().pop().unwrap_or_else(|| Vec::with_capacity(4096));
+    let mut ctx = JsonContext::new_with_buf(buf);
     ctx.serialize(obj)?;
-    Ok(ctx.out)
+    Ok(Bytes::from_owner(PooledVec(ctx.into_buf())))
 }

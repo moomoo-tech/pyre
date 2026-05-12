@@ -37,7 +37,7 @@ pub(crate) fn extract_response_data(
         } else if body_bound.cast::<PyDict>().is_ok() || body_bound.cast::<PyList>().is_ok() {
             let json_bytes =
                 py_to_json_bytes(body_bound).map_err(|e| format!("json error: {e}"))?;
-            (Bytes::from(json_bytes), "application/json")
+            (json_bytes, "application/json")
         } else if let Ok(pb) = body_bound.cast::<PyBytes>() {
             // Fast path for PyBytes: one copy (PyBytes buffer → Bytes
             // heap) instead of PyBytes::extract which builds a
@@ -87,7 +87,7 @@ pub(crate) fn extract_response_data(
     if obj.cast::<PyDict>().is_ok() || obj.cast::<PyList>().is_ok() {
         let json_bytes = py_to_json_bytes(&obj).map_err(|e| format!("json error: {e}"))?;
         return Ok(ResponseData {
-            body: Bytes::from(json_bytes),
+            body: json_bytes,
             content_type: "application/json".to_string(),
             status: 200,
             headers: HashMap::new(),
