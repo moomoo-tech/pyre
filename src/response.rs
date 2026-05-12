@@ -8,7 +8,7 @@ pub(crate) const SERVER_HEADER: &str = concat!("Pyronova/", env!("CARGO_PKG_VERS
 use pyo3::prelude::*;
 use pyo3::types::{PyAnyMethods, PyDict, PyList, PyString};
 
-use crate::json::py_to_json_value;
+use crate::json::py_to_json_bytes;
 use crate::types::{PyronovaResponse, ResponseData};
 use pyo3::types::PyBytes;
 
@@ -35,9 +35,8 @@ pub(crate) fn extract_response_data(
             };
             (Bytes::from(st), ct)
         } else if body_bound.cast::<PyDict>().is_ok() || body_bound.cast::<PyList>().is_ok() {
-            let val = py_to_json_value(body_bound).map_err(|e| format!("json error: {e}"))?;
             let json_bytes =
-                sonic_rs::to_vec(&val).map_err(|e| format!("json serialize error: {e}"))?;
+                py_to_json_bytes(body_bound).map_err(|e| format!("json error: {e}"))?;
             (Bytes::from(json_bytes), "application/json")
         } else if let Ok(pb) = body_bound.cast::<PyBytes>() {
             // Fast path for PyBytes: one copy (PyBytes buffer → Bytes
@@ -84,24 +83,9 @@ pub(crate) fn extract_response_data(
         });
     }
 
-    // dict → JSON
-    if obj.cast::<PyDict>().is_ok() {
-        let val = py_to_json_value(&obj).map_err(|e| format!("json error: {e}"))?;
-        let json_bytes =
-            sonic_rs::to_vec(&val).map_err(|e| format!("json serialize error: {e}"))?;
-        return Ok(ResponseData {
-            body: Bytes::from(json_bytes),
-            content_type: "application/json".to_string(),
-            status: 200,
-            headers: HashMap::new(),
-        });
-    }
-
-    // list → JSON
-    if obj.cast::<PyList>().is_ok() {
-        let val = py_to_json_value(&obj).map_err(|e| format!("json error: {e}"))?;
-        let json_bytes =
-            sonic_rs::to_vec(&val).map_err(|e| format!("json serialize error: {e}"))?;
+    // dict / list → JSON
+    if obj.cast::<PyDict>().is_ok() || obj.cast::<PyList>().is_ok() {
+        let json_bytes = py_to_json_bytes(&obj).map_err(|e| format!("json error: {e}"))?;
         return Ok(ResponseData {
             body: Bytes::from(json_bytes),
             content_type: "application/json".to_string(),

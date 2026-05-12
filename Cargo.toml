@@ -60,6 +60,8 @@ tokio-rustls = "0.26"
 rustls = { version = "0.23", default-features = false, features = ["std", "ring", "logging", "tls12"] }
 rustls-pemfile = "2"
 pin-project-lite = "0.2"
+itoa = "1"
+ryu = "1"
 sqlx = { version = "0.8", default-features = false, features = [
     "runtime-tokio-rustls",
     "postgres",
