@@ -371,6 +371,31 @@ impl JsonContext {
         Err(self.err(ErrorReason::UnsupportedType(type_name_of(obj))))
     }
 
+    /// Write one key-value pair into the current JSON object.
+    /// Handles comma, key escaping, colon, path update, recursive value
+    /// serialization, and path restore — shared by dict and mapping paths.
+    fn emit_kv(
+        &mut self,
+        key: &str,
+        v: &Bound<'_, pyo3::PyAny>,
+        first: &mut bool,
+    ) -> Result<(), PyJsonError> {
+        if !*first {
+            self.out.push(b',');
+        }
+        *first = false;
+        write_str_escaped(&mut self.out, key);
+        self.out.push(b':');
+        let orig = self.path_buffer.len();
+        self.path_buffer.push('.');
+        self.path_buffer.push_str(key);
+        self.depth += 1;
+        let result = self.serialize(v);
+        self.path_buffer.truncate(orig);
+        self.depth -= 1;
+        result
+    }
+
     /// Serialize a PyDict iterator directly to `{...}` bytes.
     fn serialize_dict<'py>(
         &mut self,
@@ -381,24 +406,16 @@ impl JsonContext {
         let mut first = true;
         for (k, v) in iter {
             self.maybe_check_signals(py)?;
-            let key_str = self.coerce_dict_key(&k)?;
-
-            if !first {
-                self.out.push(b',');
+            // Fast path: PyString key — borrow &str directly, zero allocation.
+            // Bound<'py,T> is Copy so k.cast() works without consuming k.
+            if let Ok(py_str) = k.cast::<PyString>() {
+                let s = py_str.to_str().map_err(|e| self.err(e.into()))?;
+                self.emit_kv(s, &v, &mut first)?;
+                continue;
             }
-            first = false;
-
-            write_str_escaped(&mut self.out, &key_str);
-            self.out.push(b':');
-
-            let orig = self.path_buffer.len();
-            self.path_buffer.push('.');
-            self.path_buffer.push_str(&key_str);
-            self.depth += 1;
-            let result = self.serialize(&v);
-            self.path_buffer.truncate(orig);
-            self.depth -= 1;
-            result?;
+            // Slow path: bool / int / float / None key — allocates one String.
+            let key_str = self.coerce_dict_key(&k)?;
+            self.emit_kv(&key_str, &v, &mut first)?;
         }
         self.out.push(b'}');
         Ok(())
@@ -415,27 +432,16 @@ impl JsonContext {
         let mut first = true;
         for item in items.iter() {
             self.maybe_check_signals(py)?;
-
             let k = item.get_item(0).map_err(|e| self.err(e.into()))?;
             let v = item.get_item(1).map_err(|e| self.err(e.into()))?;
-            let key_str = self.coerce_dict_key(&k)?;
-
-            if !first {
-                self.out.push(b',');
+            // Same fast/slow split as serialize_dict.
+            if let Ok(py_str) = k.cast::<PyString>() {
+                let s = py_str.to_str().map_err(|e| self.err(e.into()))?;
+                self.emit_kv(s, &v, &mut first)?;
+                continue;
             }
-            first = false;
-
-            write_str_escaped(&mut self.out, &key_str);
-            self.out.push(b':');
-
-            let orig = self.path_buffer.len();
-            self.path_buffer.push('.');
-            self.path_buffer.push_str(&key_str);
-            self.depth += 1;
-            let result = self.serialize(&v);
-            self.path_buffer.truncate(orig);
-            self.depth -= 1;
-            result?;
+            let key_str = self.coerce_dict_key(&k)?;
+            self.emit_kv(&key_str, &v, &mut first)?;
         }
         self.out.push(b'}');
         Ok(())
@@ -474,16 +480,10 @@ impl JsonContext {
         Ok(())
     }
 
-    /// Coerce a Python dict key to a JSON string.
-    /// Supports: str, bool, int, float, None (matching Python json.dumps).
+    /// Coerce a non-string Python dict key to a JSON string.
+    /// Callers handle the PyString fast path (zero alloc) before reaching here.
+    /// Supports: bool, int, float, None (matching Python json.dumps).
     fn coerce_dict_key(&self, k: &Bound<'_, pyo3::PyAny>) -> Result<String, PyJsonError> {
-        if let Ok(py_str) = k.cast::<PyString>() {
-            return match py_str.to_str() {
-                Ok(s) => Ok(s.to_owned()),
-                Err(e) => Err(self.err(e.into())),
-            };
-        }
-
         // bool before int (bool is int subclass in Python)
         if let Ok(b) = k.cast_exact::<PyBool>() {
             return Ok(if b.is_true() {
