@@ -123,6 +123,24 @@ impl PyronovaRequest {
         self.resolved_headers().clone()
     }
 
+    /// Look up a single header by name without converting the full header map.
+    ///
+    /// Prefers the already-computed cache (populated by a prior `.headers`
+    /// access) so both paths stay consistent. When the cache is cold this
+    /// costs one `HeaderMap::get` call instead of allocating N strings.
+    fn header(&self, key: &str) -> Option<String> {
+        if let Some(cache) = self.headers_cache.get() {
+            return cache.get(key).cloned();
+        }
+        match &self.headers_source {
+            LazyHeaders::Raw(hm) => hm
+                .get(key)
+                .and_then(|v| v.to_str().ok())
+                .map(String::from),
+            LazyHeaders::Converted(m) => m.get(key).cloned(),
+        }
+    }
+
     /// Lazy: heap-allocates the IP string only when Python reads `req.client_ip`.
     #[getter]
     fn client_ip(&self) -> String {
