@@ -10,6 +10,22 @@ const MAX_DEPTH: usize = 256;
 const SIGNAL_CHECK_INTERVAL: usize = 1000;
 const HEX: &[u8; 16] = b"0123456789abcdef";
 
+/// Compile-time table: 1 for every byte that must be escaped in a JSON string.
+/// Fits in 256 bytes (< one cache line cluster). LLVM uses this as a gather
+/// source for its auto-vectorized scan of the input string.
+const fn build_escape_table() -> [u8; 256] {
+    let mut t = [0u8; 256];
+    let mut i = 0u8;
+    while i < 0x20 {
+        t[i as usize] = 1; // C0 control characters
+        i += 1;
+    }
+    t[b'"' as usize] = 1;
+    t[b'\\' as usize] = 1;
+    t
+}
+static ESCAPE_TABLE: [u8; 256] = build_escape_table();
+
 #[derive(Debug)]
 pub(crate) enum ErrorReason {
     CircularReference,
@@ -94,41 +110,45 @@ fn type_name_of(obj: &Bound<'_, pyo3::PyAny>) -> String {
 }
 
 /// Write a JSON-escaped, double-quoted string directly into `out`.
-/// Processes input in bulk chunks between escape points — no per-byte allocation.
+///
+/// The inner loop uses `Iterator::position` over a 256-byte lookup table so
+/// LLVM can auto-vectorize the scan with SSE2/AVX2 `pcmpeqb`/`pshufb` when
+/// the target supports it — no unsafe code needed.
 fn write_str_escaped(out: &mut Vec<u8>, s: &str) {
     out.push(b'"');
     let bytes = s.as_bytes();
     let mut start = 0;
-    for (i, &byte) in bytes.iter().enumerate() {
-        let esc: &[u8] = match byte {
-            b'"' => b"\\\"",
-            b'\\' => b"\\\\",
-            b'\x08' => b"\\b",
-            b'\x0c' => b"\\f",
-            b'\n' => b"\\n",
-            b'\r' => b"\\r",
-            b'\t' => b"\\t",
-            // Remaining C0 controls (non-overlapping with the arms above)
-            0x00..=0x07 | 0x0b | 0x0e..=0x1f => {
-                out.extend_from_slice(&bytes[start..i]);
-                out.extend_from_slice(&[
-                    b'\\',
-                    b'u',
-                    b'0',
-                    b'0',
-                    HEX[(byte >> 4) as usize],
-                    HEX[(byte & 0xf) as usize],
-                ]);
-                start = i + 1;
-                continue;
-            }
-            _ => continue,
-        };
-        out.extend_from_slice(&bytes[start..i]);
-        out.extend_from_slice(esc);
-        start = i + 1;
+    loop {
+        // Bulk-copy the next run of bytes that need no escaping.
+        // LLVM recognizes the table-lookup predicate and emits a vectorized scan.
+        let end = bytes[start..]
+            .iter()
+            .position(|&b| ESCAPE_TABLE[b as usize] != 0)
+            .map_or(bytes.len(), |p| start + p);
+        out.extend_from_slice(&bytes[start..end]);
+        if end == bytes.len() {
+            break;
+        }
+        let byte = bytes[end];
+        match byte {
+            b'"' => out.extend_from_slice(b"\\\""),
+            b'\\' => out.extend_from_slice(b"\\\\"),
+            b'\x08' => out.extend_from_slice(b"\\b"),
+            b'\x0c' => out.extend_from_slice(b"\\f"),
+            b'\n' => out.extend_from_slice(b"\\n"),
+            b'\r' => out.extend_from_slice(b"\\r"),
+            b'\t' => out.extend_from_slice(b"\\t"),
+            _ => out.extend_from_slice(&[
+                b'\\',
+                b'u',
+                b'0',
+                b'0',
+                HEX[(byte >> 4) as usize],
+                HEX[(byte & 0xf) as usize],
+            ]),
+        }
+        start = end + 1;
     }
-    out.extend_from_slice(&bytes[start..]);
     out.push(b'"');
 }
 
