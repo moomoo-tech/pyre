@@ -160,7 +160,9 @@ pub(crate) struct JsonContext {
     // on ascent — zero per-key clones on the hot path.
     path_buffer: String,
     depth: usize,
-    element_count: usize,
+    // Countdown to next signal check. Counts down from SIGNAL_CHECK_INTERVAL
+    // to 0; a compare-to-zero is cheaper than the previous modulo.
+    signal_countdown: usize,
     // Output buffer written directly — eliminates the serde_json::Value
     // intermediate tree and the separate sonic_rs serialization pass.
     out: Vec<u8>,
@@ -172,7 +174,7 @@ impl JsonContext {
             visited: HashSet::new(),
             path_buffer: String::from("$"),
             depth: 0,
-            element_count: 0,
+            signal_countdown: SIGNAL_CHECK_INTERVAL,
             out: Vec::with_capacity(512),
         }
     }
@@ -185,8 +187,9 @@ impl JsonContext {
     }
 
     fn maybe_check_signals(&mut self, py: Python<'_>) -> Result<(), PyJsonError> {
-        self.element_count += 1;
-        if self.element_count.is_multiple_of(SIGNAL_CHECK_INTERVAL) {
+        self.signal_countdown -= 1;
+        if self.signal_countdown == 0 {
+            self.signal_countdown = SIGNAL_CHECK_INTERVAL;
             py.check_signals().map_err(|e| self.err(e.into()))?;
         }
         Ok(())
