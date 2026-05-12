@@ -204,16 +204,6 @@ pub(crate) struct JsonContext {
 }
 
 impl JsonContext {
-    fn new() -> Self {
-        Self {
-            visited: HashSet::new(),
-            path_buffer: String::from("$"),
-            depth: 0,
-            signal_countdown: SIGNAL_CHECK_INTERVAL,
-            out: Vec::with_capacity(512),
-        }
-    }
-
     fn new_with_buf(buf: Vec<u8>) -> Self {
         Self {
             visited: HashSet::new(),
