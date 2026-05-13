@@ -91,8 +91,8 @@ pub fn slot_rc_report() -> String {
     let mut s = String::from("slot rc@dealloc histogram:\n");
     for (i, name) in slots.iter().enumerate() {
         s.push_str(&format!("  {:10}", name));
-        for b in 0..8 {
-            let n = SLOT_RC[i][b].load(Ordering::Relaxed);
+        for (b, cell) in SLOT_RC[i].iter().enumerate() {
+            let n = cell.load(Ordering::Relaxed);
             let label = if b == 7 {
                 "7+".to_string()
             } else {

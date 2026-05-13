@@ -810,18 +810,22 @@ impl WorkRequest {
     pub fn created_count() -> u64 {
         #[cfg(feature = "leak_detect")]
         {
-            return WR_CREATED.load(std::sync::atomic::Ordering::Relaxed);
+            WR_CREATED.load(std::sync::atomic::Ordering::Relaxed)
         }
         #[cfg(not(feature = "leak_detect"))]
-        0
+        {
+            0
+        }
     }
     pub fn dropped_count() -> u64 {
         #[cfg(feature = "leak_detect")]
         {
-            return WR_COMPLETED.load(std::sync::atomic::Ordering::Relaxed);
+            WR_COMPLETED.load(std::sync::atomic::Ordering::Relaxed)
         }
         #[cfg(not(feature = "leak_detect"))]
-        0
+        {
+            0
+        }
     }
 }
 

@@ -382,7 +382,7 @@ pub(crate) fn run_tpc_subinterp(
                 extra_tls,
             );
         }
-        return run_tpc_subinterp_per_thread_listener(
+        run_tpc_subinterp_per_thread_listener(
             addr,
             n_threads,
             n_cpus,
@@ -391,7 +391,7 @@ pub(crate) fn run_tpc_subinterp(
             tls_acceptor,
             main_bridge,
             extra_tls,
-        );
+        )
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -522,6 +522,7 @@ fn run_tpc_subinterp_per_thread_listener(
 /// wake per TCP connection, which is amortized to ~0 under HTTP keep-
 /// alive (one wake serves the connection's full request lifetime).
 #[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
 fn run_tpc_subinterp_fanout(
     addr: SocketAddr,
     n_threads: usize,
@@ -578,14 +579,14 @@ fn run_tpc_subinterp_fanout(
 
     let mut handles = Vec::with_capacity(n_threads + 1);
 
-    for i in 0..n_threads {
+    for (i, rx_slot) in worker_rxs.iter_mut().enumerate().take(n_threads) {
         let core_id = core_ids.get(i).copied();
         let worker = workers.remove(0);
         let routes_arc = Arc::clone(&routes);
         let shutdown_w = shutdown.clone();
         let tls = tls_acceptor.clone();
         let bridge = main_bridge.clone();
-        let rx = worker_rxs[i]
+        let rx = rx_slot
             .take()
             .expect("worker_rxs slot must be populated");
 
