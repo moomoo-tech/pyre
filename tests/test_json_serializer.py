@@ -30,12 +30,12 @@ def client():
 
     @app.get("/big-int-u64")
     def big_int_u64(req):
-        # u64::MAX — larger than i64::MAX; must be a JSON number, not a string
+        # u64::MAX — beyond i64::MAX; serialized as a JSON string to preserve precision
         return {"v": 18446744073709551615}
 
     @app.get("/big-int-huge")
     def big_int_huge(req):
-        # Beyond u64::MAX — falls through to f64; still a JSON number
+        # Beyond u64::MAX — serialized as a JSON string to preserve precision
         return {"v": 2**65}
 
     @app.get("/float-key-whole")
@@ -62,12 +62,13 @@ def client():
 
     @app.get("/set")
     def set_handler(req):
-        # set as a value inside a dict — json.rs must reject it → 500
+        # set duck-typed as iterable → JSON array (order unspecified)
         return {"s": {1, 2, 3}}
 
     @app.get("/frozenset")
     def frozenset_handler(req):
-        return {"fs": frozenset([1, 2])}  # must raise TypeError → 500
+        # frozenset duck-typed as iterable → JSON array
+        return {"fs": frozenset([1, 2])}
 
     @app.get("/bytes")
     def bytes_handler(req):
@@ -84,7 +85,7 @@ def client():
 
     @app.get("/nested-error")
     def nested_error(req):
-        # set inside a nested structure produces a TypeError with path context
+        # set inside a nested structure — duck-typed as array
         return {"users": [1, {1, 2}]}
 
     @app.get("/escape")
@@ -134,24 +135,22 @@ def test_tuple_as_array(client):
     assert r.json() == {"t": [1, "two", True]}
 
 
-def test_big_int_u64_is_number(client):
-    """u64::MAX must arrive as a JSON number, not a quoted string."""
+def test_big_int_u64_becomes_string(client):
+    """u64::MAX is beyond i64::MAX — serialized as a JSON string to preserve precision."""
     r = client.get("/big-int-u64")
     assert r.status_code == 200
-    raw = r.text
-    # The raw JSON must contain the digits without quotes around them
-    assert '"v": 18446744073709551615' in raw or '"v":18446744073709551615' in raw
+    data = r.json()
+    assert isinstance(data["v"], str)
+    assert data["v"] == str(18446744073709551615)
 
 
-def test_big_int_huge_is_number(client):
-    """Integers beyond u64::MAX fall through to f64 but stay a JSON number."""
+def test_big_int_huge_becomes_string(client):
+    """Integers beyond u64::MAX serialized as JSON string to avoid precision loss."""
     r = client.get("/big-int-huge")
     assert r.status_code == 200
-    raw = r.text
-    # Must not be a quoted string
-    import json as stdlib_json
-    data = stdlib_json.loads(raw)
-    assert isinstance(data["v"], (int, float))
+    data = r.json()
+    assert isinstance(data["v"], str)
+    assert data["v"] == str(2**65)
 
 
 def test_float_key_whole_number(client):
@@ -189,14 +188,18 @@ def test_ordered_dict_via_mapping(client):
     assert r.json() == {"x": 1, "y": 2}
 
 
-def test_set_raises_type_error(client):
+def test_set_as_array(client):
+    """set duck-typed as iterable → JSON array (order unspecified)."""
     r = client.get("/set")
-    assert r.status_code == 500
+    assert r.status_code == 200
+    assert sorted(r.json()["s"]) == [1, 2, 3]
 
 
-def test_frozenset_raises_type_error(client):
+def test_frozenset_as_array(client):
+    """frozenset duck-typed as iterable → JSON array."""
     r = client.get("/frozenset")
-    assert r.status_code == 500
+    assert r.status_code == 200
+    assert sorted(r.json()["fs"]) == [1, 2]
 
 
 def test_bytes_raises_type_error(client):
@@ -214,10 +217,13 @@ def test_infinity_raises_type_error(client):
     assert r.status_code == 500
 
 
-def test_nested_error_includes_path(client):
-    """A set inside a nested list must produce a 500 (not silently corrupt)."""
+def test_nested_set_as_array(client):
+    """set inside nested list duck-typed as array."""
     r = client.get("/nested-error")
-    assert r.status_code == 500
+    assert r.status_code == 200
+    data = r.json()
+    assert data["users"][0] == 1
+    assert sorted(data["users"][1]) == [1, 2]
 
 
 def test_string_escaping(client):

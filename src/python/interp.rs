@@ -169,8 +169,11 @@ unsafe fn pyronova_recv_inner(args: *mut ffi::PyObject) -> *mut ffi::PyObject {
             // Build ALL Python objects BEFORE inserting response_tx into map.
             // If any allocation fails, response_tx drops → sender gets error
             // instead of leaking in response_map and causing 504 timeout.
+            // extract_headers deferred here from Tokio thread — O(n_headers)
+            // HashMap build now runs on the worker thread.
+            let headers_map = crate::types::extract_headers(&req.headers);
             let py_params = py_str_dict_from_vec(&req.params);
-            let py_headers = py_str_dict(&req.headers);
+            let py_headers = py_str_dict(&headers_map);
             if py_params.is_none() || py_headers.is_none() {
                 // response_tx not inserted → dropped → oneshot Err on Tokio side
                 ffi::Py_INCREF(ffi::Py_None());
@@ -211,9 +214,10 @@ unsafe fn pyronova_recv_inner(args: *mut ffi::PyObject) -> *mut ffi::PyObject {
                 req.body.as_ptr() as *const _,
                 req.body.len() as isize,
             );
+            let ip_str = req.client_ip.to_string();
             let ip_obj = ffi::PyUnicode_FromStringAndSize(
-                req.client_ip.as_ptr() as *const _,
-                req.client_ip.len() as isize,
+                ip_str.as_ptr() as *const _,
+                ip_str.len() as isize,
             );
 
             let raw_items = [
@@ -764,13 +768,18 @@ pub(crate) struct SubInterpResponse {
 
 pub(crate) struct WorkRequest {
     pub handler_idx: usize,
-    pub method: String,
-    pub path: String,
+    /// Arc<str>: zero-cost clone of the value already Arc'd in handle_request_subinterp.
+    pub method: Arc<str>,
+    /// Arc<str>: same — avoids String alloc + memcpy on the Tokio thread.
+    pub path: Arc<str>,
     pub params: Vec<(String, String)>,
     pub query: String,
     pub body: bytes::Bytes,
-    pub headers: HashMap<String, String>,
-    pub client_ip: String,
+    /// Raw HeaderMap: deferred extract_headers() to the worker thread so
+    /// the O(n_headers) HashMap build doesn't block the Tokio executor.
+    pub headers: hyper::HeaderMap,
+    /// IpAddr: deferred to_string() to the worker thread.
+    pub client_ip: std::net::IpAddr,
     pub response_tx: tokio::sync::oneshot::Sender<Result<SubInterpResponse, String>>,
 }
 
@@ -2284,6 +2293,10 @@ fn worker_thread_loop(
 
         // Catch panics to prevent worker thread death.
         // SubInterpGilGuard ensures GIL is released even if call_handler panics.
+        // Deferred conversions: moved off Tokio thread.
+        let headers_map = crate::types::extract_headers(&req.headers);
+        let ip_str = req.client_ip.to_string();
+
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
             let _guard = SubInterpGilGuard::acquire(tstate_cell.get(), &tstate_cell);
 
@@ -2297,8 +2310,8 @@ fn worker_thread_loop(
                 &req.params,
                 &req.query,
                 &req.body,
-                &req.headers,
-                &req.client_ip,
+                &headers_map,
+                &ip_str,
             )
             // _guard drops here → PyEval_SaveThread() → tstate_cell updated
         }));

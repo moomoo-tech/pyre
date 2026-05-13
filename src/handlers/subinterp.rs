@@ -22,7 +22,7 @@ use crate::response::{
 };
 use crate::router::FrozenRoutes;
 use crate::static_fs::try_static_file;
-use crate::types::{extract_headers, PyronovaRequest};
+use crate::types::PyronovaRequest;
 
 use super::{
     apply_cors, build_fast_response, build_stream_response, call_handler_with_hooks, full_body,
@@ -293,21 +293,20 @@ pub(crate) async fn handle_request_subinterp(
     }
 
     // ── Default: sub-interpreter (fast path) ──
-    // Sub-interp FFI bridge needs pre-converted headers.
-    let headers = extract_headers(&raw_headers);
+    // extract_headers / to_string deferred to the worker thread — see WorkRequest fields.
     let method_log = Arc::clone(&method);
     let path_log = Arc::clone(&path);
     let (response_tx, response_rx) = tokio::sync::oneshot::channel();
 
     if let Err(e) = pool.submit(interp::WorkRequest {
         handler_idx,
-        method: method.to_string(),
-        path: path.to_string(),
+        method: Arc::clone(&method),
+        path: Arc::clone(&path),
         params,
         query,
         body: body_bytes,
-        headers,
-        client_ip: client_ip_addr.to_string(),
+        headers: raw_headers,
+        client_ip: client_ip_addr,
         response_tx,
     }) {
         crate::monitor::DROPPED_REQUESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

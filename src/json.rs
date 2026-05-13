@@ -2,8 +2,8 @@ use bytes::Bytes;
 use parking_lot::Mutex;
 use pyo3::prelude::*;
 use pyo3::types::{
-    PyBool, PyByteArray, PyBytes, PyDict, PyFloat, PyFrozenSet, PyInt, PyList, PyMapping, PyNone,
-    PySet, PyString, PyTuple,
+    PyBool, PyByteArray, PyBytes, PyDict, PyFloat, PyInt, PyList, PyMapping, PyNone, PyString,
+    PyTuple,
 };
 use std::collections::HashSet;
 use std::fmt;
