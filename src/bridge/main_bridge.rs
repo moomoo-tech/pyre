@@ -214,6 +214,7 @@ fn dispatch_one(routes: &FrozenRoutes, item: GilWorkItem) {
         headers_source: LazyHeaders::Converted(headers),
         headers_cache: OnceLock::new(),
         query_cache: OnceLock::new(),
+        query_all_cache: OnceLock::new(),
         client_ip_addr: client_ip,
         body_bytes: body,
         body_stream_rx,

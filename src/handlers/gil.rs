@@ -156,6 +156,7 @@ pub(crate) async fn handle_request(
         body_bytes,
         body_stream_rx,
         query_cache: std::sync::OnceLock::new(),
+        query_all_cache: std::sync::OnceLock::new(),
     };
 
     // spawn_blocking: prevent GIL acquisition from starving Tokio workers

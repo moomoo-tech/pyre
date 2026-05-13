@@ -53,6 +53,8 @@ pub(crate) struct PyronovaRequest {
     /// headers_cache pattern: parse once, return ref on subsequent
     /// accesses.
     pub(crate) query_cache: OnceLock<HashMap<String, String>>,
+    /// Cached multi-value parse — same rationale as `query_cache`.
+    pub(crate) query_all_cache: OnceLock<HashMap<String, Vec<String>>>,
 }
 
 /// Manual Clone: OnceLock doesn't impl Clone, so we reset the cache on clone.
@@ -75,6 +77,7 @@ impl Clone for PyronovaRequest {
             body_bytes: self.body_bytes.clone(),
             body_stream_rx: Arc::clone(&self.body_stream_rx),
             query_cache: OnceLock::new(),
+            query_all_cache: OnceLock::new(),
         }
     }
 }
@@ -213,6 +216,21 @@ impl PyronovaRequest {
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("pythonize error: {e}")))
     }
 
+    /// Look up a single query parameter by name without cloning the full map.
+    ///
+    /// Uses the already-computed cache when available. On a cold cache this
+    /// scans the raw query string once — cheaper than building a HashMap for
+    /// a single lookup. First-wins on duplicate keys (same policy as
+    /// `query_params`).
+    fn query_param(&self, key: &str) -> Option<String> {
+        if let Some(cache) = self.query_cache.get() {
+            return cache.get(key).cloned();
+        }
+        form_urlencoded::parse(self.query.as_bytes())
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.into_owned())
+    }
+
     #[getter]
     fn query_params(&self) -> HashMap<String, String> {
         // Parse once, reuse on subsequent accesses. On duplicate keys
@@ -241,11 +259,15 @@ impl PyronovaRequest {
     /// Full query-parameter access preserving duplicate keys.
     /// Returns Dict[str, List[str]] in insertion order.
     fn query_params_all(&self) -> HashMap<String, Vec<String>> {
-        let mut map: HashMap<String, Vec<String>> = HashMap::new();
-        for (k, v) in form_urlencoded::parse(self.query.as_bytes()) {
-            map.entry(k.into_owned()).or_default().push(v.into_owned());
-        }
-        map
+        self.query_all_cache
+            .get_or_init(|| {
+                let mut map: HashMap<String, Vec<String>> = HashMap::new();
+                for (k, v) in form_urlencoded::parse(self.query.as_bytes()) {
+                    map.entry(k.into_owned()).or_default().push(v.into_owned());
+                }
+                map
+            })
+            .clone()
     }
 }
 
@@ -386,6 +408,7 @@ mod tests {
             body_bytes: Bytes::new(),
             body_stream_rx: Arc::new(std::sync::Mutex::new(None)),
             query_cache: OnceLock::new(),
+            query_all_cache: OnceLock::new(),
         };
         let qp = req.query_params();
         assert_eq!(qp["q"], "hello world");
@@ -406,6 +429,7 @@ mod tests {
             body_bytes: Bytes::new(),
             body_stream_rx: Arc::new(std::sync::Mutex::new(None)),
             query_cache: OnceLock::new(),
+            query_all_cache: OnceLock::new(),
         };
         assert!(req.query_params().is_empty());
     }
@@ -423,6 +447,7 @@ mod tests {
             body_bytes: Bytes::new(),
             body_stream_rx: Arc::new(std::sync::Mutex::new(None)),
             query_cache: OnceLock::new(),
+            query_all_cache: OnceLock::new(),
         };
         assert_eq!(req.query_params()["name"], "中文");
     }

@@ -239,6 +239,7 @@ pub(crate) async fn handle_request_subinterp(
             body_bytes: body_bytes_for_req,
             body_stream_rx,
             query_cache: std::sync::OnceLock::new(),
+            query_all_cache: std::sync::OnceLock::new(),
         };
 
         let routes_ref = Arc::clone(&routes);
