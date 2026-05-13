@@ -316,8 +316,8 @@ pub(crate) async fn handle_request_tpc_inline(
                     "text/plain; charset=utf-8".to_string()
                 }
             });
-            crate::compression::maybe_compress_subinterp(
-                &mut resp.body,
+            let body_bytes = crate::compression::maybe_compress_subinterp(
+                std::mem::take(&mut resp.body),
                 &ct_owned,
                 &mut resp.headers,
                 &accept_encoding,
@@ -331,7 +331,7 @@ pub(crate) async fn handle_request_tpc_inline(
             for (k, v) in &resp.headers {
                 builder = builder.header(k.as_str(), v.as_str());
             }
-            match builder.body(Full::new(Bytes::from(resp.body))) {
+            match builder.body(Full::new(body_bytes)) {
                 Ok(r) => full_body(r),
                 Err(e) => {
                     tracing::error!(

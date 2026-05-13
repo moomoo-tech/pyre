@@ -14,8 +14,39 @@ use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use bytes::Bytes;
+use parking_lot::Mutex;
 
 use crate::types::ResponseData;
+
+// ---------------------------------------------------------------------------
+// Per-request compression output buffer pool
+// ---------------------------------------------------------------------------
+
+// Same bounded-pool pattern as the JSON serializer's BUFFER_POOL.
+// Buffers up to 4 MiB are recycled; larger ones are dropped to bound
+// memory. 32 slots comfortably covers a 16-worker deployment.
+static COMPRESS_POOL: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
+
+struct PooledCompressBuf(Vec<u8>);
+
+impl AsRef<[u8]> for PooledCompressBuf {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl Drop for PooledCompressBuf {
+    fn drop(&mut self) {
+        let mut v = std::mem::take(&mut self.0);
+        if v.capacity() <= 4 << 20 {
+            v.clear();
+            let mut pool = COMPRESS_POOL.lock();
+            if pool.len() < 32 {
+                pool.push(v);
+            }
+        }
+    }
+}
 
 /// Default minimum body size to compress. Small payloads cost more CPU to
 /// compress + send headers than the saved bytes.
@@ -153,24 +184,21 @@ fn is_compressible(content_type: &str) -> bool {
     )
 }
 
-fn gzip_compress(data: &[u8], level: u32) -> Option<Bytes> {
-    let mut enc = flate2::write::GzEncoder::new(
-        Vec::with_capacity(data.len() / 2),
-        flate2::Compression::new(level),
-    );
-    enc.write_all(data).ok()?;
-    enc.finish().ok().map(Bytes::from)
+fn gzip_compress(data: &[u8], level: u32, out: &mut Vec<u8>) -> bool {
+    let mut enc = flate2::write::GzEncoder::new(out, flate2::Compression::new(level));
+    if enc.write_all(data).is_err() {
+        return false;
+    }
+    enc.finish().is_ok()
 }
 
-fn brotli_compress(data: &[u8], quality: u32) -> Option<Bytes> {
-    let mut out = Vec::with_capacity(data.len() / 2);
+fn brotli_compress(data: &[u8], quality: u32, out: &mut Vec<u8>) -> bool {
     let params = brotli::enc::BrotliEncoderParams {
         quality: quality as i32,
         ..Default::default()
     };
     let mut reader = data;
-    brotli::BrotliCompress(&mut reader, &mut out, &params).ok()?;
-    Some(Bytes::from(out))
+    brotli::BrotliCompress(&mut reader, out, &params).is_ok()
 }
 
 /// Core compression primitive. Returns Some((compressed_body, encoding))
@@ -200,18 +228,26 @@ fn try_compress(
     let mask = ALGO_MASK.load(Ordering::Relaxed);
     let algo = negotiate(accept_encoding, mask)?;
 
-    let compressed = match algo {
-        Algo::Gzip => gzip_compress(body, GZIP_LEVEL.load(Ordering::Relaxed) as u32)?,
-        Algo::Brotli => brotli_compress(body, BROTLI_QUALITY.load(Ordering::Relaxed) as u32)?,
+    let mut buf = COMPRESS_POOL
+        .lock()
+        .pop()
+        .unwrap_or_else(|| Vec::with_capacity(body.len() / 2 + 64));
+    buf.clear();
+
+    let ok = match algo {
+        Algo::Gzip => gzip_compress(body, GZIP_LEVEL.load(Ordering::Relaxed) as u32, &mut buf),
+        Algo::Brotli => {
+            brotli_compress(body, BROTLI_QUALITY.load(Ordering::Relaxed) as u32, &mut buf)
+        }
     };
 
-    // Only swap in if the compressed version is actually smaller; otherwise
-    // we'd be adding headers and CPU for no bandwidth win.
-    if compressed.len() >= body.len() {
+    // Return buf to pool if compression failed or didn't shrink the body.
+    if !ok || buf.len() >= body.len() {
+        drop(PooledCompressBuf(buf));
         return None;
     }
 
-    Some((compressed, algo.header_value()))
+    Some((Bytes::from_owner(PooledCompressBuf(buf)), algo.header_value()))
 }
 
 /// Merge `Accept-Encoding` into an existing `Vary` header (case-insensitive)
@@ -298,26 +334,30 @@ pub(crate) fn maybe_compress(data: &mut ResponseData, accept_encoding: &str) {
     set_compression_headers(&mut data.headers, encoding);
 }
 
-/// Variant used by the sub-interpreter fast path, which builds the response
-/// from a `Vec<u8>` body + `Option<String>` content-type instead of a
-/// `ResponseData`.
+/// Variant used by the sub-interpreter fast path.
+///
+/// Takes `body` by value to avoid the `Bytes → Vec` copy that the old
+/// `&mut Vec<u8>` + `compressed.to_vec()` pattern required. Returns
+/// `Bytes` directly: the compressed pool buffer or (if no compression)
+/// the original `Vec<u8>` wrapped in `Bytes::from` (O(1) ownership
+/// transfer, no copy).
 pub(crate) fn maybe_compress_subinterp(
-    body: &mut Vec<u8>,
+    body: Vec<u8>,
     content_type: &str,
     headers: &mut Vec<(String, String)>,
     accept_encoding: &str,
-) {
+) -> Bytes {
     if headers
         .iter()
         .any(|(k, _)| k.eq_ignore_ascii_case("content-encoding"))
     {
-        return;
+        return Bytes::from(body);
     }
-    let Some((compressed, encoding)) = try_compress(body, content_type, accept_encoding) else {
-        return;
+    let Some((compressed, encoding)) = try_compress(&body, content_type, accept_encoding) else {
+        return Bytes::from(body);
     };
-    *body = compressed.to_vec();
     set_compression_headers_vec(headers, encoding);
+    compressed
 }
 
 #[cfg(test)]
