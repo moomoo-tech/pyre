@@ -288,31 +288,19 @@ impl JsonContext {
         }
 
         if let Ok(i) = obj.cast::<PyInt>() {
-            // i64 covers the common case (signed 64-bit).
+            // i64 is the safe integer range for JSON. Values outside i64
+            // become JSON strings to preserve precision — JavaScript and most
+            // JSON parsers lose precision on integers beyond ±2^53, so a
+            // quoted decimal string is the only lossless representation.
             if let Ok(v) = i.extract::<i64>() {
                 let mut buf = itoa::Buffer::new();
                 self.out.extend_from_slice(buf.format(v).as_bytes());
                 return Ok(());
             }
-            // u64 covers positive values up to 2^64−1.
-            if let Ok(v) = i.extract::<u64>() {
-                let mut buf = itoa::Buffer::new();
-                self.out.extend_from_slice(buf.format(v).as_bytes());
-                return Ok(());
-            }
-            // For integers beyond u64::MAX we convert to f64. Precision is
-            // lost above 2^53, but the value stays a JSON Number rather than
-            // being silently coerced to a String (wrong type for downstream).
-            let fv = i.extract::<f64>().unwrap_or(f64::MAX);
-            if fv.is_finite() {
-                let mut buf = ryu::Buffer::new();
-                self.out.extend_from_slice(buf.format_finite(fv).as_bytes());
-                return Ok(());
-            }
-            return Err(self.err(ErrorReason::UnsupportedType(format!(
-                "int value not representable as JSON number: {}",
-                i.to_string()
-            ))));
+            let py_str = i.str().map_err(|e| self.err(e.into()))?;
+            let s = py_str.to_str().map_err(|e| self.err(e.into()))?;
+            write_str_escaped(&mut self.out, s);
+            return Ok(());
         }
 
         if let Ok(f) = obj.cast::<PyFloat>() {
@@ -333,14 +321,6 @@ impl JsonContext {
 
         // Reject bytes/bytearray — they implement Sequence but must not become int arrays
         if obj.cast::<PyBytes>().is_ok() || obj.cast::<PyByteArray>().is_ok() {
-            return Err(self.err(ErrorReason::UnsupportedType(type_name_of(obj))));
-        }
-
-        // Reject set/frozenset explicitly. Without this guard the duck-type
-        // iterable fallback below would silently produce a JSON array with
-        // non-deterministic ordering. stdlib json.dumps raises TypeError for
-        // sets; surface the bug to the developer instead of hiding it.
-        if obj.cast::<PySet>().is_ok() || obj.cast::<PyFrozenSet>().is_ok() {
             return Err(self.err(ErrorReason::UnsupportedType(type_name_of(obj))));
         }
 
