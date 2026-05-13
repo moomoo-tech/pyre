@@ -120,40 +120,10 @@ impl PyronovaRequest {
         self.params.iter().cloned().collect()
     }
 
-    /// Look up a single path parameter by name.
-    ///
-    /// Avoids the Vec→HashMap conversion that `.params` triggers. Path
-    /// params are typically 0-3 entries, so a linear scan is O(1) in practice
-    /// and cheaper than building a HashMap for a single lookup.
-    fn param(&self, key: &str) -> Option<String> {
-        self.params
-            .iter()
-            .find(|(k, _)| k == key)
-            .map(|(_, v)| v.clone())
-    }
-
     /// Lazy headers: converts raw HeaderMap → dict only on first access.
     #[getter]
     fn headers(&self) -> HashMap<String, String> {
         self.resolved_headers().clone()
-    }
-
-    /// Look up a single header by name without converting the full header map.
-    ///
-    /// Prefers the already-computed cache (populated by a prior `.headers`
-    /// access) so both paths stay consistent. When the cache is cold this
-    /// costs one `HeaderMap::get` call instead of allocating N strings.
-    fn header(&self, key: &str) -> Option<String> {
-        if let Some(cache) = self.headers_cache.get() {
-            return cache.get(key).cloned();
-        }
-        match &self.headers_source {
-            LazyHeaders::Raw(hm) => hm
-                .get(key)
-                .and_then(|v| v.to_str().ok())
-                .map(String::from),
-            LazyHeaders::Converted(m) => m.get(key).cloned(),
-        }
     }
 
     /// Lazy: heap-allocates the IP string only when Python reads `req.client_ip`.
@@ -205,11 +175,8 @@ impl PyronovaRequest {
         Ok(pyo3::types::PyString::new(py, s))
     }
 
-    /// Parse JSON in Rust → convert to Python objects (pythonize).
-    /// Uses sonic-rs (SIMD-accelerated) for the parse step; output is a
-    /// serde_json::Value so pythonize can convert it to Python objects.
     fn json<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::PyAny>> {
-        let parsed: serde_json::Value = sonic_rs::from_slice(&self.body_bytes).map_err(|e| {
+        let parsed: serde_json::Value = serde_json::from_slice(&self.body_bytes).map_err(|e| {
             pyo3::exceptions::PyValueError::new_err(format!("JSON parse error: {e}"))
         })?;
         pythonize::pythonize(py, &parsed)

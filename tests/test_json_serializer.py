@@ -135,51 +135,41 @@ def test_tuple_as_array(client):
     assert r.json() == {"t": [1, "two", True]}
 
 
-def test_big_int_u64_becomes_string(client):
-    """u64::MAX is beyond i64::MAX — serialized as a JSON string to preserve precision."""
+def test_big_int_u64_is_number(client):
+    """u64::MAX fits in orjson's unsigned 64-bit range — serialized as a JSON number."""
     r = client.get("/big-int-u64")
     assert r.status_code == 200
-    data = r.json()
-    assert isinstance(data["v"], str)
-    assert data["v"] == str(18446744073709551615)
+    assert r.json()["v"] == 18446744073709551615
 
 
-def test_big_int_huge_becomes_string(client):
-    """Integers beyond u64::MAX serialized as JSON string to avoid precision loss."""
+def test_big_int_huge_raises_error(client):
+    """Integers beyond u64::MAX — orjson raises TypeError → 500."""
     r = client.get("/big-int-huge")
-    assert r.status_code == 200
-    data = r.json()
-    assert isinstance(data["v"], str)
-    assert data["v"] == str(2**65)
+    assert r.status_code == 500
 
 
-def test_float_key_whole_number(client):
-    """Whole-number float dict key must serialize as '1.0', not '1'."""
+def test_float_key_raises_error(client):
+    """Float dict keys are not supported by orjson → 500."""
     r = client.get("/float-key-whole")
-    assert r.status_code == 200
-    assert '"1.0"' in r.text
+    assert r.status_code == 500
 
 
-def test_float_key_fractional(client):
+def test_float_key_frac_raises_error(client):
+    """Float dict keys are not supported by orjson → 500."""
     r = client.get("/float-key-frac")
-    assert r.status_code == 200
-    assert '"1.5"' in r.text
+    assert r.status_code == 500
 
 
-def test_bool_dict_key(client):
-    """Python True/False keys must become JSON 'true'/'false'."""
+def test_bool_dict_key_raises_error(client):
+    """Bool dict keys are not supported by orjson → 500."""
     r = client.get("/bool-key")
-    assert r.status_code == 200
-    assert '"true"' in r.text
-    assert '"false"' in r.text
-    assert '"True"' not in r.text
-    assert '"False"' not in r.text
+    assert r.status_code == 500
 
 
-def test_none_dict_key(client):
+def test_none_dict_key_raises_error(client):
+    """None dict keys are not supported by orjson → 500."""
     r = client.get("/none-key")
-    assert r.status_code == 200
-    assert '"null"' in r.text
+    assert r.status_code == 500
 
 
 def test_ordered_dict_via_mapping(client):
@@ -207,14 +197,18 @@ def test_bytes_raises_type_error(client):
     assert r.status_code == 500
 
 
-def test_nan_raises_type_error(client):
+def test_nan_becomes_null(client):
+    """orjson serializes NaN as null (JSON has no NaN)."""
     r = client.get("/nan")
-    assert r.status_code == 500
+    assert r.status_code == 200
+    assert r.json()["v"] is None
 
 
-def test_infinity_raises_type_error(client):
+def test_infinity_becomes_null(client):
+    """orjson serializes inf as null (JSON has no infinity)."""
     r = client.get("/infinity")
-    assert r.status_code == 500
+    assert r.status_code == 200
+    assert r.json()["v"] is None
 
 
 def test_nested_set_as_array(client):

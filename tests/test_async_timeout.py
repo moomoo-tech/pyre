@@ -34,17 +34,30 @@ def start_server(script_path, port):
         preexec_fn=os.setsid,
         env=env,
     )
+    # Phase 1: wait for sync endpoint (confirms Rust accept loop is up).
     for _ in range(50):
         time.sleep(0.1)
         try:
             urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=1)
-            return proc
+            break
         except Exception:
             if proc.poll() is not None:
                 out = proc.stdout.read().decode(errors="replace")
                 raise RuntimeError(f"Server exited early:\n{out}")
-    out = proc.stdout.read().decode(errors="replace")
-    raise RuntimeError(f"Server failed to start:\n{out}")
+    else:
+        out = proc.stdout.read().decode(errors="replace")
+        raise RuntimeError(f"Server failed to start:\n{out}")
+    # Phase 2: wait for async workers (_async_engine.py init: asyncio event
+    # loop + sub-interpreter bootstrap). Workers start lazily; on this hardware
+    # initialization can take 30+ seconds. One patient request is better than
+    # many short-timeout requests that flood the queue without waiting.
+    try:
+        urllib.request.urlopen(f"http://127.0.0.1:{port}/fast-async", timeout=60)
+    except urllib.error.HTTPError:
+        pass  # non-200 still means the worker responded
+    except Exception:
+        pass  # timed out — test will handle it
+    return proc
 
 
 def stop_server(proc, port):

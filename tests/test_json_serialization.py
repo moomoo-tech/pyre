@@ -343,20 +343,19 @@ class TestPrimitives:
     def test_int_min64(self, client):
         assert client.get("/int/min64").json()["v"] == -(2**63)
 
-    def test_bigint_becomes_string(self, client):
+    def test_bigint_is_number(self, client):
+        """2**63 fits in orjson's u64 range — serialized as a JSON integer."""
         v = client.get("/int/bigint").json()["v"]
-        assert isinstance(v, str)
-        assert v == str(2**63)
+        assert isinstance(v, int)
+        assert v == 2**63
 
-    def test_bigint_neg_becomes_string(self, client):
-        v = client.get("/int/bigint_neg").json()["v"]
-        assert isinstance(v, str)
-        assert v == str(-(2**63) - 1)
+    def test_bigint_neg_raises_error(self, client):
+        """-(2**63)-1 is below i64::MIN — orjson raises TypeError → 500."""
+        assert client.get("/int/bigint_neg").status_code == 500
 
-    def test_huge_int(self, client):
-        v = client.get("/int/huge").json()["v"]
-        assert isinstance(v, str)
-        assert v == str(10**100)
+    def test_huge_int_raises_error(self, client):
+        """10**100 exceeds u64::MAX — orjson raises TypeError → 500."""
+        assert client.get("/int/huge").status_code == 500
 
 
 class TestFloats:
@@ -369,18 +368,27 @@ class TestFloats:
     def test_negative(self, client):
         assert abs(client.get("/float/neg").json()["v"] - (-2.718)) < 1e-10
 
-    def test_nan_rejected(self, client):
-        assert client.get("/float/nan").status_code == 500
+    def test_nan_becomes_null(self, client):
+        """orjson serializes NaN as null (JSON has no NaN)."""
+        r = client.get("/float/nan")
+        assert r.status_code == 200
+        assert r.json()["v"] is None
 
-    def test_inf_rejected(self, client):
-        assert client.get("/float/inf").status_code == 500
+    def test_inf_becomes_null(self, client):
+        """orjson serializes inf as null (JSON has no infinity)."""
+        r = client.get("/float/inf")
+        assert r.status_code == 200
+        assert r.json()["v"] is None
 
-    def test_neg_inf_rejected(self, client):
-        assert client.get("/float/neg_inf").status_code == 500
+    def test_neg_inf_becomes_null(self, client):
+        r = client.get("/float/neg_inf")
+        assert r.status_code == 200
+        assert r.json()["v"] is None
 
-    def test_nan_error_has_path(self, client):
-        body = client.get("/float/nan").text
-        assert "NaN" in body or "Infinity" in body
+    def test_nan_no_path(self, client):
+        """NaN is now serialized as null — no error, no path."""
+        r = client.get("/float/nan")
+        assert r.status_code == 200
 
 
 class TestStrings:
@@ -469,29 +477,21 @@ class TestCollections:
 
 
 class TestDictKeyCoercion:
-    def test_int_keys_coerced(self, client):
-        resp = client.get("/dict/int_keys")
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["1"] == "one"
-        assert data["2"] == "two"
+    def test_int_keys_raise_error(self, client):
+        """orjson requires string dict keys → 500 for int keys."""
+        assert client.get("/dict/int_keys").status_code == 500
 
-    def test_bool_keys_coerced(self, client):
-        resp = client.get("/dict/bool_keys")
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["true"] == "yes"
-        assert data["false"] == "no"
+    def test_bool_keys_raise_error(self, client):
+        """orjson requires string dict keys → 500 for bool keys."""
+        assert client.get("/dict/bool_keys").status_code == 500
 
-    def test_none_key_coerced(self, client):
-        resp = client.get("/dict/none_key")
-        assert resp.status_code == 200
-        assert resp.json()["null"] == "nothing"
+    def test_none_key_raises_error(self, client):
+        """orjson requires string dict keys → 500 for None key."""
+        assert client.get("/dict/none_key").status_code == 500
 
-    def test_float_key_coerced(self, client):
-        resp = client.get("/dict/float_key")
-        assert resp.status_code == 200
-        assert "3.14" in resp.json()
+    def test_float_key_raises_error(self, client):
+        """orjson requires string dict keys → 500 for float key."""
+        assert client.get("/dict/float_key").status_code == 500
 
     def test_unsupported_key_rejected(self, client):
         resp = client.get("/dict/unsupported_key")
@@ -514,8 +514,9 @@ class TestCircularReference:
         assert client.get("/circular/dict").status_code == 500
 
     def test_circular_error_message(self, client):
+        """orjson raises 'Recursion limit reached' for circular refs."""
         body = client.get("/circular/list").text
-        assert "ircular" in body
+        assert "ecursion" in body or "ircular" in body
 
 
 class TestRepeatedReference:
@@ -562,30 +563,27 @@ class TestDepthLimiting:
         assert client.get("/deep/exceed").status_code == 500
 
     def test_depth_error_message(self, client):
+        """orjson raises 'Recursion limit reached' for deeply nested objects."""
         body = client.get("/deep/exceed").text
-        assert "depth" in body.lower()
+        assert "ecursion" in body or "depth" in body.lower() or "limit" in body.lower()
 
 
 class TestPathTracking:
-    def test_nested_nan_includes_path(self, client):
-        """Error should include precise path $.users[0].score."""
-        body = client.get("/path/nested_nan").text
-        assert ".users" in body
-        assert "[0]" in body
-        assert ".score" in body
+    def test_nested_nan_becomes_null(self, client):
+        """orjson serializes nested NaN as null — no error, no path."""
+        r = client.get("/path/nested_nan")
+        assert r.status_code == 200
+        assert r.json()["users"][0]["score"] is None
 
-    def test_nested_unsupported_includes_path(self, client):
-        """Error should include path $.data.items[2] for complex at index 2."""
-        body = client.get("/path/nested_unsupported").text
-        assert ".data" in body
-        assert ".items" in body
-        assert "[2]" in body
+    def test_nested_unsupported_raises_error(self, client):
+        """Nested complex raises TypeError → 500 (no path in orjson errors)."""
+        assert client.get("/path/nested_unsupported").status_code == 500
 
-    def test_deep_circular_includes_path(self, client):
-        """Circular ref error should include nested path."""
-        body = client.get("/path/deep_circular").text
-        assert "ircular" in body
-        assert ".a" in body
+    def test_deep_circular_raises_error(self, client):
+        """Circular ref raises Recursion limit reached → 500."""
+        r = client.get("/path/deep_circular")
+        assert r.status_code == 500
+        assert "ecursion" in r.text or "ircular" in r.text
 
 
 class TestResilience:
@@ -628,17 +626,13 @@ class TestDuckTyping:
         assert data["second"] == 2
         assert data["third"] == 3
 
-    def test_deque(self, client):
-        """deque should serialize as JSON array (duck-typed via PySequence)."""
-        resp = client.get("/duck/deque")
-        assert resp.status_code == 200
-        assert resp.json()["v"] == [1, 2, 3, 4, 5]
+    def test_deque_raises_error(self, client):
+        """orjson does not support deque natively → 500."""
+        assert client.get("/duck/deque").status_code == 500
 
-    def test_deque_nested(self, client):
-        """Nested deques and tuples should all become JSON arrays."""
-        resp = client.get("/duck/deque_nested")
-        assert resp.status_code == 200
-        assert resp.json()["v"] == [[1, 2], [3, 4]]
+    def test_deque_nested_raises_error(self, client):
+        """orjson does not support deque natively → 500."""
+        assert client.get("/duck/deque_nested").status_code == 500
 
     def test_defaultdict_raw(self, client):
         """Raw defaultdict (not converted to dict) should serialize via PyMapping."""

@@ -8,7 +8,6 @@ mod compression;
 mod db;
 mod grpc;
 mod handlers;
-mod json;
 #[cfg(feature = "leak_detect")]
 mod leak_detect;
 mod logging;

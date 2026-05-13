@@ -15,13 +15,20 @@ import threading
 
 _log = logging.getLogger("pyronova.async")
 
-# Prefer orjson for fast JSON serialization (same strategy as Rust side)
 try:
     import orjson as _orjson
+
+    def _orjson_default(obj):
+        if isinstance(obj, (set, frozenset)):
+            return list(obj)
+        raise TypeError(f'Object of type {type(obj).__name__} is not JSON serializable')
+
     def _json_dumps_bytes(obj):
-        return _orjson.dumps(obj)
+        return _orjson.dumps(obj, default=_orjson_default)
+
 except ImportError:
     import json as _json_mod
+
     def _json_dumps_bytes(obj):
         return _json_mod.dumps(obj).encode("utf-8")
 
