@@ -236,9 +236,11 @@ fn try_compress(
 
     let ok = match algo {
         Algo::Gzip => gzip_compress(body, GZIP_LEVEL.load(Ordering::Relaxed) as u32, &mut buf),
-        Algo::Brotli => {
-            brotli_compress(body, BROTLI_QUALITY.load(Ordering::Relaxed) as u32, &mut buf)
-        }
+        Algo::Brotli => brotli_compress(
+            body,
+            BROTLI_QUALITY.load(Ordering::Relaxed) as u32,
+            &mut buf,
+        ),
     };
 
     // Return buf to pool if compression failed or didn't shrink the body.
@@ -247,7 +249,10 @@ fn try_compress(
         return None;
     }
 
-    Some((Bytes::from_owner(PooledCompressBuf(buf)), algo.header_value()))
+    Some((
+        Bytes::from_owner(PooledCompressBuf(buf)),
+        algo.header_value(),
+    ))
 }
 
 /// Merge `Accept-Encoding` into an existing `Vary` header (case-insensitive)
